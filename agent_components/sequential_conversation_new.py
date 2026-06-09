@@ -1,7 +1,8 @@
 import json
 import os
 from datetime import datetime
-from typing import Optional, TypedDict
+from pydantic import BaseModel, Field
+from typing import Optional, TypedDict, List, Dict, Any
 
 import httpx
 from dotenv import load_dotenv, find_dotenv
@@ -24,21 +25,28 @@ class State(TypedDict):
     original_input: str  # 专门用来存第一次的输入
     context: str
     chat_history: list
+
     response_obj: "ProperResponse"
 
-    api_definition: Optional[ApiDefinition]
+    api_definition_list: Optional[List[ApiDefinition]]
     test_case: Optional[TestCase]
     test_data: Optional[TestData]
     assertion: Optional[AssertionRule]
-    execution_result: Optional[ExecutionResult]
+    current_step_index: int  # 当前执行索引（游标）
+    context_variables: Dict[str, Any]  # 全局记忆库：{ "login": {"token": "xyz"}, "order": {"id": 123} }
+    execution_result: Optional[ExecutionResult]  # 当前步骤的执行结果
 
+
+class ApiDefinitionList(BaseModel):
+    """包装类：用于让 LLM 输出接口列表"""
+    apis: List[ApiDefinition] = Field(..., description="提取到的所有接口定义列表")
 
 class ChatTestAgentGraph:
     def __init__(self, db_path: Optional[str] = None):
         self.llm = ChatOpenAI(
-            model="qwen3:8b",
+            model=os.environ.get("LLM_MODEL"),
             base_url=os.environ.get("LANGCHAIN_URL"),
-            api_key="anything",
+            api_key=os.environ.get("LLM_API_KEY"),
             temperature=0.7,
             tiktoken_model_name="gpt-3.5-turbo"
         )
@@ -108,7 +116,7 @@ class ChatTestAgentGraph:
         save_data = {
             "timestamp": datetime.now().isoformat(),
             "user_input": state.get("user_input"),
-            "api_definition": serialize(state.get("api_definition")),
+            "api_definition_list": serialize(state.get("api_definition_list")),
             "test_case": serialize(state.get("test_case")),
             "test_data": serialize(state.get("test_data")),
             "assertion": serialize(state.get("assertion")),
@@ -139,19 +147,38 @@ class ChatTestAgentGraph:
         print("\n正在分析文档，提取接口定义...")
 
         prompt = self.prompt_factory.parse_api_node()
-        chain = prompt | self.llm.with_structured_output(ApiDefinition)
-        result = chain.invoke({"content": state["context"]})
+        chain = prompt | self.llm.with_structured_output(ApiDefinitionList, strict=False)
 
-        print(f"   🛠️ 提取结果: {result.name} -> {result.url}")
-        return {"api_definition": result}
+        result = chain.invoke({"content": state["context"],
+                               "user_context": state["original_input"]
+                               })
+
+        api_list = result.apis
+
+        if isinstance(api_list, list):
+            print(f"   🛠️ 成功提取到 {len(api_list)} 个接口:")
+            for api in api_list:
+                print(f"      - {api.name}: {api.url}")
+        else:
+            # 理论上不会走到这里，除非 LLM 没遵守指令
+            print(f"   ⚠️ 提取结果异常: {result}")
+            api_list = []
+
+        return {"api_definition_list": api_list}
 
     def _generate_casse_node(self, state: State):
         """生成测试用例"""
         print("\n📝 正在设计测试用例...")
 
         prompt = self.prompt_factory.generate_case_node()
-        chain = prompt | self.llm.with_structured_output(TestCase)
-        result = chain.invoke({"api_info": state["api_definition"].json()})
+        chain = prompt | self.llm.with_structured_output(TestCase, strict=True)
+        all_apis_dict = [api.model_dump() for api in state["api_definition_list"]]
+        all_apis_json = json.dumps(all_apis_dict, indent=2, ensure_ascii=False)
+
+        result = chain.invoke({
+            "all_apis_info": all_apis_json,
+            "user_context": state["original_input"]
+        })
 
         print(f"   🧪 用例: {result.title}")
         return {"test_case": result}
@@ -161,120 +188,121 @@ class ChatTestAgentGraph:
         print("\n🔢 正在构造测试数据...")
 
         prompt = self.prompt_factory.generate_data_node()
-        chain = prompt | self.llm.with_structured_output(TestData)
-        result = chain.invoke({"params": state["api_definition"].parameters,
-                               "user_requirement": state["original_input"]
-                               })
+        chain = prompt | self.llm.with_structured_output(TestData, strict=True)
 
-        print(f"   📦 数据: {result.payload}")
+        all_apis_dict = [api.model_dump() for api in state["api_definition_list"]]
+        all_apis_json = json.dumps(all_apis_dict, indent=2, ensure_ascii=False)
+
+        case_obj = state.get("test_case")
+
+        result = chain.invoke({
+            "all_apis_info": all_apis_json,
+            "user_context": state["original_input"],
+            "test_case_logic": case_obj.pre_condition if case_obj else "无特定逻辑"
+        })
+
+        # 打印预览
+        print(f"   📦 共生成 {len(result.steps)} 个步骤的数据:")
+        for i, step in enumerate(result.steps):
+            print(f"      步骤 {i + 1}: {step.method} {step.url}")
+
         return {"test_data": result}
+
+    def _get_default_assertion(self):
+        """获取默认断言"""
+        return AssertionRule(field="code", operator="equals", expected_value=200)
 
     def _generate_assertion_node(self, state: State):
         """生成断言规则"""
         print("\n⚖️ 正在制定断言规则...")
 
+        test_data = state.get("test_data")
+        if not test_data:
+            print("   ⚠️ 警告：State 中未找到测试数据 (test_data)，跳过 LLM 调用，使用默认断言。")
+            return {"assertion": self._get_default_assertion()}
+
+        test_case = state.get("test_case")
+        if not test_case:
+            print("   ⚠️ 警告：State 中未找到测试用例 (test_case)，跳过 LLM 调用，使用默认断言。")
+            return {"assertion": self._get_default_assertion()}
+
+        # 2. 准备 Prompt
         prompt = self.prompt_factory.generate_assertion_node()
-
-        # 2. 定义工具 (Tool Definition)
         tools = [AssertionRule]
-
-        # 3. 绑定工具
         llm_with_tools = self.llm.bind_tools(tools)
-
-        # 4. 构建 Chain
         chain = prompt | llm_with_tools
 
-        # 5. 调用
-        response = chain.invoke({"name": state["api_definition"].name})
+        # 3. 构造数据
+        case_desc = test_case.description
+        data_payload = json.dumps(test_data.payload, ensure_ascii=False)
 
-        # 6. 提取结果
+        # 4. 调用
+        response = chain.invoke({
+            "test_case_desc": case_desc,
+            "test_data_payload": data_payload
+        })
+
+        # 5. 提取结果
         if response.tool_calls:
-            all_assertions = []
-            for tool_call in response.tool_calls:
-                if tool_call['name'] == 'AssertionRule':
-                    assertion_obj = AssertionRule(**tool_call['args'])
-                    all_assertions.append(assertion_obj)
-            result = all_assertions[0] if all_assertions else None
+            tool_call = response.tool_calls[0]
+            if tool_call['name'] == 'AssertionRule':
+                result = AssertionRule(**tool_call['args'])
+            else:
+                result = self._get_default_assertion()
         else:
-            # 模型没调用工具，返回默认
             print("⚠️ 模型未调用工具，使用默认断言")
-            result = AssertionRule(field="status", operator="equals", expected_value="200")
+            result = self._get_default_assertion()
 
         print(f"   🎯 断言: {result.field} {result.operator} {result.expected_value}")
         return {"assertion": result}
 
+
     def _execute_test_node(self, state: State):
         """发送 HTTP 请求"""
-        print("\n🚀 正在发起真实 HTTP 请求...")
 
-        api = state["api_definition"]
-        data = state["test_data"]
-        assertion = state["assertion"]
+        # 1. 获取当前状态
+        current_index = state.get("current_step_index", 0)
+        test_data_obj = state.get("test_data")
 
-        # --- 真实请求逻辑 ---
+        # 边界检查
+        if not test_data_obj or current_index >= len(test_data_obj.steps):
+            return {"current_step_index": current_index}
+
+        # 2. 直接从 test_data 获取当前步骤的完整数据
+        current_step = test_data_obj.steps[current_index]
+
+        print(f"\n🚀 [{current_index + 1}/{len(test_data_obj.steps)}] 执行: {current_step.method} {current_step.url}")
+
+        # 3. 发送请求 (直接使用 step 里的数据)
         try:
-            print(f"   ⚡ 正在连接: {api.url}")
-
-            # 使用 httpx 发起请求
             with httpx.Client() as client:
                 response = client.request(
-                    method=api.method,
-                    url=api.url,
-                    json=data.payload,
-                    headers=data.headers,
+                    method=current_step.method,
+                    url=current_step.url,
+                    json=current_step.payload,   # 直接用生成的 payload
+                    headers=current_step.headers, # 直接用生成的 headers
                     timeout=5.0
                 )
-
                 status_code = response.status_code
                 response_body = response.text
 
         except Exception as e:
-            # 捕获网络异常（如连接拒绝、超时）
             status_code = 0
             response_body = str(e)
             print(f"   ❌ 请求异常: {e}")
 
-        # --- 断言逻辑 ---
-        is_pass = False
-        error_msg = None
-
-        try:
-            # 尝试解析 JSON
-            json_body = json.loads(response_body) if response_body else {}
-
-            # 简单的字段提取（支持一级字段）
-            actual_value = json_body.get(assertion.field)
-
-            if assertion.operator == "equals":
-                # 如果期望值是字符串数字，尝试转换实际值
-                if str(assertion.expected_value).isdigit() and isinstance(actual_value, int):
-                    is_pass = (int(assertion.expected_value) == actual_value)
-                else:
-                    is_pass = (str(assertion.expected_value) == str(actual_value))
-            elif assertion.operator == "exists":
-                is_pass = (actual_value is not None)
-            elif assertion.operator == "contains":
-                is_pass = (str(assertion.expected_value) in str(actual_value))
-
-            if not is_pass:
-                error_msg = f"断言失败: 期望 {assertion.expected_value}, 实际得到 {actual_value}"
-
-        except json.JSONDecodeError:
-            error_msg = "响应不是有效的 JSON"
-        except Exception as e:
-            error_msg = f"断言执行出错: {str(e)}"
-
-        result = ExecutionResult(
-            status_code=status_code,
-            response_body=response_body,
-            is_success=is_pass,
-            error_message=error_msg
-        )
-
-        status_text = "✅ 通过" if is_pass else "❌ 失败"
-        print(f"   结果: {status_text} (状态码: {status_code})")
-
-        return {"execution_result": result}
+        # 4. 返回结果
+        # 注意：这里不再更新 context_variables，也不再动态提取参数
+        return {
+            "current_step_index": current_index + 1, # 游标后移，触发下一轮
+            "execution_result": ExecutionResult(
+                step_name=f"Step {current_index + 1}", # 简单命名为 Step 1, Step 2...
+                status_code=status_code,
+                response_body=response_body,
+                is_success=(status_code == 200),
+                error_message=None
+            )
+        }
 
     def _generate_report_node(self, state: State):
         """生成报告"""
