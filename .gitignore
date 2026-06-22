@@ -15,4 +15,7 @@ __pycache__/
 
 # 忽略你的数据库和测试记录（如果不想上传的话）
 my_chroma_db/
+vector_store/
+uploads/
 test_history/
+pytest_test_data/

@@ -1,0 +1,280 @@
+#!/usr/bin/env python3
+"""Web 入口：智能测试助手 Web 版（FastAPI）"""
+import json
+import os
+import sys
+from pathlib import Path
+
+# 强制 UTF-8 编码，防止 Windows 终端打印 emoji 时报 GBK 错误
+sys.stdout.reconfigure(encoding="utf-8")
+
+import uvicorn
+from fastapi import FastAPI, UploadFile, File, Form, Request
+from fastapi.responses import HTMLResponse, JSONResponse
+from jinja2 import Environment, FileSystemLoader, select_autoescape
+
+import config
+from ingest_pdf import build_vector_store
+from agent_components.chromadb_file import ensure_directory
+from agent_components.graph_builder import build_and_run_agent
+from datetime import datetime
+
+# ----------------------------------------------------------------
+# 应用初始化
+# ----------------------------------------------------------------
+app = FastAPI(title="智能测试助手", version="0.1")
+
+# Jinja2 模板
+_TEMPLATE_DIR = Path(__file__).parent / "templates"
+_TEMPLATE_DIR.mkdir(exist_ok=True)
+_env = Environment(
+    loader=FileSystemLoader(str(_TEMPLATE_DIR)),
+    autoescape=select_autoescape(["html", "xml"]),
+)
+
+# 全局状态（单用户模式）
+_chat_func = None
+_components = None  # ChatTestAgentGraph 实例，用于后续生成
+_vector_ready = False
+_imported_files = []  # 已导入文件列表：[{"name", "size", "chunks", "time"}]
+_last_api_defs = None  # 最后一次聊天中的 API 定义
+_last_user_input = None  # 最后一次用户输入
+
+
+# ----------------------------------------------------------------
+# 生命周期
+# ----------------------------------------------------------------
+@app.on_event("startup")
+async def startup():
+    global _chat_func, _components, _vector_ready, _imported_files
+    print(">>> 启动智能测试助手 Web 服务 ...")
+    _chat_func = build_and_run_agent()
+    _components = _chat_func.components  # 保存实例用于后续生成
+
+    # 扫描 uploads/ 目录，恢复已导入文件列表
+    upload_dir = Path("./uploads")
+    if upload_dir.exists():
+        # 按修改时间倒序排列
+        pdf_files = sorted(upload_dir.glob("*.pdf"), key=lambda p: p.stat().st_mtime, reverse=True)
+        for f in pdf_files:
+            size_kb = f.stat().st_size / 1024
+            mtime = datetime.fromtimestamp(f.stat().st_mtime).strftime("%Y-%m-%d %H:%M:%S")
+            _imported_files.append({
+                "name": f.name,
+                "size": f"{size_kb:.1f} KB",
+                "chunks": "—",
+                "time": mtime,
+            })
+
+    # 判断向量库是否已就绪（目录存在且有数据文件）
+    chroma_path = Path(config.CHROMA_DB_DIR)
+    if chroma_path.exists() and any(chroma_path.iterdir()):
+        _vector_ready = True
+        print(f"   ✅ 向量库已就绪 ({len(_imported_files)} 个文件)")
+    else:
+        print("   ℹ️ 向量库为空，请上传 PDF")
+
+
+# ----------------------------------------------------------------
+# 页面路由
+# ----------------------------------------------------------------
+@app.get("/", response_class=HTMLResponse)
+async def index():
+    template = _env.get_template("index.html")
+    return HTMLResponse(template.render(
+        vector_ready=_vector_ready,
+        imported_files=_imported_files,
+    ))
+
+
+# ----------------------------------------------------------------
+# API 接口
+# ----------------------------------------------------------------
+@app.post("/upload-pdf")
+async def upload_pdf(file: UploadFile = File(...)):
+    """上传 PDF -> 处理 -> 存入向量库"""
+    global _vector_ready, _imported_files
+
+    # 1. 保存上传文件
+    upload_dir = ensure_directory("./uploads")
+    pdf_path = os.path.join(upload_dir, file.filename)
+    content = await file.read()
+    with open(pdf_path, "wb") as f:
+        f.write(content)
+
+    # 2. 构建向量库
+    try:
+        count = build_vector_store(pdf_path)
+        if count == 0:
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "success": False,
+                    "message": "PDF 解析后无内容，可能是扫描版或加密文件。",
+                },
+            )
+        _vector_ready = True
+
+        # 记录已导入文件
+        file_info = {
+            "name": file.filename,
+            "size": f"{len(content) / 1024:.1f} KB",
+            "chunks": count,
+            "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        }
+        _imported_files.insert(0, file_info)  # 最新文件排最前
+        print(f"✅ 向量库构建完成：{count} 个文本块")
+        return {"success": True, "message": f"已处理 {count} 个文本块", "file": file_info}
+    except FileNotFoundError:
+        return JSONResponse(
+            status_code=400,
+            content={"success": False, "message": "上传文件不存在"},
+        )
+    except Exception as e:
+        return JSONResponse(
+            status_code=500,
+            content={"success": False, "message": str(e)},
+        )
+
+
+@app.get("/uploaded-files")
+async def uploaded_files():
+    """获取已导入文件列表"""
+    return {"files": _imported_files, "vector_ready": _vector_ready}
+
+
+@app.post("/chat")
+async def chat(user_input: str = Form(...)):
+    """接收用户需求 -> 跑完整测试流程 -> 返回结果"""
+    if not _vector_ready:
+        return JSONResponse(
+            status_code=400,
+            content={
+                "success": False,
+                "message": "请先上传 PDF 文档",
+            },
+        )
+
+    try:
+        response = _chat_func(user_input)
+        if response:
+            result = {
+                "success": True,
+                "thinking": response.proper_thinking,
+                "reply": response.final_response,
+            }
+            # 如果生成了 Excel 计划，把路径返回给前端
+            if hasattr(response, "excel_path") and response.excel_path:
+                result["excel_path"] = response.excel_path
+                result["excel_name"] = os.path.basename(response.excel_path)
+                result["output_dir"] = getattr(response, "output_dir", os.path.dirname(response.excel_path))
+            # 保存 API 定义和上下文供后续步骤使用
+            global _last_api_defs, _last_user_input
+            if hasattr(response, "api_definition_list"):
+                _last_api_defs = response.api_definition_list
+            _last_user_input = user_input
+            return result
+        return {"success": False, "message": "模型无响应"}
+    except Exception as e:
+        return JSONResponse(
+            status_code=500,
+            content={"success": False, "message": str(e)},
+        )
+
+
+@app.post("/open-file")
+async def open_file(file_path: str = Form(...)):
+    """打开本地文件（调用系统默认应用）"""
+    import os as _os
+    try:
+        _os.startfile(file_path)
+        return {"success": True}
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"success": False, "message": str(e)})
+
+
+@app.post("/confirm-plan")
+async def confirm_plan(excel_path: str = Form(None)):
+    """确认测试计划 -> 生成 .py 和 .yaml 文件"""
+    print(">>> 测试计划已确认，开始生成测试文件...")
+
+    # 优先使用前端传入的路径，否则从全局查找最新的 Excel
+    if not excel_path:
+        import glob
+        excel_files = glob.glob(os.path.join(config.TESTCASE_BASE, "**", "test_plan.xlsx"), recursive=True)
+        if excel_files:
+            excel_path = max(excel_files, key=os.path.getmtime)
+
+    if not excel_path:
+        return JSONResponse(
+            status_code=400,
+            content={"success": False, "message": "未找到测试计划 Excel 文件"},
+        )
+
+    if not _components:
+        return JSONResponse(
+            status_code=500,
+            content={"success": False, "message": "组件未初始化"},
+        )
+
+    try:
+        # Step A: 生成 .py 文件
+        py_result = _components._generate_py_file(excel_path)
+
+        # Step B: 生成 YAML 数据文件
+        api_defs = _last_api_defs or []
+        api_defs_json = json.dumps(
+            [a.model_dump() if hasattr(a, "model_dump") else a for a in api_defs],
+            indent=2, ensure_ascii=False,
+        ) if api_defs else "[]"
+        user_ctx = _last_user_input or ""
+        yaml_result = _components._generate_all_yamls(excel_path, api_defs_json, user_ctx)
+
+        msg = f".py: {py_result['py_file_name']}（{py_result['modules']}模块）"
+        if yaml_result["total"] > 0:
+            msg += f" | YAML: {yaml_result['success']}/{yaml_result['total']} 个"
+
+        return {
+            "success": True,
+            "message": msg,
+            "py_file": py_result["py_file_name"],
+            "yaml_success": yaml_result["success"],
+            "yaml_total": yaml_result["total"],
+        }
+    except Exception as e:
+        return JSONResponse(
+            status_code=500,
+            content={"success": False, "message": str(e)},
+        )
+
+
+# ----------------------------------------------------------------
+# 启动
+# ----------------------------------------------------------------
+if __name__ == "__main__":
+    import threading
+
+    local_url = f"http://{config.WEB_HOST}:{config.WEB_PORT}"
+
+    # 在子线程中启动 uvicorn
+    server_config = uvicorn.Config(app, host=config.WEB_HOST, port=config.WEB_PORT)
+    server = uvicorn.Server(server_config)
+    thread = threading.Thread(target=server.run, daemon=True)
+    thread.start()
+
+    # 输出访问提示
+    print(f"\n🌐 本地访问地址: {local_url}")
+    print(f"   如果 0.0.0.0 无法访问，尝试: http://localhost:{config.WEB_PORT}")
+    print(f"\n💡 输入 q 并回车可停止服务\n")
+
+    # 监听键盘输入 "q" 停止服务
+    try:
+        while True:
+            cmd = input().strip().lower()
+            if cmd == "q":
+                print(">>> 正在停止服务 ...")
+                server.should_exit = True
+                break
+    except (KeyboardInterrupt, EOFError):
+        print("\n>>> 正在停止服务 ...")
+        server.should_exit = True

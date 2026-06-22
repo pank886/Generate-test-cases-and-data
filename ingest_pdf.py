@@ -1,44 +1,65 @@
+#!/usr/bin/env python3
+"""独立脚本：构建向量数据库
+
+用法:
+    python ingest_pdf.py <pdf文件路径>
+
+  或从其他模块调用:
+    from ingest_pdf import build_vector_store
+    build_vector_store("path/to/doc.pdf")
+"""
 import os
 import sys
-from pathlib import Path
-
-# PDF 文件路径
-PDF_FILE_PATH = r"D:\ai_test\智慧停车系统API文档.pdf"
-
-# 向量数据库存储路径
-DB_PATH = "./my_chroma_db"
-
-# 集合名称
-COLLECTION_NAME = "my_rag_collection"
+import argparse
 
 from agent_components.chromadb_file import ReadersChromadb
+from config import CHROMA_DB_DIR, CHROMA_COLLECTION
+
+
+def build_vector_store(pdf_path: str) -> int:
+    """
+    读取 PDF 并构建向量数据库
+
+    Args:
+        pdf_path: PDF 文件路径
+
+    Returns:
+        处理的文本块数量，0 表示失败
+
+    Raises:
+        FileNotFoundError: PDF 文件不存在
+        Exception: 其他处理错误
+    """
+    if not os.path.exists(pdf_path):
+        raise FileNotFoundError(f"文件不存在: {pdf_path}")
+
+    print(f"🔗 正在连接数据库: {CHROMA_DB_DIR} ...")
+    db_client = ReadersChromadb(
+        persist_directory=CHROMA_DB_DIR,
+        collection_name=CHROMA_COLLECTION,
+    )
+
+    print(f"📄 正在读取 PDF: {os.path.basename(pdf_path)}")
+    documents = db_client.process_pdf_to_docs(pdf_path)
+
+    if not documents:
+        print("⚠️ 警告: PDF 解析后未获取到任何内容，可能是扫描版或加密文件。")
+        return 0
+
+    db_client.add_documents(documents)
+
+    print("\n✅ === 数据库构建完成 ===")
+    print(f"💡 共处理 {len(documents)} 个文本块")
+    return len(documents)
 
 
 def main():
-    print("🚀 === 开始构建向量数据库 ===")
+    parser = argparse.ArgumentParser(description="构建向量数据库")
+    parser.add_argument("pdf_path", help="要处理的 PDF 文件路径")
+    args = parser.parse_args()
 
     try:
-        # 2. 初始化数据库连接器
-        print(f"🔗 正在连接数据库: {DB_PATH} ...")
-        db_client = ReadersChromadb(
-            persist_directory=DB_PATH,
-            collection_name=COLLECTION_NAME
-        )
-
-        # 3. 处理 PDF (读取 + 切分)
-        print(f"📄 正在读取 PDF: {os.path.basename(PDF_FILE_PATH)}")
-        documents = db_client.process_pdf_to_docs(PDF_FILE_PATH)
-
-        if not documents:
-            print("⚠️ 警告: PDF 解析后未获取到任何内容，可能是扫描版或加密文件。")
-            return
-
-        # 4. 存入向量数据库
-        db_client.add_documents(documents)
-
-        print("\n✅ === 数据库构建完成 ===")
-        print(f"💡 提示: 请确保 Agent 启动时使用了相同的 DB_PATH 和 COLLECTION_NAME")
-
+        build_vector_store(args.pdf_path)
     except Exception as e:
         print(f"\n❌ 发生异常: {e}")
         sys.exit(1)

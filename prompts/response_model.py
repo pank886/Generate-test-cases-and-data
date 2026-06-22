@@ -1,4 +1,4 @@
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, List
 from pydantic import BaseModel, Field
 
 class ProperResponse(BaseModel):
@@ -16,27 +16,37 @@ class ApiDefinition(BaseModel):
     description: str = Field(description="接口功能描述")
     parameters: Dict[str, Any] = Field(description="请求参数结构示例")
 
-class TestCase(BaseModel):
-    title: str = Field(description="测试用例标题")
-    description: str = Field(description="测试目的描述")
-    pre_condition: str = Field(description="前置条件")
-
 class TestData(BaseModel):
-    payload: Dict[str, Any] = Field(description="具体的请求体 JSON 数据")
-    headers: Dict[str, str] = Field(default_factory=dict, description="请求头")
+    """测试数据 — 结构化 JSON，保存时自动转为 YAML"""
+    data: list = Field(description="YAML 测试数据的结构化表示，每个元素为一个接口调用（含 baseInfo + testCase）")
+    file_name: str = Field(default="test_data.yaml", description="输出的 YAML 文件名")
 
-class AssertionRule(BaseModel):
-    field: str = Field(description="需要校验的返回字段，如 'code' 或 'data.status'")
-    operator: str = Field(description="比较操作符: 'equals', 'contains', 'exists'")
-    expected_value: Any = Field(description="期望的值")
+class ExcelRow(BaseModel):
+    """Excel 测试计划中的一行"""
+    project_name: str = Field(description="项目名称，如 VehicleAccess")
+    allure_epic: str = Field(description="Allure Epic 层级")
+    module_name: str = Field(description="模块/类名，如 TestVehicleAccess_005")
+    allure_feature: str = Field(description="Allure Feature 层级")
+    allure_story: str = Field(description="Allure Story 层级")
+    fixture_level: str = Field(description="fixture等级，如 danyuan，多个用逗号分隔")
+    allure_title: str = Field(description="Allure 测试标题")
+    case_name: str = Field(description="用例方法名，如 test_CarIn")
+    precondition: str = Field(description="前置条件/脚本说明")
+    steps: str = Field(description="执行步骤描述")
+    test_data_yaml: str = Field(description="测试数据 YAML 文件名")
+    enabled: str = Field(description="是否启用，Y 或 N")
 
-class ExecutionResult(BaseModel):
-    status_code: int
-    response_body: str
-    is_success: bool
-    error_message: Optional[str] = None
+class ExcelPlan(BaseModel):
+    """完整的 Excel 测试计划"""
+    rows: List[ExcelRow] = Field(description="测试计划行数据列表")
+    file_name: str = Field(default="test_plan.xlsx", description="输出的 Excel 文件名")
 
-class TestReport(BaseModel):
-    test_title: str = Field(description="执行的测试用例标题")
-    test_description: str = Field(description="测试用例目的描述")
-    test_result: bool = Field(description="是否测试通过")
+class PyFile(BaseModel):
+    """生成的 Python 测试文件"""
+    file_name: str = Field(description="Python 文件名，如 test_Vehicle_access.py")
+    py_content: str = Field(description="完整的 Python 测试文件代码")
+
+class ClassCode(BaseModel):
+    """单个 Python 测试类的代码片段"""
+    class_code: str = Field(description="单个测试类的完整 Python 代码（不含 import 和 epic）")
+

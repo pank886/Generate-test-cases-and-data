@@ -13,38 +13,65 @@ from langchain_core.documents import Document
 from langchain_chroma import Chroma
 
 
+from config import CHROMA_DB_DIR
+
+
+def ensure_directory(path: str) -> str:
+    """
+    确保目录存在，若不存在则自动创建
+    :param path: 目录路径
+    :return: 规范化后的路径
+    """
+    resolved = os.path.abspath(path)
+    os.makedirs(resolved, exist_ok=True)
+    return resolved
+
+
 class ReadersChromadb:
     def __init__(
             self,
-            persist_directory: str = "./my_chroma_db",
+            persist_directory: str = None,
             collection_name: str = "my_rag_collection",
             embedding_model_name: str = None,
             base_url: Optional[str] = None
     ):
         """
         初始化工具类
-        :param persist_directory: 向量数据库持久化路径
+        :param persist_directory: 向量数据库持久化路径（默认使用 vector_store/chroma_db）
         :param collection_name: 集合名称
         :param embedding_model_name: 嵌入模型名称
         :param base_url: Ollama 服务地址
         """
-        self.persist_directory = persist_directory
+        if persist_directory is None:
+            persist_directory = CHROMA_DB_DIR
+
+        # 自动创建向量数据存储目录
+        self.persist_directory = ensure_directory(persist_directory)
         self.collection_name = collection_name
 
         if base_url is None:
             base_url = os.environ.get("EMBEDDING_URL", "http://localhost:11434")
 
         final_model_name = embedding_model_name or os.environ.get("EMBEDDING_MODEL")
+        if not final_model_name:
+            raise ValueError(
+                "Embedding 模型未指定！请在 .env 文件中设置 EMBEDDING_MODEL，"
+                "或在环境变量中设置。\n"
+                "例如: EMBEDDING_MODEL=nomic-embed-text"
+            )
 
-        # 3. 初始化 Embeddings (使用最终确定的名字)
+        # 3. 初始化 Embeddings
         try:
             self.embeddings = OllamaEmbeddings(
                 model=final_model_name,
-                base_url=base_url
+                base_url=base_url,
             )
             print(f"ℹ️ 使用 Embedding 模型: {final_model_name}")
         except Exception as e:
-            print(f"⚠️ 警告: Embeddings 初始化可能失败，请检查 Ollama 服务是否启动或模型是否安装。错误: {e}")
+            raise RuntimeError(
+                f"Embeddings 初始化失败，请检查 Ollama 服务是否已启动 (base_url={base_url})。\n"
+                f"错误: {e}"
+            ) from e
 
         # 4. 初始化向量数据库
         self.vector_store = Chroma(
