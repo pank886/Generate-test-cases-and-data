@@ -2,6 +2,7 @@ from dotenv import load_dotenv, find_dotenv
 load_dotenv(find_dotenv())
 
 import os
+import re
 from typing import List, Optional, Union
 from pathlib import Path
 
@@ -139,6 +140,82 @@ class ReadersChromadb:
 
         return documents
 
+    # ---- Markdown 智能切分（按标题保留完整性） ----
+    MD_MAX_CHARS = 4000  # 安全阈值
+
+    @staticmethod
+    def _recursive_split(block: str, patterns: list) -> list:
+        """依次尝试每个分隔符切分，若所有子块都 <= 阈值则返回，否则降级到下一个分隔符"""
+        for pat in patterns:
+            if pat == "\n":
+                sub = block.split("\n")
+            else:
+                sub = re.split(f'(?={re.escape(pat)})', block)
+            sub = [s for s in sub if s.strip()]
+            if all(len(s) <= ReadersChromadb.MD_MAX_CHARS for s in sub):
+                return sub
+        # 所有分隔符都试过仍超长 → 硬切兜底
+        return [
+            block[i:i + ReadersChromadb.MD_MAX_CHARS]
+            for i in range(0, len(block), ReadersChromadb.MD_MAX_CHARS)
+        ]
+
+    @staticmethod
+    def _split_md_by_headers(text: str) -> list:
+        """
+        以 `## 接口文档` 为主切分点，保留标题，超长块逐步降级切分
+        """
+        blocks = []
+        # 1) 按主模式切分（零宽断言保留标题）
+        parts = re.split(r'(?=## 接口文档)', text)
+        for part in parts:
+            if not part.strip():
+                continue
+            if len(part) <= ReadersChromadb.MD_MAX_CHARS:
+                blocks.append(part)
+            else:
+                # 2) 降级：尝试按 h2 → h1 → --- → 换行切分
+                sub = ReadersChromadb._recursive_split(
+                    part,
+                    patterns=["## ", "# ", "---\n", "\n"],
+                )
+                blocks.extend(sub)
+        return blocks
+
+    def process_md_to_docs(self, md_path: Union[str, Path]) -> List[Document]:
+        """
+        读取 Markdown 文件并转换为带元数据的 Document 列表
+        使用按标题切分的智能策略，确保每个接口被完整保留。
+        """
+        if not os.path.exists(md_path):
+            raise FileNotFoundError(f"文件不存在: {md_path}")
+
+        with open(md_path, "r", encoding="utf-8") as f:
+            text = f.read()
+
+        if not text.strip():
+            print("⚠️ 警告: MD 文件内容为空")
+            return []
+
+        raw_blocks = self._split_md_by_headers(text)
+
+        documents = []
+        for block in raw_blocks:
+            block = block.strip()
+            if not block:
+                continue
+            doc = Document(
+                page_content=block,
+                metadata={
+                    "source": str(md_path),
+                    "type": "md",
+                }
+            )
+            documents.append(doc)
+
+        print(f"📄 正在处理文件: {os.path.basename(md_path)} ({len(documents)} 个文本块)...")
+        return documents
+
     def add_documents(self, documents: List[Document]):
         """
         将处理好的文档存入向量数据库
@@ -151,7 +228,7 @@ class ReadersChromadb:
         self.vector_store.add_documents(documents=documents)
         print("✅ 存储完成！")
 
-    def search_context(self, user_question_str: str, k: int = 5) -> str:
+    def search_context(self, user_question_str: str, k: int = 50) -> str:
         """
         搜索最相关的上下文
         :param user_question_str: 用户问题

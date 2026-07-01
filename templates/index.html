@@ -84,6 +84,11 @@
             padding: 8px 24px; border-radius: 4px; cursor: pointer; font-size: 14px;
         }
         .btn-green:hover { background: #2d9249; }
+        .btn-delete {
+            background: none; border: none; cursor: pointer; font-size: 16px;
+            padding: 2px 6px; border-radius: 4px; transition: background .15s;
+        }
+        .btn-delete:hover { background: #fce8e6; }
 
         /* 状态栏 */
         .status-bar {
@@ -94,12 +99,12 @@
 <body>
     <header>🛠️ 智能测试助手</header>
     <div class="container">
-        <!-- 上传 PDF -->
+        <!-- 上传 API 文档 -->
         <div class="card" id="upload-card">
             <h2>📄 上传 API 文档</h2>
             <div class="upload-area">
-                <input type="file" id="pdf-file" accept=".pdf">
-                <button class="btn" id="upload-btn" onclick="uploadPDF()">上传并构建向量库</button>
+                <input type="file" id="doc-file" accept=".pdf,.md">
+                <button class="btn" id="upload-btn" onclick="uploadFile()">上传并构建向量库</button>
                 <span id="vector-status"
                       class="status-badge {{ 'badge-ready' if vector_ready else 'badge-pending' }}">
                     {{ '✅ 已就绪' if vector_ready else '❌ 未上传' }}
@@ -115,7 +120,7 @@
                 <div id="file-empty" class="file-empty">暂无导入文件</div>
                 <table id="file-table" style="display:none;">
                     <thead>
-                        <tr><th>文件名</th><th>大小</th><th>文本块</th><th>导入时间</th></tr>
+                        <tr><th>文件名</th><th>大小</th><th>文本块</th><th>导入时间</th><th>操作</th></tr>
                     </thead>
                     <tbody id="file-tbody"></tbody>
                 </table>
@@ -161,15 +166,15 @@
             }
         });
 
-        // ========== 上传 PDF ==========
-        async function uploadPDF() {
-            const fileInput = document.getElementById('pdf-file');
+        // ========== 上传文件（PDF / MD） ==========
+        async function uploadFile() {
+            const fileInput = document.getElementById('doc-file');
             const msg = document.getElementById('upload-msg');
             const status = document.getElementById('vector-status');
             const btn = document.getElementById('upload-btn');
 
             if (!fileInput.files.length) {
-                msg.innerHTML = '⚠️ 请选择 PDF 文件';
+                msg.innerHTML = '⚠️ 请选择 PDF 或 MD 文件';
                 return;
             }
 
@@ -180,7 +185,7 @@
             msg.innerHTML = '⏳ 正在上传并构建向量库...';
 
             try {
-                const resp = await fetch('/upload-pdf', { method: 'POST', body: formData });
+                const resp = await fetch('/upload-file', { method: 'POST', body: formData });
                 const data = await resp.json();
                 if (data.success) {
                     msg.innerHTML = '✅ ' + data.message;
@@ -203,6 +208,15 @@
                 const resp = await fetch('/uploaded-files');
                 const data = await resp.json();
                 renderFileList(data.files);
+                // 同步更新向量库状态
+                const status = document.getElementById('vector-status');
+                if (data.vector_ready) {
+                    status.className = 'status-badge badge-ready';
+                    status.textContent = '✅ 已就绪';
+                } else {
+                    status.className = 'status-badge badge-pending';
+                    status.textContent = '❌ 未上传';
+                }
             } catch (e) {
                 console.error('刷新文件列表失败:', e);
             }
@@ -227,6 +241,9 @@
                     <td>${escapeHtml(f.size)}</td>
                     <td>${f.chunks}</td>
                     <td>${escapeHtml(f.time)}</td>
+                    <td>
+                        <button class="btn-delete" onclick="deleteFile('${escapeHtml(f.name)}')" title="删除文件">🗑️</button>
+                    </td>
                 </tr>
             `).join('');
         }
@@ -330,6 +347,42 @@
                 }
             } catch (e) {
                 content.innerHTML = '<div style="color:#c5221f;">❌ ' + escapeHtml(e.message) + '</div>';
+            }
+        }
+
+        // ========== 删除文件 ==========
+        async function deleteFile(filename) {
+            if (!confirm(`确定要删除 "${filename}" 吗？\n对应的向量数据也会一并清除。`)) {
+                return;
+            }
+
+            const row = event.target.closest('tr');
+            if (row) row.style.opacity = '0.4';
+
+            try {
+                const formData = new FormData();
+                formData.append('filename', filename);
+                const resp = await fetch('/delete-file', { method: 'POST', body: formData });
+                const data = await resp.json();
+                if (data.success) {
+                    showToast('✅ ' + data.message);
+                    refreshFileList();
+                } else {
+                    showToast('❌ ' + data.message);
+                    if (row) row.style.opacity = '1';
+                }
+            } catch (e) {
+                showToast('❌ 请求失败: ' + e.message);
+                if (row) row.style.opacity = '1';
+            }
+        }
+
+        // ========== 简单的 Toast 提示 ==========
+        function showToast(msg) {
+            const el = document.getElementById('upload-msg');
+            if (el) {
+                el.innerHTML = msg;
+                setTimeout(() => { if (el.innerHTML === msg) el.innerHTML = ''; }, 4000);
             }
         }
 

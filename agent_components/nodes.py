@@ -51,8 +51,10 @@ class ChatTestAgentGraph:
         if not self.vector_store:
             context = "未检索到知识库"
         else:
+            # 使用较大的 k 值以覆盖所有接口（每个块 ≈ 一个接口）
             context = self.vector_store.search_context(
-                user_question_str=state["user_input"]
+                user_question_str=state["user_input"],
+                k=50,
             )
         return {"context": context}
 
@@ -111,7 +113,21 @@ class ChatTestAgentGraph:
 
         # 确定输出目录（基于 LLM 生成的项目名，统一存放本次生成的所有文件）
         project_name = plan.rows[0].project_name if plan.rows else "Unknown"
-        output_dir = state.get("output_dir") or os.path.join(config.TESTCASE_BASE, project_name)
+        output_dir = state.get("output_dir")
+        if not output_dir:
+            output_dir = os.path.join(config.TESTCASE_BASE, project_name)
+            # 去重检验：扫描 TESTCASE_BASE 下已有目录，防止同名覆盖
+            if os.path.exists(output_dir):
+                base_dir = config.TESTCASE_BASE
+                existing_dirs = set()
+                if os.path.isdir(base_dir):
+                    existing_dirs = {d.name for d in os.scandir(base_dir) if d.is_dir()}
+                for i in range(1, 100):
+                    candidate = f"{project_name}_{i:03d}"
+                    if candidate not in existing_dirs:
+                        output_dir = os.path.join(config.TESTCASE_BASE, candidate)
+                        project_name = candidate
+                        break
         os.makedirs(output_dir, exist_ok=True)
         excel_path = os.path.join(output_dir, plan.file_name)
 
@@ -166,6 +182,16 @@ class ChatTestAgentGraph:
 
     # ==================== 图外方法（确认后执行） ====================
 
+    @staticmethod
+    def _yaml_to_case_name(yaml_name: str) -> str:
+        """将 YAML 文件名转为测试方法名: carIn_005.yaml → test_CarIn"""
+        stem = os.path.splitext(yaml_name)[0]          # carIn_005
+        # 去掉末尾的场景序号 _NNN 或 _YYYYMMDD_NNN
+        stem = re.sub(r'_\d{8}_\d+$', '', stem)         # carIn_20260620_008 → carIn
+        stem = re.sub(r'_\d+$', '', stem)                # carIn_005 → carIn
+        # 首字母大写 + test_ 前缀
+        return "test_" + stem[0].upper() + stem[1:] if stem else "test_Step"
+
     def _generate_py_file(self, excel_path: str, project_name: str = None) -> dict:
         """逐模块生成 .py 测试文件（外层循环 I/O，内层 LLM 单 class 生成）"""
         print("\n🐍 正在生成 Python 测试文件...")
@@ -179,27 +205,37 @@ class ChatTestAgentGraph:
         wb = load_workbook(excel_path)
         ws = wb.active
 
-        rows_data = []
+        expanded_rows = []
         for row in ws.iter_rows(min_row=2, values_only=True):
             if row[0] is None:
                 continue
-            rows_data.append({
-                "project_name": row[0], "allure_epic": row[1],
-                "module_name": row[2], "allure_feature": row[3],
-                "allure_story": row[4], "fixture_level": row[5],
-                "allure_title": row[6], "case_name": row[7],
-                "precondition": row[8], "steps": row[9],
-                "test_data_yaml": row[10], "enabled": row[11],
-            })
 
-        if not rows_data:
+            module_name = row[2]
+            yaml_names = [n.strip() for n in row[10].split(",")]
+            step_list = [s.strip() for s in row[9].split(";")]
+
+            for i, yaml_name in enumerate(yaml_names):
+                if not yaml_name:
+                    continue
+                case_name = self._yaml_to_case_name(yaml_name)
+                step_desc = step_list[i] if i < len(step_list) else row[9]
+                expanded_rows.append({
+                    "project_name": row[0], "allure_epic": row[1],
+                    "module_name": module_name, "allure_feature": row[3],
+                    "allure_story": row[4], "fixture_level": row[5],
+                    "allure_title": row[6], "case_name": case_name,
+                    "precondition": row[8], "steps": step_desc,
+                    "test_data_yaml": yaml_name, "enabled": row[11],
+                })
+
+        if not expanded_rows:
             raise ValueError("Excel 中无数据")
 
-        actual_project = project_name or rows_data[0]["project_name"]
-        allure_epic = rows_data[0]["allure_epic"]
+        actual_project = project_name or expanded_rows[0]["project_name"]
+        allure_epic = expanded_rows[0]["allure_epic"]
 
         modules = defaultdict(list)
-        for r in rows_data:
+        for r in expanded_rows:
             modules[r["module_name"]].append(r)
 
         import_header = (
@@ -221,7 +257,10 @@ class ChatTestAgentGraph:
             cases = modules[mod_name]
             total_cases += len(cases)
 
-            mod_lines = [f"模块: {mod_name}  (fixture: {cases[0]['fixture_level']}, {len(cases)} 条用例)\n"]
+            # 从 module_name 推导 YAML 子目录: TestVehicleAccess_005 → VehicleAccesstest_005
+            module_subdir = mod_name[4:] if mod_name.startswith("Test") else mod_name
+
+            mod_lines = [f"模块: {mod_name}  (fixture: {cases[0]['fixture_level']}, {len(cases)} 条用例, 子目录: {module_subdir})\n"]
             for i, c in enumerate(cases, 1):
                 status = "启用" if c["enabled"] == "Y" else "禁用"
                 mod_lines.append(
@@ -236,6 +275,7 @@ class ChatTestAgentGraph:
             result = self._invoke_structured(prompt, ClassCode,
                 module_data=module_text,
                 project_name=actual_project,
+                module_subdir=module_subdir,
             )
             class_codes.append(result.class_code)
 
@@ -257,11 +297,10 @@ class ChatTestAgentGraph:
             "cases": total_cases,
         }
 
-    def _generate_one_yaml(self, row: dict, api_defs_json: str, user_ctx: str, output_dir: str) -> str:
-        """生成单个 YAML 文件（逐接口串行生成）"""
+    def _generate_one_yaml(self, row: dict, api_defs_json: str, user_ctx: str, output_path: str) -> str:
+        """生成单个 YAML 文件写入指定路径（路径由外层循环决定）"""
         prompt = self.prompt_factory.generate_data_node()
         schema = self.prompt_factory.get_data_schema()
-        file_name = row["test_data_yaml"]
         test_case_logic = f"前置条件: {row['precondition']}\n执行步骤: {row['steps']}"
 
         result = self._invoke_structured(prompt, TestData,
@@ -272,23 +311,13 @@ class ChatTestAgentGraph:
         )
 
         yaml_text = yaml.dump(result.data, allow_unicode=True, indent=2, default_flow_style=False)
-        os.makedirs(output_dir, exist_ok=True)
-
-        # 检查文件是否已存在，避免重复
-        base, ext = os.path.splitext(file_name)
-        yaml_path = os.path.join(output_dir, file_name)
-        if os.path.exists(yaml_path):
-            for i in range(1, 100):
-                yaml_path = os.path.join(output_dir, f"{base}_{i:02d}{ext}")
-                if not os.path.exists(yaml_path):
-                    break
-
-        with open(yaml_path, "w", encoding="utf-8") as f:
+        os.makedirs(os.path.dirname(output_path), exist_ok=True)
+        with open(output_path, "w", encoding="utf-8") as f:
             f.write(yaml_text)
-        return yaml_path
+        return output_path
 
     def _generate_all_yamls(self, excel_path: str, api_defs_json: str, user_ctx: str) -> dict:
-        """读 Excel → 多线程逐条生成 YAML（供 /confirm-plan 调用）"""
+        """读 Excel → 按场景分目录 → 多线程逐条生成 YAML（供 /confirm-plan 调用）"""
         print("\n🔢 正在生成 YAML 测试数据...")
 
         if not excel_path:
@@ -299,33 +328,58 @@ class ChatTestAgentGraph:
         wb = load_workbook(excel_path)
         ws = wb.active
 
+        output_base = os.path.dirname(excel_path)
         rows = []
         for row in ws.iter_rows(min_row=2, values_only=True):
             if row[0] is None or row[11] != "Y":
                 continue
-            rows.append({
-                "project_name": row[0],
-                "module_name": row[2],
-                "case_name": row[7],
-                "precondition": row[8],
-                "steps": row[9],
-                "test_data_yaml": row[10],
-            })
+
+            # 从 module_name 推导子目录名: TestVehicleAccess_005 → VehicleAccesstest_005
+            module_name = row[2]
+            module_subdir = module_name[4:] if module_name.startswith("Test") else module_name
+
+            # test_data_yaml 支持逗号分隔的多文件场景
+            yaml_names = [n.strip() for n in row[10].split(",")]
+
+            for yaml_name in yaml_names:
+                if not yaml_name:
+                    continue
+                output_path = os.path.join(output_base, module_subdir, yaml_name)
+
+                # 外层处理文件去重（避免并发竞争）
+                if os.path.exists(output_path):
+                    base, ext = os.path.splitext(yaml_name)
+                    for i in range(1, 100):
+                        alt_path = os.path.join(output_base, module_subdir, f"{base}_{i:02d}{ext}")
+                        if not os.path.exists(alt_path):
+                            output_path = alt_path
+                            break
+
+                rows.append({
+                    "project_name": row[0],
+                    "module_name": module_name,
+                    "case_name": row[7],
+                    "precondition": row[8],
+                    "steps": row[9],
+                    "test_data_yaml": os.path.basename(output_path),
+                    "output_path": output_path,
+                })
 
         if not rows:
             print("   ⚠️ 没有启用的用例需要生成 YAML")
             return {"total": 0, "success": 0, "failed": 0}
 
         total = len(rows)
-        output_dir = os.path.dirname(excel_path)
-        print(f"   📋 共需生成 {total} 个 YAML 文件，并发 5 个线程")
+        print(f"   📋 共需生成 {total} 个 YAML 文件（按 module 分目录），并发 5 个线程")
 
         from concurrent.futures import ThreadPoolExecutor, as_completed
         success = 0
         failed = 0
         with ThreadPoolExecutor(max_workers=5) as executor:
             future_map = {
-                executor.submit(self._generate_one_yaml, row, api_defs_json, user_ctx, output_dir): row
+                executor.submit(
+                    self._generate_one_yaml, row, api_defs_json, user_ctx, row["output_path"]
+                ): row
                 for row in rows
             }
             for future in as_completed(future_map):
@@ -334,7 +388,7 @@ class ChatTestAgentGraph:
                     future.result()
                     success += 1
                     done = success + failed
-                    print(f"      [{done}/{total}] ✅ {row['test_data_yaml']}")
+                    print(f"      [{done}/{total}] ✅ {row['test_data_yaml']}  ({row['module_name']})")
                 except Exception as e:
                     failed += 1
                     done = success + failed

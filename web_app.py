@@ -14,8 +14,8 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 
 import config
-from ingest_pdf import build_vector_store
-from agent_components.chromadb_file import ensure_directory
+from ingest_file import build_vector_store
+from agent_components.chromadb_file import ensure_directory, ReadersChromadb
 from agent_components.graph_builder import build_and_run_agent
 from datetime import datetime
 
@@ -51,20 +51,25 @@ async def startup():
     _chat_func = build_and_run_agent()
     _components = _chat_func.components  # 保存实例用于后续生成
 
-    # 扫描 uploads/ 目录，恢复已导入文件列表
-    upload_dir = Path("./uploads")
-    if upload_dir.exists():
-        # 按修改时间倒序排列
-        pdf_files = sorted(upload_dir.glob("*.pdf"), key=lambda p: p.stat().st_mtime, reverse=True)
-        for f in pdf_files:
-            size_kb = f.stat().st_size / 1024
-            mtime = datetime.fromtimestamp(f.stat().st_mtime).strftime("%Y-%m-%d %H:%M:%S")
-            _imported_files.append({
-                "name": f.name,
-                "size": f"{size_kb:.1f} KB",
-                "chunks": "—",
-                "time": mtime,
-            })
+    # 扫描 uploads/ 下各类型子目录，恢复已导入文件列表（不分组，混合展示）
+    scan_dirs = [
+        ("uploads/pdf", ".pdf"),
+        ("uploads/md", ".md"),
+        ("uploads", ".pdf"),  # 兼容旧版根目录的 PDF
+    ]
+    for scan_dir, ext in scan_dirs:
+        dir_path = Path(scan_dir)
+        if dir_path.exists():
+            files = sorted(dir_path.glob(f"*{ext}"), key=lambda p: p.stat().st_mtime, reverse=True)
+            for f in files:
+                size_kb = f.stat().st_size / 1024
+                mtime = datetime.fromtimestamp(f.stat().st_mtime).strftime("%Y-%m-%d %H:%M:%S")
+                _imported_files.append({
+                    "name": f.name,
+                    "size": f"{size_kb:.1f} KB",
+                    "chunks": "—",
+                    "time": mtime,
+                })
 
     # 判断向量库是否已就绪（目录存在且有数据文件）
     chroma_path = Path(config.CHROMA_DB_DIR)
@@ -72,7 +77,7 @@ async def startup():
         _vector_ready = True
         print(f"   ✅ 向量库已就绪 ({len(_imported_files)} 个文件)")
     else:
-        print("   ℹ️ 向量库为空，请上传 PDF")
+        print("   ℹ️ 向量库为空，请上传 API 文档")
 
 
 # ----------------------------------------------------------------
@@ -90,39 +95,54 @@ async def index():
 # ----------------------------------------------------------------
 # API 接口
 # ----------------------------------------------------------------
-@app.post("/upload-pdf")
-async def upload_pdf(file: UploadFile = File(...)):
-    """上传 PDF -> 处理 -> 存入向量库"""
+@app.post("/upload-file")
+async def upload_file(file: UploadFile = File(...)):
+    """上传文件（PDF/MD）-> 按类型分目录存储 -> 存入向量库"""
     global _vector_ready, _imported_files
 
-    # 1. 保存上传文件
-    upload_dir = ensure_directory("./uploads")
-    pdf_path = os.path.join(upload_dir, file.filename)
+    # 1. 识别文件类型
+    filename = file.filename
+    ext = os.path.splitext(filename)[1].lower()
+    type_map = {
+        ".pdf": "pdf",
+        ".md": "md",
+    }
+    file_type = type_map.get(ext)
+    if file_type is None:
+        supported = ", ".join(type_map.keys())
+        return JSONResponse(
+            status_code=400,
+            content={"success": False, "message": f"不支持的文件类型: {ext}。当前支持: {supported}"},
+        )
+
+    # 2. 保存到类型专属子目录（便于扩展新类型）
+    type_dir = ensure_directory(f"./uploads/{file_type}")
+    file_path = os.path.join(type_dir, filename)
     content = await file.read()
-    with open(pdf_path, "wb") as f:
+    with open(file_path, "wb") as f:
         f.write(content)
 
-    # 2. 构建向量库
+    # 3. 构建向量库（统一入口，内部按扩展名分发）
     try:
-        count = build_vector_store(pdf_path)
+        count = build_vector_store(file_path)
         if count == 0:
             return JSONResponse(
                 status_code=400,
                 content={
                     "success": False,
-                    "message": "PDF 解析后无内容，可能是扫描版或加密文件。",
+                    "message": "文件解析后无内容，请检查文件是否有效。",
                 },
             )
         _vector_ready = True
 
-        # 记录已导入文件
+        # 记录已导入文件（不分组混合展示）
         file_info = {
-            "name": file.filename,
+            "name": filename,
             "size": f"{len(content) / 1024:.1f} KB",
             "chunks": count,
             "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         }
-        _imported_files.insert(0, file_info)  # 最新文件排最前
+        _imported_files.insert(0, file_info)
         print(f"✅ 向量库构建完成：{count} 个文本块")
         return {"success": True, "message": f"已处理 {count} 个文本块", "file": file_info}
     except FileNotFoundError:
@@ -134,6 +154,57 @@ async def upload_pdf(file: UploadFile = File(...)):
         return JSONResponse(
             status_code=500,
             content={"success": False, "message": str(e)},
+        )
+
+
+@app.post("/delete-file")
+async def delete_file(filename: str = Form(...)):
+    """删除已上传的文件及其向量库数据"""
+    global _vector_ready, _imported_files
+
+    # 1. 在所有上传目录中查找文件
+    file_path = None
+    for scan_dir in ["uploads/pdf", "uploads/md", "uploads"]:
+        candidate = os.path.join(scan_dir, filename)
+        if os.path.exists(candidate):
+            file_path = os.path.abspath(candidate)
+            break
+
+    if not file_path:
+        return JSONResponse(
+            status_code=404,
+            content={"success": False, "message": f"文件 '{filename}' 不存在"},
+        )
+
+    try:
+        # 2. 从 ChromaDB 中删除该文件的所有文档块（按 source 元数据过滤）
+        db_client = ReadersChromadb(
+            persist_directory=config.CHROMA_DB_DIR,
+            collection_name=config.CHROMA_COLLECTION,
+        )
+        # Chroma 的 delete 支持 where 过滤
+        # 使用 os.path.normpath 确保与存储时的路径格式一致
+        source_path = os.path.normpath(file_path)
+        deleted_count = db_client.vector_store.delete(where={"source": source_path})
+        print(f"🗑️ 从向量库删除了 {deleted_count or 0} 个文本块 (source={source_path})")
+
+        # 3. 删除物理文件
+        os.remove(file_path)
+        print(f"🗑️ 已删除文件: {file_path}")
+
+        # 4. 更新内存中的文件列表
+        _imported_files = [f for f in _imported_files if f["name"] != filename]
+
+        # 5. 更新向量库状态
+        if not _imported_files:
+            _vector_ready = False
+
+        return {"success": True, "message": f"已删除 '{filename}' 及对应的向量数据"}
+    except Exception as e:
+        print(f"❌ 删除失败: {e}")
+        return JSONResponse(
+            status_code=500,
+            content={"success": False, "message": f"删除失败: {str(e)}"},
         )
 
 
