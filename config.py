@@ -38,10 +38,6 @@ else:
 WEB_HOST = os.environ.get("WEB_HOST", "0.0.0.0")
 WEB_PORT = int(os.environ.get("WEB_PORT", "8000"))
 
-# ====== 其他路径 ======
-SAVE_HISTORY_DIR = os.environ.get("SAVE_HISTORY_DIR", "./test_history")
-PYTEST_DATA_DIR = os.environ.get("PYTEST_DATA_DIR", "./pytest_test_data")
-
 # ====== 目标项目路径（PyCharmMiscProject） ======
 PYCHARM_MISC = os.environ.get("PYCHARM_MISC", r"C:\Users\damai\PycharmMiscProject")
 TESTCASE_BASE = os.environ.get("TESTCASE_BASE", f"{PYCHARM_MISC}/testcase")
