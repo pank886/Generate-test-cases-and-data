@@ -1,0 +1,437 @@
+{
+  "retrieve": {
+    "context": "[来源: post.md]\n## 接口文档：提前缴费模拟\n\n---\n\n### 基本信息\n\n- **接口名称**：提前缴费模拟  \n- **创建人**：jiangkaixin  \n- **状态**：已完成  \n- **更新时间**：2026-06-23 11:28:43  \n- **接口路径**：`POST /park-access-parking-rule-new/mock/pay/simulate`  \n- **Mock地址**：`http://192.168.1.201:3000/mock/1016/park-access-parking-rule-new/mock/pay/simulate`\n\n---\n\n### 请求参数\n\n#### Headers\n\n| 参数名称 | 参数值 | 是否必须 | 示例 | 备注 |\n|---------|--------|---------|------|------|\n| Content-Type | application/json | 是 | application/json | |\n\n#### Body（JSON）\n\n| 名称 | 类型 | 是否必须 | 默认值 | 备注 |\n|------|------|---------|--------|------|\n| carNumber | string | 必须 | - | 车牌号码 |\n| fee | string | 必须 | - | 费用 |\n| payTime | string | 必须 | - | 支付时间 |\n\n---\n\n### 返回数据\n\n| 名称 | 类型 | 是否必须 | 默认值 | 备注 |\n|------|------|---------|--------|------|\n| success | boolean | 非必须 | - | 是否成功 |\n\n---\n\n## 完整示例\n\n### 请求示例\n\n```json\n{\n  \"carNumber\": \"京A12345\",\n  \"fee\": \"15.50\",\n  \"payTime\": \"2026-06-25 14:30:00\"\n}\n```\n\n### 响应示例\n\n```json\n{\n  \"success\": true\n}\n```\n---\n\n---\n\n[来源: post.md]\n## 接口文档：包月车查询\n\n---\n\n### 基本信息\n\n- **接口名称**：包月车查询  \n- **创建人**：jiangkaixin  \n- **状态**：已完成  \n- **更新时间**：2026-06-23 11:28:42  \n- **接口路径**：`POST /park-access-parking-rule-new/mock/monthlyCar/query`  \n- **Mock地址**：`http://192.168.1.201:3000/mock/1016/park-access-parking-rule-new/mock/monthlyCar/query`\n\n---\n\n### 请求参数\n\n#### Headers\n\n| 参数名称 | 参数值 | 是否必须 | 示例 | 备注 |\n|---------|--------|---------|------|------|\n| Content-Type | application/json | 是 | application/json | |\n\n#### Body（JSON）\n\n| 名称 | 类型 | 是否必须 | 默认值 | 备注 |\n|------|------|--------|--------|------|\n| carNumber | string | 必须 | - | 车牌号码 |\n| parkCode | string | 必须 | - | parkCode,parkName 多个之间英文逗号分割，选择1个或多个车场；如果选择 ALL，则不能再选择其他车场 |\n\n---\n\n### 返回数据\n\n| 名称 | 类型 | 是否必须 | 默认值 | 备注 |\n|------|------|---------|--------|------|\n| 数组对象 | object[] | 非必须 | - | 返回列表，item 类型为 object |\n| ├─ code | string | 非必须 | - | 唯一标识编号 |\n| ├─ id | string | 非必须 | - | 唯一标识 |\n| ├─ carNumber | string | 非必须 | - | 车牌号码 |\n| ├─ startTime | string | 非必须 | - | 进出起始有效期 |\n| ├─ endTime | string | 非必须 | - | 进出截止有效期 |\n| ├─ parkCode | string | 非必须 | - | parkCode,parkName 多个之间英文逗号分割 |\n| └─ subCarNumbers | string[] | 非必须 | - | 辅助车牌列表，item 类型为 string |\n\n---\n\n## 完整示例（请求 + 响应）\n\n### 请求示例\n\n```json\n{\n  \"carNumber\": \"京A12345\",\n  \"parkCode\": \"P001,P002\"\n}\n```\n\n### 响应示例\n\n```json\n[\n  {\n    \"code\": \"MC001\",\n    \"id\": \"123456\",\n    \"carNumber\": \"京A12345\",\n    \"startTime\": \"2026-07-01 00:00:00\",\n    \"endTime\": \"2026-07-31 23:59:59\",\n    \"parkCode\": \"P001\",\n    \"subCarNumbers\": [\"京B67890\", \"京C11111\"]\n  },\n  {\n    \"code\": \"MC002\",\n    \"id\": \"789012\",\n    \"carNumber\": \"京A12345\",\n    \"startTime\": \"2026-07-01 00:00:00\",\n    \"endTime\": \"2026-07-31 23:59:59\",\n    \"parkCode\": \"P002\",\n    \"subCarNumbers\": []\n  }\n]\n\n```\n---\n\n---\n\n[来源: post.md]\n## 接口文档：白名单查询\n\n---\n\n### 基本信息\n\n- **接口名称**：白名单查询  \n- **创建人**：jiangkaixin  \n- **状态**：已完成  \n- **更新时间**：2026-06-23 11:28:43  \n- **接口路径**：`POST /park-access-parking-rule-new/mock/whitelist/query`  \n- **Mock地址**：`http://192.168.1.201:3000/mock/1016/park-access-parking-rule-new/mock/whitelist/query`\n\n---\n\n### 请求参数\n\n#### Headers\n\n| 参数名称 | 参数值 | 是否必须 | 示例 | 备注 |\n|---------|--------|---------|------|------|\n| Content-Type | application/json | 是 | application/json | |\n\n#### Body（JSON）\n\n| 名称 | 类型 | 是否必须 | 默认值 | 备注 |\n|------|------|---------|--------|------|\n| carNumber | string | 必须 | - | 车牌号 |\n\n---\n\n### 返回数据\n\n| 名称 | 类型 | 是否必须 | 默认值 | 备注 |\n|------|------|---------|--------|------|\n| 数组对象 | object[] | 非必须 | - | 返回列表，item 类型为 object |\n| ├─ code | string | 非必须 | - | 唯一标识编号 |\n| ├─ id | string | 非必须 | - | 唯一标识 |\n| ├─ carNumber | string | 非必须 | - | 车牌号码，不能为 null |\n| ├─ startTime | string | 非必须 | - | 进出起始有效期 |\n| ├─ endTime | string | 非必须 | - | 进出截止有效期 |\n| └─ isWhite | integer | 非必须 | - | 1 代表白名单车辆，0 代表黑名单车辆，不能为 null |\n\n---\n\n## 完整示例\n\n### 请求示例\n\n```json\n\n{\n  \"carNumber\": \"京A12345\"\n}\n\n```\n\n### 响应示例\n\n```json\n[\n  {\n    \"code\": \"WL001\",\n    \"id\": \"1001\",\n    \"carNumber\": \"京A12345\",\n    \"startTime\": \"2026-07-01 00:00:00\",\n    \"endTime\": \"2026-07-31 23:59:59\",\n    \"isWhite\": 1\n  },\n  {\n    \"code\": \"WL002\",\n    \"id\": \"1002\",\n    \"carNumber\": \"京A12345\",\n    \"startTime\": \"2026-06-01 00:00:00\",\n    \"endTime\": \"2026-06-30 23:59:59\",\n    \"isWhite\": 0\n  }\n]\n```\n---\n\n---\n\n[来源: post.md]\n## 接口文档：入场\n\n---\n\n### 基本信息\n\n- **接口名称**：入场  \n- **创建人**：jiangkaixin  \n- **状态**：已完成  \n- **更新时间**：2026-06-23 11:28:43  \n- **接口路径**：`POST /park-access-parking-rule-new/mock/access/enter`  \n- **Mock地址**：`http://192.168.1.201:3000/mock/1016/park-access-parking-rule-new/mock/access/enter`\n\n---\n\n### 请求参数\n\n#### Headers\n\n| 参数名称 | 参数值 | 是否必须 | 示例 | 备注 |\n|---------|--------|---------|------|------|\n| Content-Type | application/json | 是 | application/json | |\n\n#### Body（JSON）\n\n| 名称 | 类型 | 是否必须 | 默认值 | 备注 |\n|------|------|---------|--------|------|\n| carNumber | string | 必须 | - | 车牌号 |\n| time | string | 必须 | - | 停车开始时间 |\n| deviceCode | string | 必须 | - | 设备编号 |\n\n---\n\n### 返回数据\n\n| 名称 | 类型 | 是否必须 | 默认值 | 备注                             |\n|------|------|---------|--------|--------------------------------|\n| openGate | boolean | 非必须 | - | 返回给设备端时是否需要开闸（true开闸，false不开闸） |\n\n---\n\n## 完整示例\n\n### 请求示例\n\n```json\n{\n  \"carNumber\": \"京A12345\",\n  \"time\": \"2026-06-23 14:30:00\",\n  \"deviceCode\": \"DEV001\"\n}\n```\n\n### 响应示例\n\n```json\n{\n  \"openGate\": 1\n}\n```\n---\n\n---\n\n[来源: post.md]\n## 接口文档：查询在场类型接口\n\n## 基本信息\n- **接口名称**：查询在场类型  \n- **接口路径**：`POST /park-access-parking-rule-new/mock/carTypeQuery`  \n- **Mock 地址**：`http://192.168.1.201:3000/mock/1016/park-access-parking-rule-new/mock/carTypeQuery`  \n- **Content-Type**：`application/json`（必须）\n\n---\n\n## 请求参数（Body JSON）\n\n| 参数名 | 类型 | 必填 | 说明 |\n|--------|------|------|------|\n| `carNumber` | string | **是** | 车牌号 |\n| `parkCode` | string | **是** | 车场编号（主场为园区编号） |\n| `startTime` | string | **是** | 查询的时间 |\n\n---\n\n## 返回参数\n\n| 参数名 | 类型 | 必填 | 说明            |\n|--------|------|------|---------------|\n| `carNumber` | string | 否 | 车牌号           |\n| `parkCode` | string | 否 | 车场编号（主场为园区编号） |\n| `startTime` | string | 否 | 查询的时间         |\n| `inPark` | boolean | 否 | 是否在场          |\n| `parkingType` | string | 否 | 在场类型，停车类型 1包月车 2临停车 3无牌 4白名单 5黑名单         |\n\n---\n\n## 完整示例（请求 + 响应）\n\n```json\n{\n  \"request\": {\n    \"carNumber\": \"京A12345\",\n    \"parkCode\": \"PARK001\",\n    \"startTime\": \"2026-06-23 14:30:00\"\n  },\n  \"response\": {\n    \"carNumber\": \"京A12345\",\n    \"parkCode\": \"PARK001\",\n    \"startTime\": \"2026-06-23 14:30:00\",\n    \"inPark\": true,\n    \"parkingType\": \"临时车\"\n  }\n}\n```\n---\n\n---\n\n[来源: post.md]\n## 接口文档：出场\n\n---\n\n### 基本信息\n\n- **接口名称**：出场  \n- **创建人**：jiangkaixin  \n- **状态**：已完成  \n- **更新时间**：2026-06-23 11:28:43  \n- **接口路径**：`POST /park-access-parking-rule-new/mock/access/exit`  \n- **Mock地址**：`http://192.168.1.201:3000/mock/1016/park-access-parking-rule-new/mock/access/exit`\n\n---\n\n### 请求参数\n\n#### Headers\n\n| 参数名称 | 参数值 | 是否必须 | 示例 | 备注 |\n|---------|--------|---------|------|------|\n| Content-Type | application/json | 是 | application/json | |\n\n#### Body（JSON）\n\n| 名称 | 类型 | 是否必须 | 默认值 | 备注 |\n|------|------|---------|--------|------|\n| carNumber | string | 必须 | - | 车牌号 |\n| time | string | 必须 | - | 停车开始时间 |\n| deviceCode | string | 必须 | - | 设备编号 |\n\n---\n\n### 返回数据\n\n| 名称 | 类型 | 是否必须 | 默认值 | 备注                             |\n|------|------|---------|--------|--------------------------------|\n| openGate | boolean | 非必须 | - | 返回给设备端时是否需要开闸（true开闸，false不开闸） |\n\n---\n\n## 完整示例\n\n### 请求示例\n\n```json\n{\n  \"carNumber\": \"京A12345\",\n  \"time\": \"2026-06-23 15:00:00\",\n  \"deviceCode\": \"DEV002\"\n}\n```\n\n### 响应示例\n\n```json\n{\n  \"openGate\": 1\n}\n```\n---\n\n---\n\n[来源: post.md]\n## 接口文档：白名单添加\n\n---\n\n### 基本信息\n\n- **接口名称**：白名单添加  \n- **创建人**：jiangkaixin  \n- **状态**：已完成  \n- **更新时间**：2026-06-23 11:28:42  \n- **接口路径**：`POST /park-access-parking-rule-new/mock/whitelist/add`  \n- **Mock地址**：`http://192.168.1.201:3000/mock/1016/park-access-parking-rule-new/mock/whitelist/add`\n\n---\n\n### 请求参数\n\n#### Headers\n\n| 参数名称 | 参数值 | 是否必须 | 示例 | 备注 |\n|---------|--------|---------|------|------|\n| Content-Type | application/json | 是 | application/json | |\n\n#### Body（JSON）\n\n| 名称 | 类型 | 是否必须 | 默认值 | 备注 |\n|------|------|---------|--------|------|\n| carNumber | string | 必须 | - | 车牌号码，不能为 null |\n| startTime | string | 非必须 | - | 进出起始有效期 |\n| endTime | string | 非必须 | - | 进出截止有效期 |\n| subCarNumbers | string[] | 非必须 | - | 副车牌号列表，item 类型为 string |\n\n---\n\n### 返回数据\n\n| 名称 | 类型 | 是否必须 | 默认值 | 备注 |\n|------|------|---------|--------|------|\n| success | boolean | 非必须 | - | 是否成功 |\n\n---\n\n## 完整示例\n\n### 请求示例\n\n```json\n\n{\n  \"carNumber\": \"京A12345\",\n  \"startTime\": \"2026-07-01 00:00:00\",\n  \"endTime\": \"2026-07-31 23:59:59\",\n  \"subCarNumbers\": [\"京B67890\", \"京C11111\"]\n}\n```\n### 响应示例\n```json\n\n{\n  \"success\": true\n}\n```\n---\n\n---\n\n[来源: post.md]\n## 接口文档：获取车牌最新的待支付价格\n\n---\n\n### 基本信息\n\n- **接口名称**：获取车牌最新的待支付价格  \n- **创建人**：jiangkaixin  \n- **状态**：已完成  \n- **更新时间**：2026-06-23 11:28:43  \n- **接口路径**：`POST /park-access-parking-rule-new/mock/bill/unpaid`  \n- **Mock地址**：`http://192.168.1.201:3000/mock/1016/park-access-parking-rule-new/mock/bill/unpaid`\n\n---\n\n### 请求参数\n\n#### Headers\n\n| 参数名称 | 参数值 | 是否必须 | 示例 | 备注 |\n|---------|--------|---------|------|------|\n| Content-Type | application/json | 是 | application/json | |\n\n#### Body（JSON）\n\n| 名称 | 类型 | 是否必须 | 默认值 | 备注 |\n|------|------|---------|--------|------|\n| carNumber | string | 必须 | - | 车牌号 |\n| currentTime | string | 必须 | - | 当前时间 |\n\n---\n\n### 返回数据\n\n| 名称 | 类型 | 是否必须 | 默认值 | 备注 |\n|------|------|---------|--------|------|\n| fee | number | 非必须 | - | 费用 |\n\n---\n\n## 完整示例\n\n### 请求示例\n\n```json\n{\n  \"carNumber\": \"京A12345\",\n  \"currentTime\": \"2026-06-23 15:30:00\"\n}\n```\n\n### 响应示例\n\n```json\n{\n  \"fee\": 12.50\n}\n```\n---\n\n---\n\n[来源: post.md]\n## 接口文档：获取车牌最新账单\n\n---\n\n### 基本信息\n\n- **接口名称**：获取车牌最新账单  \n- **创建人**：jiangkaixin  \n- **状态**：已完成  \n- **更新时间**：2026-06-23 11:28:43  \n- **接口路径**：`POST /park-access-parking-rule-new/mock/bill/latest`  \n- **Mock地址**：`http://192.168.1.201:3000/mock/1016/park-access-parking-rule-new/mock/bill/latest`\n\n---\n\n### 请求参数\n\n#### Headers\n\n| 参数名称 | 参数值 | 是否必须 | 示例 | 备注 |\n|---------|--------|---------|------|------|\n| Content-Type | application/json | 是 | application/json | |\n\n#### Body（JSON）\n\n| 名称 | 类型 | 是否必须 | 默认值 | 备注 |\n|------|------|---------|--------|------|\n| carNumber | string | 必须 | - | 车牌号 |\n\n---\n\n### 返回数据\n\n| 名称 | 类型 | 是否必须 | 默认值 | 备注 |\n|------|------|---------|--------|------|\n| carNumber | string | 非必须 | - | 车牌号码 |\n| code | string | 非必须 | - | 账单编号 |\n| paid | boolean | 非必须 | - | 是否缴费 |\n| payableAmount | number | 非必须 | - | 账单金额：应收 |\n| paidAmount | number | 非必须 | - | 账单金额：实收 |\n| entryTime | string | 非必须 | - | 车辆进场时间 |\n| exitTime | string | 非必须 | - | 车辆出场时间 |\n| parkingType | string | 非必须 | - | 停车类型（1包月车 2临停车 3无牌 4白名单 5黑名单） |\n\n---\n\n## 完整示例\n\n### 请求示例\n\n```json\n{\n  \"carNumber\": \"京A12345\"\n}\n```\n\n### 响应示例\n\n```json\n{\n  \"carNumber\": \"京A12345\",\n  \"code\": \"BILL20260623001\",\n  \"paid\": false,\n  \"payableAmount\": 15.50,\n  \"paidAmount\": 0,\n  \"entryTime\": \"2026-06-23 10:00:00\",\n  \"exitTime\": \"2026-06-23 12:30:00\",\n  \"parkingType\": \"2\"\n}\n```\n---\n\n---\n\n[来源: post.md]\n## 接口文档：包月车添加接口\n\n## 基本信息\n- **接口名称**：包月车添加  \n- **接口路径**：`POST /park-access-parking-rule-new/mock/monthlyCar/add`  \n- **Mock 地址**：`http://192.168.1.201:3000/mock/1016/park-access-parking-rule-new/mock/monthlyCar/add`  \n- **Content-Type**：`application/json`（必须）\n\n---\n\n## 请求参数（Body JSON）\n\n| 参数名 | 类型 | 必填 | 说明 |\n|--------|------|------|------|\n| `parkCode` | string | 否 | 车场编码，多个用英文逗号分割；若选 `\"ALL\"` 则不可选其他 |\n| `carNumber` | string | **是** | 车牌号码 |\n| `startTime` | string | **是** | 有效期起始时间（如 `2026-06-23 00:00:00`） |\n| `endTime` | string | **是** | 有效期截止时间（如 `2026-07-23 23:59:59`） |\n| `subCarNumbers` | string[] | 否 | 辅助车牌列表，数组元素为 string |\n| `mainCount` | integer | 否 | 包月车主车数量，默认 1 |\n\n---\n\n## 返回参数\n\n| 参数名 | 类型 | 必填 | 说明 |\n|--------|------|------|------|\n| `success` | boolean | 否 | 是否成功 |\n\n---\n\n## 完整示例（请求 + 响应）\n\n```json\n{\n  \"request\": {\n    \"parkCode\": \"P001,P002\",\n    \"carNumber\": \"京A12345\",\n    \"startTime\": \"2026-06-23 00:00:00\",\n    \"endTime\": \"2026-07-23 23:59:59\",\n    \"subCarNumbers\": [\"京B67890\", \"京C11223\"]\n  },\n  \"response\": {\n    \"success\": true\n  }\n}\n\n```\n---\n\n---\n\n[来源: post.md]\n## 接口文档：黑名单添加\n\n---\n\n### 基本信息\n\n- **接口名称**：黑名单添加\n- **接口路径**：`POST /park-access-parking-web/carWhiteBlack/add`\n- **请求方法**：POST\n- **Content-Type**：`application/json`\n\n---\n\n### 请求头（Headers）\n\n| 参数名称 | 参数值 | 是否必须 | 备注 |\n|---------|--------|---------|------|\n| Content-Type | application/json | 是 | |\n| yq-app-code | test | 是 | |\n\n---\n\n### 请求参数（Body JSON）\n\n| 参数名 | 类型 | 必填 | 说明 |\n|--------|------|------|------|\n| `carNumber` | string | **是** | 车牌号 |\n| `carOwnerName` | string | 否 | 车主姓名 |\n| `carOwnerPhone` | string | 否 | 车主电话 |\n| `enterpriseName` | string | 否 | 企业/部门名称 |\n| `isWhite` | string | **是** | \"0\" 黑名单，\"1\" 白名单 |\n| `memo` | string | 否 | 备注信息 |\n\n---\n\n### 返回参数\n\n| 参数名 | 类型 | 说明 |\n|--------|------|------|\n| `retCode` | integer | 返回状态码（1 成功） |\n| `msg` | string | 返回提示信息 |\n\n---\n\n### 完整示例\n\n#### 请求示例\n\n```json\n{\n  \"carNumber\": \"浙AAA7890\",\n  \"carOwnerName\": \"车主姓名\",\n  \"carOwnerPhone\": \"15906690321\",\n  \"enterpriseName\": \"测试部门\",\n  \"isWhite\": \"0\",\n  \"memo\": \"备注信息\"\n}\n```\n\n#### 响应示例\n\n```json\n{\n  \"retCode\": 1,\n  \"msg\": \"success\",\n  \"data\": null,\n  \"queue\": \"\"\n}\n```\n---\n\n---\n\n[来源: post.md]\n## 接口文档：白名单删除\n\n---\n\n### 基本信息\n\n- **接口名称**：白名单删除  \n- **创建人**：jiangkaixin  \n- **状态**：已完成  \n- **更新时间**：2026-06-23 11:28:43  \n- **接口路径**：`POST /park-access-parking-rule-new/mock/whitelist/delete`  \n- **Mock地址**：`http://192.168.1.201:3000/mock/1016/park-access-parking-rule-new/mock/whitelist/delete`\n\n---\n\n### 请求参数\n\n#### Headers\n\n| 参数名称 | 参数值 | 是否必须 | 示例 | 备注 |\n|---------|--------|---------|------|------|\n| Content-Type | application/json | 是 | application/json | |\n\n#### Body（JSON）\n\n| 名称 | 类型 | 是否必须 | 默认值 | 备注 |\n|------|------|---------|--------|------|\n| codes | string[] | 必须 | - | 唯一编号列表（item 类型为 string） |\n\n---\n\n### 返回数据\n\n| 名称 | 类型 | 是否必须 | 默认值 | 备注 |\n|------|------|---------|--------|------|\n| success | boolean | 非必须 | - | 是否成功 |\n\n---\n\n## 完整示例\n\n### 请求示例\n\n```json\n{\n  \"codes\": [\"WL001\", \"WL002\", \"WL003\"]\n}\n```\n\n### 响应示例\n\n```json\n{\n  \"success\": true\n}\n```\n---\n\n---\n\n[来源: post.md]\n## 接口文档：删除某园区 全量 进出相关数据\n\n---\n\n### 基本信息\n\n- **接口名称**：删除某园区 全量 进出相关数据  \n- **创建人**：jiangkaixin  \n- **状态**：已完成  \n- **更新时间**：2026-06-23 11:28:44  \n- **接口路径**：`POST /park-access-parking-rule-new/mock/delAllForMock`  \n- **Mock地址**：`http://192.168.1.201:3000/mock/1016/park-access-parking-rule-new/mock/delAllForMock`\n\n---\n\n### 请求参数\n\n#### Headers\n\n| 参数名称 | 参数值 | 是否必须 | 示例 | 备注 |\n|---------|--------|---------|------|------|\n| Content-Type | application/json | 是 | application/json | |\n\n#### Body（JSON）\n\n无请求体参数。\n\n---\n\n### 返回数据\n\n| 名称 | 类型 | 是否必须 | 默认值 | 备注 |\n|------|------|---------|--------|------|\n| success | boolean | 非必须 | - | 是否成功 |\n\n---\n\n## 完整示例\n\n### 请求示例\n\n```json\n{}\n```\n\n### 响应示例\n\n```json\n{\n  \"success\": true\n}\n```\n---\n\n---\n\n[来源: post.md]\n## 接口文档：包月车删除\n\n---\n\n### 基本信息\n\n- **接口名称**：包月车删除  \n- **创建人**：jiangkaixin  \n- **状态**：已完成  \n- **更新时间**：2026-06-23 11:28:42  \n- **接口路径**：`POST /park-access-parking-rule-new/mock/monthlyCar/delete`  \n- **Mock地址**：`http://192.168.1.201:3000/mock/1016/park-access-parking-rule-new/mock/monthlyCar/delete`\n\n---\n\n### 请求参数\n\n#### Headers\n\n| 参数名称 | 参数值 | 是否必须 | 示例 | 备注 |\n|---------|--------|---------|------|------|\n| Content-Type | application/json | 是 | application/json | |\n\n#### Body（JSON）\n\n| 名称 | 类型 | 是否必须 | 默认值 | 备注 |\n|------|------|---------|--------|------|\n| codes | string[] | 必须 | - | 唯一编号列表，item 类型为 string |\n\n---\n\n### 返回数据\n\n| 名称 | 类型 | 是否必须 | 默认值 | 备注 |\n|------|------|---------|--------|------|\n| success | boolean | 非必须 | - | 是否成功 |\n\n---\n\n## 完整示例\n\n### 请求示例\n\n```json\n\n{\n  \"codes\": [\"MC001\", \"MC002\", \"MC003\"]\n}\n```\n### 响应示例\n```json\n\n{\n  \"success\": true\n}\n```\n---"
+  },
+  "parse_api": {
+    "api_definition_list": [
+      {
+        "name": "提前缴费模拟",
+        "url": "/park-access-parking-rule-new/mock/pay/simulate",
+        "method": "POST",
+        "description": "提前缴费模拟",
+        "parameters": {
+          "carNumber": "string",
+          "fee": "string",
+          "payTime": "string"
+        },
+        "returns": {
+          "success": "boolean"
+        }
+      },
+      {
+        "name": "包月车查询",
+        "url": "/park-access-parking-rule-new/mock/monthlyCar/query",
+        "method": "POST",
+        "description": "包月车查询，根据车牌号码和车场编码查询包月车信息",
+        "parameters": {
+          "carNumber": "string",
+          "parkCode": "string"
+        },
+        "returns": {
+          "code": "string",
+          "id": "string",
+          "carNumber": "string",
+          "startTime": "string",
+          "endTime": "string",
+          "parkCode": "string",
+          "subCarNumbers": "string[]"
+        }
+      },
+      {
+        "name": "白名单查询",
+        "url": "/park-access-parking-rule-new/mock/whitelist/query",
+        "method": "POST",
+        "description": "白名单查询，根据车牌号查询白名单或黑名单信息",
+        "parameters": {
+          "carNumber": "string"
+        },
+        "returns": {
+          "code": "string",
+          "id": "string",
+          "carNumber": "string",
+          "startTime": "string",
+          "endTime": "string",
+          "isWhite": "integer"
+        }
+      },
+      {
+        "name": "入场",
+        "url": "/park-access-parking-rule-new/mock/access/enter",
+        "method": "POST",
+        "description": "模拟车辆入场",
+        "parameters": {
+          "carNumber": "string",
+          "time": "string",
+          "deviceCode": "string"
+        },
+        "returns": {
+          "openGate": "boolean"
+        }
+      },
+      {
+        "name": "查询在场类型接口",
+        "url": "/park-access-parking-rule-new/mock/carTypeQuery",
+        "method": "POST",
+        "description": "查询在场类型，根据车牌号、车场编号和时间查询车辆是否在场及停车类型",
+        "parameters": {
+          "carNumber": "string",
+          "parkCode": "string",
+          "startTime": "string"
+        },
+        "returns": {
+          "carNumber": "string",
+          "parkCode": "string",
+          "startTime": "string",
+          "inPark": "boolean",
+          "parkingType": "string"
+        }
+      },
+      {
+        "name": "出场",
+        "url": "/park-access-parking-rule-new/mock/access/exit",
+        "method": "POST",
+        "description": "模拟车辆出场",
+        "parameters": {
+          "carNumber": "string",
+          "time": "string",
+          "deviceCode": "string"
+        },
+        "returns": {
+          "openGate": "boolean"
+        }
+      },
+      {
+        "name": "白名单添加",
+        "url": "/park-access-parking-rule-new/mock/whitelist/add",
+        "method": "POST",
+        "description": "添加白名单车辆",
+        "parameters": {
+          "carNumber": "string",
+          "startTime": "string",
+          "endTime": "string",
+          "subCarNumbers": "string[]"
+        },
+        "returns": {
+          "success": "boolean"
+        }
+      },
+      {
+        "name": "获取车牌最新的待支付价格",
+        "url": "/park-access-parking-rule-new/mock/bill/unpaid",
+        "method": "POST",
+        "description": "获取车牌最新的待支付价格",
+        "parameters": {
+          "carNumber": "string",
+          "currentTime": "string"
+        },
+        "returns": {
+          "fee": "number"
+        }
+      },
+      {
+        "name": "获取车牌最新账单",
+        "url": "/park-access-parking-rule-new/mock/bill/latest",
+        "method": "POST",
+        "description": "获取车牌最新账单",
+        "parameters": {
+          "carNumber": "string"
+        },
+        "returns": {
+          "carNumber": "string",
+          "code": "string",
+          "paid": "boolean",
+          "payableAmount": "number",
+          "paidAmount": "number",
+          "entryTime": "string",
+          "exitTime": "string",
+          "parkingType": "string"
+        }
+      },
+      {
+        "name": "包月车添加接口",
+        "url": "/park-access-parking-rule-new/mock/monthlyCar/add",
+        "method": "POST",
+        "description": "包月车添加",
+        "parameters": {
+          "parkCode": "string",
+          "carNumber": "string",
+          "startTime": "string",
+          "endTime": "string",
+          "subCarNumbers": "string[]",
+          "mainCount": "integer"
+        },
+        "returns": {
+          "success": "boolean"
+        }
+      },
+      {
+        "name": "黑名单添加",
+        "url": "/park-access-parking-web/carWhiteBlack/add",
+        "method": "POST",
+        "description": "黑名单添加（同时支持黑白名单，通过isWhite区分）",
+        "parameters": {
+          "carNumber": "string",
+          "carOwnerName": "string",
+          "carOwnerPhone": "string",
+          "enterpriseName": "string",
+          "isWhite": "string",
+          "memo": "string"
+        },
+        "returns": {
+          "retCode": "integer",
+          "msg": "string",
+          "data": "object",
+          "queue": "string"
+        }
+      },
+      {
+        "name": "白名单删除",
+        "url": "/park-access-parking-rule-new/mock/whitelist/delete",
+        "method": "POST",
+        "description": "根据唯一编号列表删除白名单",
+        "parameters": {
+          "codes": "string[]"
+        },
+        "returns": {
+          "success": "boolean"
+        }
+      },
+      {
+        "name": "删除某园区 全量 进出相关数据",
+        "url": "/park-access-parking-rule-new/mock/delAllForMock",
+        "method": "POST",
+        "description": "删除某园区 全量 进出相关数据（用于Mock环境清理）",
+        "parameters": {},
+        "returns": {
+          "success": "boolean"
+        }
+      },
+      {
+        "name": "包月车删除",
+        "url": "/park-access-parking-rule-new/mock/monthlyCar/delete",
+        "method": "POST",
+        "description": "根据唯一编号列表删除包月车",
+        "parameters": {
+          "codes": "string[]"
+        },
+        "returns": {
+          "success": "boolean"
+        }
+      }
+    ]
+  },
+  "generate_excel_plan": {
+    "excel_plan": {
+      "rows": [
+        {
+          "project_name": "VehicleAccess",
+          "allure_epic": "智慧停车",
+          "module_name": "TestParkingFree",
+          "allure_feature": "临停收费",
+          "allure_story": "60分钟内免费",
+          "fixture_level": "smoke,danyuan",
+          "case_name": "test_FreeEntry_001",
+          "steps": [
+            "前置清空：删除园区全量进出相关数据",
+            "模拟车辆入场：车牌临停A001，入场时间T1",
+            "模拟车辆出场：车牌临停A001，出场时间T1（与入场间隔0秒）"
+          ],
+          "test_data_yaml": "test_FreeEntry_001.yaml",
+          "enabled": "Y"
+        },
+        {
+          "project_name": "VehicleAccess",
+          "allure_epic": "智慧停车",
+          "module_name": "TestParkingFree",
+          "allure_feature": "临停收费",
+          "allure_story": "60分钟内免费",
+          "fixture_level": "smoke,danyuan",
+          "case_name": "test_FreeBoundary_002",
+          "steps": [
+            "前置清空：删除园区全量进出相关数据",
+            "模拟车辆入场：车牌临停A002，入场时间T2",
+            "模拟车辆出场：车牌临停A002，出场时间T2+59分59秒"
+          ],
+          "test_data_yaml": "test_FreeBoundary_002.yaml",
+          "enabled": "Y"
+        },
+        {
+          "project_name": "VehicleAccess",
+          "allure_epic": "智慧停车",
+          "module_name": "TestParkingCharge",
+          "allure_feature": "临停收费",
+          "allure_story": "超时收费",
+          "fixture_level": "smoke,danyuan",
+          "case_name": "test_OverfreeCharge_003",
+          "steps": [
+            "前置清空：删除园区全量进出相关数据",
+            "模拟车辆入场：车牌临停B001，入场时间T3",
+            "查询在场类型，确认在场",
+            "获取待支付价格（停车1小时1秒后）",
+            "模拟缴费：金额为待支付价格，缴费时间T3+1小时1秒",
+            "模拟车辆出场：车牌临停B001，出场时间T3+1小时1秒"
+          ],
+          "test_data_yaml": "test_OverfreeCharge_003.yaml",
+          "enabled": "Y"
+        },
+        {
+          "project_name": "VehicleAccess",
+          "allure_epic": "智慧停车",
+          "module_name": "TestParkingCharge",
+          "allure_feature": "临停收费",
+          "allure_story": "超时收费",
+          "fixture_level": "regression",
+          "case_name": "test_NoPayExit_004",
+          "steps": [
+            "前置清空：删除园区全量进出相关数据",
+            "模拟车辆入场：车牌临停B002，入场时间T4",
+            "等待停车超过免费时长（1小时）",
+            "模拟车辆出场：车牌临停B002，出场时间T4+1小时（未缴费）",
+            "期望开闸失败"
+          ],
+          "test_data_yaml": "test_NoPayExit_004.yaml",
+          "enabled": "Y"
+        },
+        {
+          "project_name": "VehicleAccess",
+          "allure_epic": "智慧停车",
+          "module_name": "TestMonthlyCar",
+          "allure_feature": "包月车管理",
+          "allure_story": "有效期内免费通行",
+          "fixture_level": "smoke,danyuan",
+          "case_name": "test_MonthlyValid_005",
+          "steps": [
+            "前置清空：删除园区全量进出相关数据",
+            "添加包月车：车牌月A001，有效期包含当前时间",
+            "模拟车辆入场：车牌月A001，入场时间T5",
+            "模拟车辆出场：车牌月A001，出场时间T5+1小时"
+          ],
+          "test_data_yaml": "test_MonthlyValid_005.yaml",
+          "enabled": "Y"
+        },
+        {
+          "project_name": "VehicleAccess",
+          "allure_epic": "智慧停车",
+          "module_name": "TestMonthlyCar",
+          "allure_feature": "包月车管理",
+          "allure_story": "过期按临停收费",
+          "fixture_level": "regression",
+          "case_name": "test_MonthlyExpired_006",
+          "steps": [
+            "前置清空：删除园区全量进出相关数据",
+            "添加包月车：车牌月A002，有效期已过期",
+            "模拟车辆入场：车牌月A002，入场时间T6",
+            "查询在场类型，确认不在包月有效期内",
+            "获取待支付价格（停车超免费时长后）",
+            "模拟缴费",
+            "模拟车辆出场：车牌月A002，出场时间T6+超时时间"
+          ],
+          "test_data_yaml": "test_MonthlyExpired_006.yaml",
+          "enabled": "Y"
+        },
+        {
+          "project_name": "VehicleAccess",
+          "allure_epic": "智慧停车",
+          "module_name": "TestMonthlyCar",
+          "allure_feature": "包月车管理",
+          "allure_story": "子母车规则",
+          "fixture_level": "regression",
+          "case_name": "test_SubCarMonthly_007",
+          "steps": [
+            "前置清空：删除园区全量进出相关数据",
+            "添加包月车：主车牌月B001，子车牌月B002，有效期有效",
+            "模拟主车入场：车牌月B001，时间T7",
+            "模拟子车入场：车牌月B002，时间T7",
+            "查询在场类型，子车是否免费（取决于规则）",
+            "模拟主车出场",
+            "模拟子车出场"
+          ],
+          "test_data_yaml": "test_SubCarMonthly_007.yaml",
+          "enabled": "Y"
+        },
+        {
+          "project_name": "VehicleAccess",
+          "allure_epic": "智慧停车",
+          "module_name": "TestWhitelist",
+          "allure_feature": "白名单管理",
+          "allure_story": "白名单免费通行",
+          "fixture_level": "smoke,danyuan",
+          "case_name": "test_WhitelistFree_008",
+          "steps": [
+            "前置清空：删除园区全量进出相关数据",
+            "添加白名单：车牌白A001，不限时间",
+            "模拟车辆入场：车牌白A001，入场时间T8",
+            "模拟车辆出场：车牌白A001，出场时间T8+任意时长"
+          ],
+          "test_data_yaml": "test_WhitelistFree_008.yaml",
+          "enabled": "Y"
+        },
+        {
+          "project_name": "VehicleAccess",
+          "allure_epic": "智慧停车",
+          "module_name": "TestBlacklist",
+          "allure_feature": "黑名单管理",
+          "allure_story": "黑名单禁止入场",
+          "fixture_level": "smoke,danyuan",
+          "case_name": "test_BlacklistBlock_009",
+          "steps": [
+            "前置清空：删除园区全量进出相关数据",
+            "添加黑名单：车牌黑A001",
+            "模拟车辆入场：车牌黑A001，入场时间T9",
+            "期望开闸失败（黑名单禁止入场）"
+          ],
+          "test_data_yaml": "test_BlacklistBlock_009.yaml",
+          "enabled": "Y"
+        },
+        {
+          "project_name": "VehicleAccess",
+          "allure_epic": "智慧停车",
+          "module_name": "TestPriority",
+          "allure_feature": "优先级策略",
+          "allure_story": "白名单优先于包月",
+          "fixture_level": "regression",
+          "case_name": "test_WhitelistOverrideMonthly_010",
+          "steps": [
+            "前置清空：删除园区全量进出相关数据",
+            "同时添加白名单和包月车：车牌优A001，白名单优先",
+            "模拟车辆入场：车牌优A001，时间T10",
+            "模拟车辆出场：车牌优A001，出场时间T10+任意时长（应免费）"
+          ],
+          "test_data_yaml": "test_WhitelistOverrideMonthly_010.yaml",
+          "enabled": "Y"
+        },
+        {
+          "project_name": "VehicleAccess",
+          "allure_epic": "智慧停车",
+          "module_name": "TestPriority",
+          "allure_feature": "优先级策略",
+          "allure_story": "黑名单优先于包月",
+          "fixture_level": "regression",
+          "case_name": "test_MonthlyOverBlack_011",
+          "steps": [
+            "前置清空：删除园区全量进出相关数据",
+            "添加包月车（有效）和黑名单：车牌优B001",
+            "模拟车辆入场：车牌优B001，时间T11",
+            "期望开闸失败（黑名单优先级高于包月）"
+          ],
+          "test_data_yaml": "test_MonthlyOverBlack_011.yaml",
+          "enabled": "Y"
+        }
+      ],
+      "file_name": "test_plan.xlsx"
+    },
+    "excel_path": "C:\\Users\\damai\\PycharmMiscProject/testcase\\VehicleAccess_001\\test_plan.xlsx",
+    "output_dir": "C:\\Users\\damai\\PycharmMiscProject/testcase\\VehicleAccess_001"
+  },
+  "generate_py_file": {
+    "py_path": "C:\\Users\\damai\\PycharmMiscProject/testcase\\VehicleAccess_001\\test_VehicleAccess.py",
+    "py_file_name": "test_VehicleAccess.py",
+    "modules": 6,
+    "cases": 11
+  },
+  "generate_all_yamls": {
+    "total": 11,
+    "success": 11,
+    "failed": 0
+  }
+}

@@ -1,4 +1,4 @@
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 from pydantic import BaseModel, Field
 
 class ProperResponse(BaseModel):
@@ -15,25 +15,29 @@ class ApiDefinition(BaseModel):
     method: str = Field(description="HTTP方法: GET, POST, PUT, DELETE")
     description: str = Field(description="接口功能描述")
     parameters: Dict[str, Any] = Field(description="请求参数结构示例")
+    returns: Dict[str, Any] = Field(description="返回数据结构示例，包含所有响应字段的名称和类型")
 
 class TestData(BaseModel):
     """测试数据 — 结构化 JSON，保存时自动转为 YAML"""
     data: list = Field(description="YAML 测试数据的结构化表示，每个元素为一个接口调用（含 baseInfo + testCase）")
     file_name: str = Field(default="test_data.yaml", description="输出的 YAML 文件名")
 
+class StepData(BaseModel):
+    """单步测试数据 — data 数组中的一个元素"""
+    baseInfo: Dict[str, Any] = Field(description="接口基础信息（api_name, url, method, header 等）")
+    testCase: List[Dict[str, Any]] = Field(description="测试用例列表（每个元素含 case_name, json, validation 等）")
+
 class ExcelRow(BaseModel):
     """Excel 测试计划中的一行"""
     project_name: str = Field(description="项目名称，如 VehicleAccess")
     allure_epic: str = Field(description="Allure Epic 层级")
-    module_name: str = Field(description="模块/类名，如 TestVehicleAccess_005")
+    module_name: str = Field(description="模块/类名（相同场景的用例填入相同值），如 TestParkingFree")
     allure_feature: str = Field(description="Allure Feature 层级")
-    allure_story: str = Field(description="Allure Story 层级")
+    allure_story: str = Field(description="Allure Story 层级（场景标题）")
     fixture_level: str = Field(description="fixture等级，如 danyuan，多个用逗号分隔")
-    allure_title: str = Field(description="Allure 测试标题")
-    case_name: str = Field(description="用例方法名，如 test_CarIn")
-    precondition: str = Field(description="前置条件/脚本说明")
-    steps: str = Field(description="执行步骤描述")
-    test_data_yaml: str = Field(description="测试数据 YAML 文件名")
+    case_name: str = Field(description="用例方法名，如 test_CarEntry_001")
+    steps: List[str] = Field(description="执行步骤列表，steps[0] 含前置清空信息，如 '前置清空:园区数据已清理'")
+    test_data_yaml: str = Field(description="测试数据 YAML 文件名（单文件），如 testCarEntry_001.yaml")
     enabled: str = Field(description="是否启用，Y 或 N")
 
 class ExcelPlan(BaseModel):

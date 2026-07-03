@@ -206,6 +206,9 @@ Generate-test-cases-and-data/
 ├── templates/
 │   └── index.html               # 前端页面 (Jinja2)
 │
+├── data_factory/                # 数据工厂方法注册表
+│   └── methods.yaml             #   ${} 模板方法配置（新增方法改此文件）
+│
 ├── uploads/                     # 上传文件存储（自动创建）
 │   ├── pdf/
 │   └── md/

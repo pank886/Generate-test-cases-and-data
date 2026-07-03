@@ -43,10 +43,18 @@ class ChatTestAgentGraph:
         if db_path:
             self.vector_store = ReadersChromadb(persist_directory=db_path)
 
+        # 工作流日志累积器（同一次运行的所有节点共用一份文件）
+        self._run_data: dict = {}
+        self._run_timestamp: Optional[str] = None
+
     # ==================== 图内节点方法 ====================
 
     def _retrieve_node(self, state: State):
         """检索知识库"""
+        # 新运行开始，重置日志累积器
+        self._run_data = {}
+        self._run_timestamp = None
+
         print("🔍 [节点] 正在调用外部工具检索...")
         if not self.vector_store:
             context = "未检索到知识库"
@@ -56,6 +64,7 @@ class ChatTestAgentGraph:
                 user_question_str=state["user_input"],
                 k=50,
             )
+        self._log_node_output("retrieve", {"context": context})
         return {"context": context}
 
     def _parse_api_node(self, state: State):
@@ -84,6 +93,7 @@ class ChatTestAgentGraph:
             print(f"   ⚠️ 提取结果异常: {result}")
             api_list = []
 
+        self._log_node_output("parse_api", {"api_definition_list": api_list})
         return {"api_definition_list": api_list}
 
     def _generate_excel_plan_node(self, state: State):
@@ -148,8 +158,8 @@ class ChatTestAgentGraph:
 
         headers = [
             "项目名称", "Allure Epic", "模块名称", "Allure Feature",
-            "Allure Story", "fixture等级", "Allure标题",
-            "用例名称", "前置条件/脚本", "执行步骤", "测试数据YAML", "是否启用",
+            "Allure Story", "fixture等级",
+            "用例名称", "执行步骤", "测试数据YAML", "是否启用",
         ]
         for col, h in enumerate(headers, 1):
             cell = ws.cell(row=1, column=col, value=h)
@@ -162,15 +172,14 @@ class ChatTestAgentGraph:
             values = [
                 row.project_name, row.allure_epic, row.module_name,
                 row.allure_feature, row.allure_story, row.fixture_level,
-                row.allure_title, row.case_name,
-                row.precondition, row.steps, row.test_data_yaml, row.enabled,
+                row.case_name, "; ".join(row.steps), row.test_data_yaml, row.enabled,
             ]
             for col, val in enumerate(values, 1):
                 cell = ws.cell(row=i, column=col, value=val)
                 cell.border = thin_border
                 cell.alignment = wrap_align
 
-        col_widths = [16, 14, 24, 14, 30, 14, 24, 16, 24, 30, 22, 10]
+        col_widths = [16, 14, 24, 14, 30, 14, 16, 30, 22, 10]
         for i, w in enumerate(col_widths, 1):
             ws.column_dimensions[chr(64 + i)].width = w
 
@@ -178,13 +187,17 @@ class ChatTestAgentGraph:
         print(f"   📄 Excel 测试计划已保存: {excel_path}")
         print(f"   📦 共 {len(plan.rows)} 条用例，{len(set(r.module_name for r in plan.rows))} 个模块")
 
+        self._log_node_output("generate_excel_plan", {"excel_plan": plan, "excel_path": excel_path, "output_dir": output_dir})
         return {"excel_plan": plan, "excel_path": excel_path, "output_dir": output_dir}
 
     # ==================== 图外方法（确认后执行） ====================
 
     @staticmethod
     def _yaml_to_case_name(yaml_name: str) -> str:
-        """将 YAML 文件名转为测试方法名: carIn_005.yaml → test_CarIn"""
+        """
+        将 YAML 文件名转为测试方法名: carIn_005.yaml → test_CarIn
+        TODO: 后续 Class 分组合理性检查环节可能用到
+        """
         stem = os.path.splitext(yaml_name)[0]          # carIn_005
         # 去掉末尾的场景序号 _NNN 或 _YYYYMMDD_NNN
         stem = re.sub(r'_\d{8}_\d+$', '', stem)         # carIn_20260620_008 → carIn
@@ -210,23 +223,14 @@ class ChatTestAgentGraph:
             if row[0] is None:
                 continue
 
-            module_name = row[2]
-            yaml_names = [n.strip() for n in row[10].split(",")]
-            step_list = [s.strip() for s in row[9].split(";")]
-
-            for i, yaml_name in enumerate(yaml_names):
-                if not yaml_name:
-                    continue
-                case_name = self._yaml_to_case_name(yaml_name)
-                step_desc = step_list[i] if i < len(step_list) else row[9]
-                expanded_rows.append({
-                    "project_name": row[0], "allure_epic": row[1],
-                    "module_name": module_name, "allure_feature": row[3],
-                    "allure_story": row[4], "fixture_level": row[5],
-                    "allure_title": row[6], "case_name": case_name,
-                    "precondition": row[8], "steps": step_desc,
-                    "test_data_yaml": yaml_name, "enabled": row[11],
-                })
+            # 10 列: 项目名称,Allure Epic,模块名称,Allure Feature,Allure Story,fixture等级,用例名称,执行步骤,测试数据YAML,是否启用
+            expanded_rows.append({
+                "project_name": row[0], "allure_epic": row[1],
+                "module_name": row[2], "allure_feature": row[3],
+                "allure_story": row[4], "fixture_level": row[5],
+                "case_name": row[6], "steps": row[7],
+                "test_data_yaml": row[8], "enabled": row[9],
+            })
 
         if not expanded_rows:
             raise ValueError("Excel 中无数据")
@@ -257,16 +261,15 @@ class ChatTestAgentGraph:
             cases = modules[mod_name]
             total_cases += len(cases)
 
-            # 从 module_name 推导 YAML 子目录: TestVehicleAccess_005 → VehicleAccesstest_005
-            module_subdir = mod_name[4:] if mod_name.startswith("Test") else mod_name
+            # 从 module_name 推导 YAML 子目录: TestParkingBase → ParkingBasetest
+            module_subdir = mod_name[4:] + "test" if mod_name.startswith("Test") else mod_name + "test"
 
-            mod_lines = [f"模块: {mod_name}  (fixture: {cases[0]['fixture_level']}, {len(cases)} 条用例, 子目录: {module_subdir})\n"]
+            mod_lines = [f"模块: {mod_name}  (feature: {cases[0]['allure_feature']}, story: {cases[0]['allure_story']}, fixture: {cases[0]['fixture_level']}, {len(cases)} 条用例, 子目录: {module_subdir})\n"]
             for i, c in enumerate(cases, 1):
                 status = "启用" if c["enabled"] == "Y" else "禁用"
                 mod_lines.append(
                     f"  order={i} | {c['case_name']} → {c['test_data_yaml']} [{status}]"
                 )
-                mod_lines.append(f"    前置: {c['precondition']}")
                 mod_lines.append(f"    步骤: {c['steps']}")
             module_text = "\n".join(mod_lines)
 
@@ -279,7 +282,11 @@ class ChatTestAgentGraph:
             )
             class_codes.append(result.class_code)
 
-        full_content = import_header + "\n" + epic_line + "\n\n".join(class_codes)
+        # 每个 class 前面加 @allure.epic（Allure 装饰器只作用于紧随其后的 class）
+        class_blocks = []
+        for code in class_codes:
+            class_blocks.append(f"{epic_line.strip()}\n{code}")
+        full_content = import_header + "\n\n" + "\n\n".join(class_blocks)
         file_name = f"test_{actual_project}.py"
         output_dir = os.path.dirname(excel_path)
         os.makedirs(output_dir, exist_ok=True)
@@ -290,24 +297,30 @@ class ChatTestAgentGraph:
         print(f"   📄 Python 文件已保存: {py_path}")
         print(f"   📦 {len(mod_names)} 个模块, {total_cases} 条用例")
 
-        return {
+        result = {
             "py_path": py_path,
             "py_file_name": file_name,
             "modules": len(mod_names),
             "cases": total_cases,
         }
+        self._log_node_output("generate_py_file", result)
+        return result
 
     def _generate_one_yaml(self, row: dict, api_defs_json: str, user_ctx: str, output_path: str) -> str:
         """生成单个 YAML 文件写入指定路径（路径由外层循环决定）"""
         prompt = self.prompt_factory.generate_data_node()
         schema = self.prompt_factory.get_data_schema()
-        test_case_logic = f"前置条件: {row['precondition']}\n执行步骤: {row['steps']}"
+        test_case_logic = f"执行步骤: {row['steps']}"
+
+        # 从 data_factory/methods.yaml 读取出可用工厂方法
+        factory_methods_text = self._load_factory_methods()
 
         result = self._invoke_structured(prompt, TestData,
             json_schema=schema,
             all_apis_info=api_defs_json,
             user_context=user_ctx,
             test_case_logic=test_case_logic,
+            data_factory_methods=factory_methods_text,
         )
 
         yaml_text = yaml.dump(result.data, allow_unicode=True, indent=2, default_flow_style=False)
@@ -331,43 +344,41 @@ class ChatTestAgentGraph:
         output_base = os.path.dirname(excel_path)
         rows = []
         for row in ws.iter_rows(min_row=2, values_only=True):
-            if row[0] is None or row[11] != "Y":
+            if row[0] is None or row[9] != "Y":
                 continue
 
-            # 从 module_name 推导子目录名: TestVehicleAccess_005 → VehicleAccesstest_005
+            # 10 列: 项目名称,Allure Epic,模块名称,Allure Feature,Allure Story,fixture等级,用例名称,执行步骤,测试数据YAML,是否启用
             module_name = row[2]
-            module_subdir = module_name[4:] if module_name.startswith("Test") else module_name
+            module_subdir = module_name[4:] + "test" if module_name.startswith("Test") else module_name + "test"
 
-            # test_data_yaml 支持逗号分隔的多文件场景
-            yaml_names = [n.strip() for n in row[10].split(",")]
+            yaml_name = row[8].strip()
+            if not yaml_name:
+                continue
+            output_path = os.path.join(output_base, module_subdir, yaml_name)
 
-            for yaml_name in yaml_names:
-                if not yaml_name:
-                    continue
-                output_path = os.path.join(output_base, module_subdir, yaml_name)
+            # 外层处理文件去重
+            if os.path.exists(output_path):
+                base, ext = os.path.splitext(yaml_name)
+                for i in range(1, 100):
+                    alt_path = os.path.join(output_base, module_subdir, f"{base}_{i:02d}{ext}")
+                    if not os.path.exists(alt_path):
+                        output_path = alt_path
+                        break
 
-                # 外层处理文件去重（避免并发竞争）
-                if os.path.exists(output_path):
-                    base, ext = os.path.splitext(yaml_name)
-                    for i in range(1, 100):
-                        alt_path = os.path.join(output_base, module_subdir, f"{base}_{i:02d}{ext}")
-                        if not os.path.exists(alt_path):
-                            output_path = alt_path
-                            break
-
-                rows.append({
-                    "project_name": row[0],
-                    "module_name": module_name,
-                    "case_name": row[7],
-                    "precondition": row[8],
-                    "steps": row[9],
-                    "test_data_yaml": os.path.basename(output_path),
-                    "output_path": output_path,
-                })
+            rows.append({
+                "project_name": row[0],
+                "module_name": module_name,
+                "case_name": row[6],
+                "steps": row[7],
+                "test_data_yaml": os.path.basename(output_path),
+                "output_path": output_path,
+            })
 
         if not rows:
             print("   ⚠️ 没有启用的用例需要生成 YAML")
-            return {"total": 0, "success": 0, "failed": 0}
+            result = {"total": 0, "success": 0, "failed": 0}
+            self._log_node_output("generate_all_yamls", result)
+            return result
 
         total = len(rows)
         print(f"   📋 共需生成 {total} 个 YAML 文件（按 module 分目录），并发 5 个线程")
@@ -395,7 +406,9 @@ class ChatTestAgentGraph:
                     print(f"      [{done}/{total}] ❌ {row['test_data_yaml']}: {e}")
 
         print(f"   ✅ 完成: {success}/{total}，失败 {failed}")
-        return {"total": total, "success": success, "failed": failed}
+        result = {"total": total, "success": success, "failed": failed}
+        self._log_node_output("generate_all_yamls", result)
+        return result
 
     # ==================== 通用工具方法 ====================
 
@@ -426,6 +439,148 @@ class ChatTestAgentGraph:
                 errors.append(f"第{idx}行: 是否启用必须为 Y 或 N，当前为 '{row.enabled}'")
 
         return errors
+
+    # ==================== 日志辅助方法 ====================
+
+    @staticmethod
+    def _serialize_for_log(obj):
+        """递归序列化对象为 JSON 可序列化的格式"""
+        if isinstance(obj, BaseModel):
+            return obj.model_dump()
+        elif isinstance(obj, dict):
+            return {k: ChatTestAgentGraph._serialize_for_log(v) for k, v in obj.items()}
+        elif isinstance(obj, (list, tuple)):
+            return [ChatTestAgentGraph._serialize_for_log(v) for v in obj]
+        elif isinstance(obj, (str, int, float, bool, type(None))):
+            return obj
+        else:
+            return str(obj)
+
+    def _log_node_output(self, node_name: str, output: dict):
+        """将节点产出物累积到当前运行日志文件（同一次运行共用一份 JSON + MD）"""
+        from pathlib import Path
+        log_dir = Path("logs") / "workflow"
+        log_dir.mkdir(parents=True, exist_ok=True)
+
+        # 首次调用时生成时间戳（同一次运行保持不变）
+        if self._run_timestamp is None:
+            self._run_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+        # 累积数据
+        self._run_data[node_name] = self._serialize_for_log(output)
+
+        base_name = f"workflow_{self._run_timestamp}"
+
+        # ---- JSON（全量数据） ----
+        json_path = log_dir / f"{base_name}.json"
+        with open(json_path, "w", encoding="utf-8") as f:
+            json.dump(self._run_data, f, ensure_ascii=False, indent=2)
+
+        # ---- MD（可读摘要） ----
+        md_lines = [
+            "# 工作流运行日志",
+            f"**运行时间**: {self._run_timestamp[:4]}-{self._run_timestamp[4:6]}-{self._run_timestamp[6:8]} "
+            f"{self._run_timestamp[9:11]}:{self._run_timestamp[11:13]}:{self._run_timestamp[13:15]}",
+            "",
+        ]
+        node_order = ["retrieve", "parse_api", "generate_excel_plan", "generate_py_file", "generate_all_yamls"]
+        for nname in node_order:
+            if nname not in self._run_data:
+                continue
+            data = self._run_data[nname]
+            md_lines.append(f"## {nname}")
+
+            if nname == "retrieve":
+                ctx = output.get("context", "")
+                summary = f"检索到 {len(ctx)} 字符" if ctx and ctx != "未检索到知识库" else "未检索到知识库"
+                md_lines.append(f"**摘要**: {summary}")
+                md_lines.append("```")
+                md_lines.append(f"{ctx[:3000]}{'…(截断)' if len(ctx) > 3000 else ''}")
+                md_lines.append("```")
+            elif nname == "parse_api":
+                apis = data.get("api_definition_list", [])
+                md_lines.append(f"**摘要**: 提取了 {len(apis)} 个接口\n")
+                for i, api in enumerate(apis, 1):
+                    md_lines.append(f"### {i}. {api.get('name', '未命名')}")
+                    md_lines.append(f"- **路径**: `{api.get('url', '')}`")
+                    md_lines.append(f"- **方法**: {api.get('method', '')}")
+                    ret = api.get("returns", {})
+                    md_lines.append(f"- **返回字段**: {json.dumps(ret, ensure_ascii=False) if ret else '未提取'}")
+            elif nname == "generate_excel_plan":
+                plan = data.get("excel_plan", {})
+                rows = plan.get("rows", []) if isinstance(plan, dict) else []
+                modules = len(set(r.get("module_name", "") for r in rows)) if rows else 0
+                md_lines.append(f"**摘要**: {len(rows)} 条用例，{modules} 个模块")
+                md_lines.append(f"- **文件**: {output.get('excel_path', '')}")
+                if rows:
+                    md_lines.append("\n**模块列表**")
+                    seen = set()
+                    for r in rows:
+                        mn = r.get("module_name", "")
+                        if mn not in seen:
+                            seen.add(mn)
+                            md_lines.append(f"- `{mn}`")
+            elif nname == "generate_py_file":
+                md_lines.append(f"**摘要**: {data.get('py_file_name', '')}（{data.get('modules', 0)} 模块，{data.get('cases', 0)} 用例）")
+                md_lines.append(f"- **文件**: {data.get('py_file_name', '')}")
+                md_lines.append(f"- **路径**: {data.get('py_path', '')}")
+                md_lines.append(f"- **模块数**: {data.get('modules', 0)}")
+                md_lines.append(f"- **用例数**: {data.get('cases', 0)}")
+            elif nname == "generate_all_yamls":
+                total, ok, fail = data.get("total", 0), data.get("success", 0), data.get("failed", 0)
+                md_lines.append(f"**摘要**: {ok}/{total} 成功{'，' + str(fail) + ' 失败' if fail else ''}")
+                md_lines.append(f"- **总数**: {total}")
+                md_lines.append(f"- **成功**: {ok}")
+                md_lines.append(f"- **失败**: {fail}")
+            md_lines.append("")
+
+        md_path = log_dir / f"{base_name}.md"
+        with open(md_path, "w", encoding="utf-8") as f:
+            f.write("\n".join(md_lines) + "\n")
+
+        # 清理：保留 ≤15 组（30 个文件）
+        self._cleanup_logs(str(log_dir), max_files=30)
+
+    @staticmethod
+    def _cleanup_logs(log_dir: str, max_files: int = 30):
+        """保留最多 max_files 个 .json/.md 文件，删除最旧的"""
+        if not os.path.isdir(log_dir):
+            return
+        files = sorted(
+            [os.path.join(log_dir, f) for f in os.listdir(log_dir) if f.endswith((".json", ".md"))],
+            key=os.path.getmtime,
+        )
+        if len(files) > max_files:
+            for f in files[:len(files) - max_files]:
+                try:
+                    os.remove(f)
+                except OSError:
+                    pass
+
+    @staticmethod
+    def _load_factory_methods() -> str:
+        """从 data_factory/methods.yaml 读取数据工厂方法列表，格式化为提示文本"""
+        factory_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data_factory", "methods.yaml")
+        if not os.path.exists(factory_path):
+            return "（无可用数据工厂方法）"
+
+        import yaml as _yaml
+        with open(factory_path, "r", encoding="utf-8") as f:
+            raw = _yaml.safe_load(f)
+
+        methods = raw.get("methods", []) if isinstance(raw, dict) else []
+        if not methods:
+            return "（无可用数据工厂方法）"
+
+        lines = []
+        for m in methods:
+            name = m.get("name", "?")
+            syntax = m.get("syntax", f"${{{name}(...)}}")
+            desc = m.get("description", "")
+            lines.append(f"   - `{syntax}`：{desc}")
+            for tip in m.get("usage_tips", []):
+                lines.append(f"     - {tip}")
+        return "\n".join(lines)
 
     def _invoke_structured(self, prompt, model_class: Type[BaseModel], max_retries: int = 2, **kwargs) -> BaseModel:
         """调用 LLM 并校验结构化输出，失败时自动重试"""
