@@ -1,5 +1,9 @@
 """Phase A: 智能文档处理入口（替代旧 ingest_file.py 的单 Collection 流程）
 
+入库流程：
+  文件 → LLM 提取 → 1. SQLite（文档元数据 + 绑定关系 + 术语）
+                   → 2. ChromaDB（纯文本 + 向量，不含业务关系）
+
 使用方式：
     from ingest_v2 import process_product_doc, process_api_doc
     process_product_doc("uploads/doc.pdf")
@@ -43,8 +47,8 @@ def _extract_text(file_path: str) -> str:
 
 def _extract_docx(file_path: str) -> str:
     """提取 Word 文档文本，附带图片占位标记（供后续多模态替换）。"""
-    from docx import Document
-    doc = Document(file_path)
+    from docx import Document as DocxDocument
+    doc = DocxDocument(file_path)
 
     parts = []
     img_index = 0
@@ -83,8 +87,59 @@ def _extract_docx(file_path: str) -> str:
     return result
 
 
+def _save_to_sqlite(doc_id: str, file_name: str, file_type: str, doc_type: str,
+                    chunk_count: int, module_name: str = "",
+                    related_modules: list = None,
+                    glossary_terms: list = None):
+    """写入 SQLite：文档记录 + 绑定关系 + 术语。
+
+    在 ChromaDB 写入后调用，保证双库数据一致。
+    """
+    from database import get_session
+    from database.operations import DocOps, GlossaryOps, BindingOps
+
+    session = get_session()
+    try:
+        # 1. 文档记录（幂等：先删旧数据再写入）
+        existing = DocOps.get_document(session, doc_id)
+        if existing:
+            DocOps.delete_document(session, doc_id)
+            session.flush()
+
+        DocOps.add_document(
+            session,
+            doc_id=doc_id,
+            file_name=file_name,
+            file_type=file_type,
+            doc_type=doc_type,
+            chunk_count=chunk_count,
+            status="pending",
+        )
+
+        # 2. 术语（如果提供了）
+        if glossary_terms:
+            GlossaryOps.replace_terms(
+                session, doc_id, glossary_terms,
+                source_doc=file_name,
+            )
+
+        # 3. 绑定关系到模块
+        if module_name:
+            BindingOps.bind(session, doc_type, doc_id, "module", module_name)
+        for rel_mod in (related_modules or []):
+            if rel_mod and rel_mod != module_name:
+                BindingOps.bind(session, doc_type, doc_id, "module", rel_mod)
+
+        session.commit()
+    except Exception as e:
+        session.rollback()
+        logger.warning(f"   [SQLite] 写入失败: {e}")
+    finally:
+        session.close()
+
+
 def process_product_doc(file_path: str, progress_cb=None) -> dict:
-    """处理产品文档：提取文本 -> LLM 提取模块关联 -> 存入 product_docs。
+    """处理产品文档：提取文本 -> LLM 提取模块关联 -> 存入 product_docs + SQLite。
 
     Args:
         progress_cb: 可选，进度回调 (0~100, message)
@@ -95,6 +150,8 @@ def process_product_doc(file_path: str, progress_cb=None) -> dict:
 
     db = DualChromaDB()
     graph = ChatTestAgentGraph(db_path=None)
+    file_name = os.path.basename(file_path)
+    file_type = os.path.splitext(file_path)[1].lstrip(".")
 
     # 1. 提取文本
     cb(5, "提取文本中...")
@@ -120,6 +177,7 @@ def process_product_doc(file_path: str, progress_cb=None) -> dict:
     cb(50, "AI 提取术语表...")
     from prompts.response_model import GlossaryExtract
     from prompts.extraction_prompts import glossary_extract_prompt
+    terms = []
     try:
         glossary_prompt = glossary_extract_prompt()
         glossary_result = graph._invoke_structured(
@@ -130,23 +188,8 @@ def process_product_doc(file_path: str, progress_cb=None) -> dict:
         terms = glossary_result.terms if hasattr(glossary_result, "terms") else []
         if terms:
             logger.info(f"   => 术语表: {len(terms)} 条")
-            glossary_text = "## 业务术语表\n" + "\n".join(
-                f"- {t.get('term', '?')}: {t.get('definition', '')}"
-                + (f" ({t.get('notes', '')})" if t.get('notes') else "")
-                for t in terms if isinstance(t, dict)
-            )
-            # 保存术语到模块树（绑定来源文档，重传时自动替换旧术语）
-            try:
-                from agent_components.module_tree import replace_glossary_by_doc
-                replace_glossary_by_doc(module_name, doc_id, terms)
-                logger.info(f"   => {len(terms)} 条术语已绑定到文档 [{doc_id}]")
-            except Exception as e:
-                logger.warning(f"   => 术语保存跳过: {e}")
-        else:
-            glossary_text = ""
     except Exception as e:
         logger.info(f"   => 术语表提取跳过: {e}")
-        glossary_text = ""
 
     # 3. 切分
     cb(70, "文本切分中...")
@@ -156,18 +199,28 @@ def process_product_doc(file_path: str, progress_cb=None) -> dict:
         separators=["\n\n", "\n", "。", "，", " "],
     )
     chunks = splitter.split_text(full_text)
-    if glossary_text:
-        chunks.insert(0, glossary_text)
-        logger.info(f"   => 切分为 {len(chunks)} 个文本块（含术语表）")
-    else:
-        logger.info(f"   => 切分为 {len(chunks)} 个文本块")
+    logger.info(f"   => 切分为 {len(chunks)} 个文本块")
 
-    # 4. 幂等入库
+    # 4. 写入 ChromaDB（纯向量，不含 module/related_modules）
     cb(85, "向量化入库中...")
-    doc_id = f"prod_{os.path.basename(file_path)}_{module_name}"
+    doc_id = f"prod_{file_name}_{module_name}"
     db.delete_by_doc_id(doc_id)
-    db.add_product_doc_chunks(doc_id, chunks, module_name, related)
-    logger.info(f"   [OK] 入库完成 (doc_id={doc_id})")
+    db.add_product_doc_chunks(doc_id, chunks)
+    logger.info(f"   [ChromaDB] 入库完成 (doc_id={doc_id})")
+
+    # 5. 写入 SQLite（文档元数据 + 绑定关系 + 术语）
+    cb(90, "写入业务数据...")
+    _save_to_sqlite(
+        doc_id=doc_id,
+        file_name=file_name,
+        file_type=file_type,
+        doc_type="product",
+        chunk_count=len(chunks),
+        module_name=module_name,
+        related_modules=related,
+        glossary_terms=terms,
+    )
+    logger.info(f"   [SQLite] 入库完成")
 
     cb(95, "入库完成")
     return {
@@ -199,7 +252,7 @@ def _split_text_by_headers(text: str, max_chars: int) -> list:
 
 
 def process_api_doc(file_path: str, default_module: str = None, progress_cb=None) -> dict:
-    """处理接口文档：提取文本 -> 分批 LLM 提取接口 -> 合并去重 -> 存入 api_defs。
+    """处理接口文档：提取文本 -> 分批 LLM 提取接口 -> 合并去重 -> 存入 api_defs + SQLite。
 
     Args:
         default_module: 调用方指定的默认模块（如从产品文档继承）
@@ -211,6 +264,8 @@ def process_api_doc(file_path: str, default_module: str = None, progress_cb=None
 
     db = DualChromaDB()
     graph = ChatTestAgentGraph(db_path=None)
+    file_name = os.path.basename(file_path)
+    file_type = os.path.splitext(file_path)[1].lstrip(".")
 
     cb(5, "读取文档...")
     full_text = _extract_text(file_path).strip()
@@ -258,19 +313,31 @@ def process_api_doc(file_path: str, default_module: str = None, progress_cb=None
     for a in apis:
         logger.info(f"      - {a.get('method', '?')} {a.get('url', '')}")
 
-    # 幂等入库
+    # 写入 ChromaDB（纯向量，不含 module）
     cb(90, "向量化入库中...")
-    doc_id = f"api_{os.path.basename(file_path)}_{module}"
+    doc_id = f"api_{file_name}_{module}"
     db.delete_by_doc_id(doc_id)
-    db.add_api_defs(doc_id, apis, module)
-    logger.info(f"   [OK] 入库完成 (doc_id={doc_id})")
+    db.add_api_defs(doc_id, apis)
+    logger.info(f"   [ChromaDB] 入库完成 (doc_id={doc_id})")
+
+    # 写入 SQLite（文档元数据 + 绑定关系）
+    cb(92, "写入业务数据...")
+    _save_to_sqlite(
+        doc_id=doc_id,
+        file_name=file_name,
+        file_type=file_type,
+        doc_type="api",
+        chunk_count=len(apis),
+        module_name=module,
+    )
+    logger.info(f"   [SQLite] 入库完成")
 
     cb(95, "入库完成")
     return {"doc_id": doc_id, "module_name": module, "api_count": len(apis)}
 
 
 def process_axure_zip(file_path: str, module_name: str = None, progress_cb=None) -> dict:
-    """处理 Axure HTML 演示包：解析页面树 + UI 文本 + 交互 -> 存入 product_docs。
+    """处理 Axure HTML 演示包：解析页面树 + UI 文本 + 交互 -> 存入 product_docs + SQLite。
 
     Args:
         file_path: Axure 导出的 .zip 文件路径
@@ -278,11 +345,13 @@ def process_axure_zip(file_path: str, module_name: str = None, progress_cb=None)
         progress_cb: 可选，进度回调 (0~100, message)
     """
     from agent_components.axure_parser import AxureParser
-    from agent_components.dual_chroma import DualChromaDB
 
     cb = progress_cb or (lambda p, m: None)
     logger.info(f"\n{'=' * 60}")
     logger.info(f"[Phase A] 处理 Axure 原型: {os.path.basename(file_path)}")
+
+    db = DualChromaDB()
+    file_name = os.path.basename(file_path)
 
     cb(5, "解压 Axure 包...")
     parser = AxureParser(file_path)
@@ -310,13 +379,25 @@ def process_axure_zip(file_path: str, module_name: str = None, progress_cb=None)
                 related.add(mod_keyword)
     related.discard(module)
 
-    # 入库
+    # 写入 ChromaDB（纯向量，不含 module/related_modules）
     cb(85, "向量化入库中...")
-    db = DualChromaDB()
-    doc_id = f"axure_{os.path.basename(file_path)}_{module}"
+    doc_id = f"axure_{file_name}_{module}"
     db.delete_by_doc_id(doc_id)
-    db.add_product_doc_chunks(doc_id, chunks, module, related_modules=list(related))
-    logger.info(f"   [OK] 入库完成 (doc_id={doc_id}), {len(chunks)} 块")
+    db.add_product_doc_chunks(doc_id, chunks)
+    logger.info(f"   [ChromaDB] 入库完成 (doc_id={doc_id}), {len(chunks)} 块")
+
+    # 写入 SQLite（文档元数据 + 绑定关系）
+    cb(90, "写入业务数据...")
+    _save_to_sqlite(
+        doc_id=doc_id,
+        file_name=file_name,
+        file_type="zip",
+        doc_type="axure",
+        chunk_count=len(chunks),
+        module_name=module,
+        related_modules=list(related),
+    )
+    logger.info(f"   [SQLite] 入库完成")
 
     cb(95, "入库完成")
     return {"doc_id": doc_id, "module_name": module, "chunks": len(chunks)}

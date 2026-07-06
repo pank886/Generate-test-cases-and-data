@@ -471,17 +471,19 @@
     }
 
     function viewFile(filename) {
-        // 显示文件基本信息
-        const f = INITIAL_FILES.find(x => x.name === filename) || {};
-        let html = `<h3>📋 ${escapeHtml(filename)}</h3>`;
-        html += `<table style="width:100%;font-size:13px;">`;
-        html += `<tr><td style="padding:8px;color:var(--text-dim);">类型</td><td>${escapeHtml(f.type||'?')}</td></tr>`;
-        html += `<tr><td style="padding:8px;color:var(--text-dim);">大小</td><td>${escapeHtml(f.size||'?')}</td></tr>`;
-        html += `<tr><td style="padding:8px;color:var(--text-dim);">文本块</td><td>${f.chunks||'?'}</td></tr>`;
-        html += `<tr><td style="padding:8px;color:var(--text-dim);">时间</td><td>${escapeHtml(f.time||'?')}</td></tr>`;
-        html += `</table>`;
-        html += `<div class="btn-row"><button class="btn" onclick="closeView()">关闭</button></div>`;
-        showModal(html);
+        // 从最新文件列表中查找
+        fetch('/uploaded-files').then(r=>r.json()).then(data => {
+            const f = (data.files||[]).find(x => x.name === filename) || {};
+            let html = `<h3>📋 ${escapeHtml(filename)}</h3>`;
+            html += `<table style="width:100%;font-size:13px;">`;
+            html += `<tr><td style="padding:8px;color:var(--text-dim);">类型</td><td>${escapeHtml(f.type||'?')}</td></tr>`;
+            html += `<tr><td style="padding:8px;color:var(--text-dim);">大小</td><td>${escapeHtml(f.size||'?')}</td></tr>`;
+            html += `<tr><td style="padding:8px;color:var(--text-dim);">文本块</td><td>${f.chunks||'?'}</td></tr>`;
+            html += `<tr><td style="padding:8px;color:var(--text-dim);">时间</td><td>${escapeHtml(f.time||'?')}</td></tr>`;
+            html += `</table>`;
+            html += `<div class="btn-row"><button class="btn" onclick="closeView()">关闭</button></div>`;
+            showModal(html);
+        });
     }
 
     function showView(data) {
@@ -652,8 +654,12 @@
                     : `产品文档 (${doc.chunks} 个文本块)`;
                 html += `<div style="display:flex;align-items:center;justify-content:space-between;padding:4px 0;border-bottom:1px solid #f5f5f5;">
                     <span>${icon} <span title="${escapeHtml(doc.doc_id)}">${label}</span></span>
-                    <button class="btn btn-sm btn-outline" style="font-size:10px;padding:2px 6px;"
-                        onclick="changeDocModule('${escapeHtml(doc.doc_id)}','${escapeHtml(moduleName)}')">迁移</button>
+                    <span style="display:flex;gap:4px;flex-shrink:0;">
+                        <button class="btn btn-sm btn-outline" style="font-size:10px;padding:2px 6px;"
+                            onclick="changeDocModule('${escapeHtml(doc.doc_id)}','${escapeHtml(moduleName)}')">迁移</button>
+                        <button class="btn btn-sm btn-danger-outline" style="font-size:10px;padding:2px 6px;"
+                            onclick="disassociateDoc('${escapeHtml(doc.doc_id)}','${escapeHtml(moduleName)}')">解除关联</button>
+                    </span>
                 </div>`;
                 // 接口文档展示详细接口列表
                 if (doc.type === 'api_def' && doc.api_names && doc.api_names.length) {
@@ -663,10 +669,79 @@
                     html += '</div>';
                 }
             });
+            // 添加文档按钮
+            html += `<div style="margin-top:12px;text-align:center;">
+                <button class="btn btn-sm btn-outline" onclick="showAddDocDialog('${escapeHtml(moduleName)}')">＋ 添加未关联文档</button>
+            </div>`;
             list.innerHTML = html;
         } catch(e) {
             list.innerHTML = '<span style="color:var(--danger);">加载失败</span>';
         }
+    }
+
+    async function disassociateDoc(docId, moduleName) {
+        if (!confirm('确认解除该文档与 "' + moduleName + '" 的关联？')) return;
+        try {
+            const r = await fetch('/api/docs/disassociate', {
+                method:'POST', headers:{'Content-Type':'application/json'},
+                body: JSON.stringify({doc_id: docId}),
+            });
+            const d = await r.json();
+            if (d.success) {
+                toast('✅ 已解除关联');
+                loadModuleDocs(moduleName);
+            } else {
+                toast('❌ ' + d.message);
+            }
+        } catch(e) { toast('❌ ' + e.message); }
+    }
+
+    async function showAddDocDialog(moduleName) {
+        try {
+            const r = await fetch('/api/docs/unassociated');
+            const d = await r.json();
+            if (!d.success) { toast('❌ ' + d.message); return; }
+            if (!d.docs || !d.docs.length) {
+                toast('⚠️ 没有未关联的文档');
+                return;
+            }
+            let html = `<h3>📄 选择要添加到「${escapeHtml(moduleName)}」的文档</h3>
+                <div style="font-size:12px;color:var(--text-dim);margin-bottom:12px;">以下文档尚未关联到任何模块：</div>
+                <div id="unassociated-list" style="max-height:300px;overflow-y:auto;">`;
+            d.docs.forEach(doc => {
+                const icon = doc.type === 'api_def' ? '🔌' : '📄';
+                html += `<label style="display:flex;align-items:center;gap:8px;padding:8px;border-bottom:1px solid #f0f0f0;cursor:pointer;">
+                    <input type="checkbox" class="unassociated-checkbox" value="${escapeHtml(doc.doc_id)}">
+                    <span>${icon} ${escapeHtml(doc.doc_id)}（${doc.chunks} 块）</span>
+                </label>`;
+            });
+            html += `</div>
+                <div class="btn-row" style="margin-top:12px;">
+                    <button class="btn" onclick="addSelectedDocs('${escapeHtml(moduleName)}')">✅ 添加到模块</button>
+                    <button class="btn btn-outline" onclick="closeView()">取消</button>
+                </div>`;
+            showModal(html);
+        } catch(e) { toast('❌ ' + e.message); }
+    }
+
+    async function addSelectedDocs(moduleName) {
+        const checkboxes = document.querySelectorAll('.unassociated-checkbox:checked');
+        if (!checkboxes.length) { toast('⚠️ 请选择至少一个文档'); return; }
+        const docIds = Array.from(checkboxes).map(cb => cb.value);
+        let success = 0, fail = 0;
+        for (const docId of docIds) {
+            try {
+                const r = await fetch('/api/docs/change-module', {
+                    method:'POST', headers:{'Content-Type':'application/json'},
+                    body: JSON.stringify({doc_id: docId, module: moduleName}),
+                });
+                const d = await r.json();
+                if (d.success) success++; else fail++;
+            } catch(e) { fail++; }
+        }
+        closeView();
+        toast(`✅ 已添加 ${success} 个文档${fail ? `，${fail} 个失败` : ''}`);
+        loadModuleDocs(moduleName);
     }
 
     async function changeDocModule(docId, oldModule) {
@@ -689,15 +764,28 @@
 
     async function createModule() {
         const input = document.getElementById('new-mod-name');
-        const name = input.value.trim();
-        if (!name) return;
+        let name = input.value.trim();
+        if (!name) {
+            name = prompt('输入新模块名称:', '');
+            if (!name) return;
+        }
         try {
             const r = await fetch('/api/modules', {
                 method:'POST', headers:{'Content-Type':'application/json'},
                 body: JSON.stringify({name, parent_id: selectedModuleId || 'root'}),
             });
             const d = await r.json();
-            if (d.success) { input.value = ''; refreshModuleTree(); toast('✅ 已创建'); }
+            if (d.success) {
+                input.value = '';
+                refreshModuleTree();
+                toast('✅ 已创建');
+                // 延迟弹窗询问是否添加未关联文档
+                setTimeout(() => {
+                    if (confirm(`模块「${name}」已创建。是否添加未关联的文档？`)) {
+                        showAddDocDialog(name);
+                    }
+                }, 500);
+            }
             else toast('❌ ' + d.message);
         } catch(e) { toast('❌ ' + e.message); }
     }

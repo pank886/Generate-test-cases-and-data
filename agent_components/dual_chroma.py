@@ -1,7 +1,7 @@
-"""Phase A: 双集合向量数据库封装。
+"""Phase A: 双集合向量数据库封装（纯检索引擎）。
 
-管理两个独立集合：product_docs（产品文档）和 api_defs（接口定义）。
-支持幂等更新（通过 doc_id 删除旧数据）、按模块过滤检索。
+ChromaDB 只存 chunk 文本、向量和检索必要的 metadata（doc_id, chunk_index, api_name）。
+所有业务关系（模块、绑定、文档元数据）由 SQLite database/ 层管理。
 """
 
 import json
@@ -21,7 +21,7 @@ from config import (
 
 
 class DualChromaDB:
-    """双集合向量数据库封装。"""
+    """双集合向量数据库封装（纯向量检索，不含业务逻辑）。"""
 
     def __init__(self, persist_directory: str = None):
         persist = persist_directory or CHROMA_DB_DIR
@@ -48,17 +48,14 @@ class DualChromaDB:
 
     # ---- 产品文档操作 ----
 
-    def add_product_doc_chunks(self, doc_id: str, chunks: list,
-                               module: str, related_modules: list = None):
-        """添加产品文档分块。"""
+    def add_product_doc_chunks(self, doc_id: str, chunks: list):
+        """添加产品文档分块（仅存 doc_id 和 chunk_index，不存业务关系）。"""
         docs = []
         for i, chunk in enumerate(chunks):
             docs.append(Document(
                 page_content=chunk,
                 metadata={
                     "doc_id": doc_id,
-                    "module": module,
-                    "related_modules": ",".join(related_modules or []),
                     "chunk_index": i,
                     "type": "product_doc",
                 }
@@ -66,17 +63,21 @@ class DualChromaDB:
         self.product_store.add_documents(docs)
 
     def search_product_docs(self, query: str, k: int = 10,
-                            module: str = None) -> list:
-        """检索产品文档，支持按模块过滤。"""
+                            doc_ids: list[str] = None) -> list:
+        """检索产品文档，可选按 doc_id 列表过滤。
+
+        Args:
+            doc_ids: 由 SQLite 层查出的 doc_id 列表，None 表示全库检索
+        """
         kwargs = {"k": k}
-        if module:
-            kwargs["filter"] = {"module": module}
+        if doc_ids:
+            kwargs["filter"] = {"doc_id": {"$in": doc_ids}}
         return self.product_store.similarity_search(query, **kwargs)
 
     # ---- 接口定义操作 ----
 
-    def add_api_defs(self, doc_id: str, apis: list, module: str):
-        """添加接口定义。"""
+    def add_api_defs(self, doc_id: str, apis: list):
+        """添加接口定义（仅存 doc_id / api_name，不存业务关系）。"""
         docs = []
         for i, api in enumerate(apis):
             api_text = json.dumps(api, ensure_ascii=False)
@@ -84,7 +85,6 @@ class DualChromaDB:
                 page_content=api_text,
                 metadata={
                     "doc_id": doc_id,
-                    "module": module,
                     "api_name": api.get("name", ""),
                     "chunk_index": i,
                     "type": "api_def",
@@ -93,11 +93,15 @@ class DualChromaDB:
         self.api_store.add_documents(docs)
 
     def search_api_defs(self, query: str, k: int = 10,
-                        module: str = None) -> list:
-        """检索接口定义，支持按模块过滤。"""
+                        doc_ids: list[str] = None) -> list:
+        """检索接口定义，可选按 doc_id 列表过滤。
+
+        Args:
+            doc_ids: 由 SQLite 层查出的 doc_id 列表，None 表示全库检索
+        """
         kwargs = {"k": k}
-        if module:
-            kwargs["filter"] = {"module": module}
+        if doc_ids:
+            kwargs["filter"] = {"doc_id": {"$in": doc_ids}}
         return self.api_store.similarity_search(query, **kwargs)
 
     # ---- 通用操作 ----
@@ -107,19 +111,8 @@ class DualChromaDB:
         self.product_store.delete(where={"doc_id": doc_id})
         self.api_store.delete(where={"doc_id": doc_id})
 
-    def update_related_modules(self, doc_id: str, related_modules: list):
-        """更新产品文档的关联模块元数据（人工审核后调用）。"""
-        results = self.product_store.get(where={"doc_id": doc_id})
-        if not results or not results.get("ids"):
-            return
-        new_meta = {"related_modules": ",".join(related_modules)}
-        self.product_store.update(
-            ids=results["ids"],
-            metadatas=[new_meta] * len(results["ids"])
-        )
-
     def search_context(self, query: str, k: int = 50) -> str:
-        """兼容旧接口：全库搜索（两集合合并）。"""
+        """全库检索（两集合合并，用于 LLM 上下文构建）。"""
         pd = self.product_store.similarity_search(query, k=k)
         ad = self.api_store.similarity_search(query, k=k)
         combined = (pd + ad)[:k]
@@ -127,58 +120,28 @@ class DualChromaDB:
             return "未在知识库中找到相关内容。"
         parts = []
         for doc in combined:
-            src = doc.metadata.get("module", "?")
+            src = doc.metadata.get("doc_id", "?")
             parts.append(f"[{src}] {doc.page_content}")
         return "\n\n---\n\n".join(parts)
 
-    # ---- 关系查询 ----
+    # ---- 兼容接口（已废弃，业务逻辑迁移到 SQLite） ----
 
     def get_module_docs(self, module_name: str) -> list[dict]:
-        """获取指定模块下的所有文档摘要（从两个集合查询）。"""
-        docs = []
-        # 产品文档
-        pd_results = self.product_store.get(where={"module": module_name})
-        if pd_results and pd_results.get("ids"):
-            doc_groups = {}
-            for i, mid in enumerate(pd_results["ids"]):
-                meta = pd_results["metadatas"][i] if pd_results.get("metadatas") else {}
-                doc_id = meta.get("doc_id", "?")
-                if doc_id not in doc_groups:
-                    doc_groups[doc_id] = {
-                        "doc_id": doc_id,
-                        "module": meta.get("module", module_name),
-                        "type": meta.get("type", "product_doc"),
-                        "chunks": 0,
-                        "related": meta.get("related_modules", ""),
-                    }
-                doc_groups[doc_id]["chunks"] += 1
-            docs.extend(doc_groups.values())
-
-        # 接口定义
-        api_results = self.api_store.get(where={"module": module_name})
-        if api_results and api_results.get("ids"):
-            api_count = len(api_results["ids"])
-            # 按 doc_id 分组
-            api_groups = {}
-            for i, mid in enumerate(api_results["ids"]):
-                meta = api_results["metadatas"][i] if api_results.get("metadatas") else {}
-                doc_id = meta.get("doc_id", "?")
-                if doc_id not in api_groups:
-                    api_groups[doc_id] = {
-                        "doc_id": doc_id,
-                        "module": meta.get("module", module_name),
-                        "type": "api_def",
-                        "chunks": 0,
-                        "api_count": 0,
-                        "api_names": [],
-                    }
-                api_groups[doc_id]["api_count"] += 1
-                name = meta.get("api_name", "")
-                if name:
-                    api_groups[doc_id]["api_names"].append(name)
-            docs.extend(api_groups.values())
-
-        return docs
+        """[已废弃] 请使用 BindingOps.get_bound_docs() 替代。"""
+        from database import get_session
+        from database.operations import BindingOps
+        session = get_session()
+        docs = BindingOps.get_bound_docs(session, module_name)
+        session.close()
+        return [
+            {
+                "doc_id": d.id,
+                "module": module_name,
+                "type": d.doc_type,
+                "chunks": d.chunk_count,
+            }
+            for d in docs
+        ]
 
     def get_doc_apis(self, doc_id: str) -> list[dict]:
         """获取指定文档下的所有接口定义。"""
@@ -190,17 +153,26 @@ class DualChromaDB:
             meta = results["metadatas"][i] if results.get("metadatas") else {}
             apis.append({
                 "api_name": meta.get("api_name", "?"),
-                "module": meta.get("module", "?"),
                 "content": results["documents"][i] if results.get("documents") else "",
             })
         return apis
 
     def update_doc_module(self, doc_id: str, new_module: str):
-        """将文档迁移到另一个模块（更新两个集合的 metadata.module）。"""
-        for store in [self.product_store, self.api_store]:
-            results = store.get(where={"doc_id": doc_id})
-            if results and results.get("ids"):
-                store.update(
-                    ids=results["ids"],
-                    metadatas=[{"module": new_module}] * len(results["ids"]),
-                )
+        """[已废弃] 请使用 ModuleOps.rename_module() + BindingOps 替代。"""
+        pass
+
+    def disassociate_doc(self, doc_id: str):
+        """[已废弃] 请使用 BindingOps.unbind() 替代。"""
+        pass
+
+    def get_unassociated_docs(self) -> list[dict]:
+        """[已废弃] 请使用 DocOps.get_unassociated_docs() 替代。"""
+        from database import get_session
+        from database.operations import DocOps
+        session = get_session()
+        docs = DocOps.get_unassociated_docs(session)
+        session.close()
+        return [
+            {"doc_id": d.id, "module": "", "type": d.doc_type, "chunks": d.chunk_count}
+            for d in docs
+        ]

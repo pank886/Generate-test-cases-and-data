@@ -500,17 +500,31 @@ async def get_task_status(task_id: str):
 
 @app.post("/update-module")
 async def audit_module(data: dict):
-    """审核确认/修改模块关联关系"""
+    """审核确认/修改模块关联关系（已迁移到 SQLite）。"""
+    from database import get_session
+    from database.operations import BindingOps, DocOps
+    doc_id = data.get("doc_id")
+    module_name = data.get("module_name")
+    related_modules = data.get("related_modules", [])
+    if not doc_id:
+        return JSONResponse(status_code=400, content={"success": False, "message": "缺少 doc_id"})
     try:
-        doc_id = data.get("doc_id")
-        module_name = data.get("module_name")
-        related_modules = data.get("related_modules", [])
-        if not doc_id:
-            return JSONResponse(status_code=400, content={"success": False, "message": "缺少 doc_id"})
-
-        from agent_components.dual_chroma import DualChromaDB
-        db = DualChromaDB()
-        db.product_store.delete(where={"doc_id": doc_id})
+        session = get_session()
+        # 更新主模块绑定
+        doc = DocOps.get_document(session, doc_id)
+        doc_type = doc.doc_type if doc else "product"
+        for b in BindingOps.get_bindings(session):
+            if b.left_id == doc_id and b.right_type == "module":
+                BindingOps.unbind(session, b.id)
+            elif b.right_id == doc_id and b.left_type == "module":
+                BindingOps.unbind(session, b.id)
+        if module_name:
+            BindingOps.bind(session, doc_type, doc_id, "module", module_name)
+        for rmod in related_modules:
+            if rmod != module_name:
+                BindingOps.bind(session, doc_type, doc_id, "module", rmod)
+        session.commit()
+        session.close()
         logger.info("   [Audit] doc_id=%s 更新为 module=%s, related=%s", doc_id, module_name, related_modules)
         return {"success": True, "message": f"模块信息已更新: {module_name}"}
     except Exception as e:
@@ -576,11 +590,32 @@ async def merge_modules(data: dict):
 @app.get("/api/modules/{module_name}/docs")
 async def get_module_docs(module_name: str):
     """获取模块关联的所有文档和接口。"""
+    from database import get_session
+    from database.operations import BindingOps, DocOps
     from agent_components.dual_chroma import DualChromaDB
     try:
-        db = DualChromaDB()
-        docs = db.get_module_docs(module_name)
-        return {"success": True, "docs": docs}
+        session = get_session()
+        docs = BindingOps.get_bound_docs(session, module_name)
+
+        # 为 API 文档补充接口名称列表（从 ChromaDB）
+        chroma = DualChromaDB()
+        result = []
+        for d in docs:
+            item = {
+                "doc_id": d.id,
+                "module": module_name,
+                "type": "api_def" if d.doc_type == "api" else "product_doc",
+                "chunks": d.chunk_count,
+            }
+            if d.doc_type == "api":
+                # 从 ChromaDB 取 api_names（纯展示用）
+                apis = chroma.get_doc_apis(d.id)
+                item["api_count"] = len(apis)
+                item["api_names"] = [a["api_name"] for a in apis if a.get("api_name")]
+            result.append(item)
+
+        session.close()
+        return {"success": True, "docs": result}
     except Exception as e:
         return JSONResponse(status_code=500, content={"success": False, "message": str(e)})
 
@@ -599,16 +634,70 @@ async def get_doc_apis(doc_id: str):
 
 @app.post("/api/docs/change-module")
 async def change_doc_module(data: dict):
-    """将文档迁移到另一个模块。"""
-    from agent_components.dual_chroma import DualChromaDB
+    """将文档迁移到另一个模块（改写 SQLite bindings）。"""
+    from database import get_session
+    from database.operations import BindingOps, DocOps
     doc_id = data.get("doc_id", "")
     new_module = data.get("module", "")
     if not doc_id or not new_module:
         return JSONResponse(status_code=400, content={"success": False, "message": "缺少 doc_id 或 module"})
     try:
-        db = DualChromaDB()
-        db.update_doc_module(doc_id, new_module)
+        session = get_session()
+        # 确定文档类型
+        doc = DocOps.get_document(session, doc_id)
+        doc_type = doc.doc_type if doc else "product"
+        # 删除该文档所有旧模块绑定
+        for b in BindingOps.get_bindings(session):
+            if b.left_id == doc_id and b.right_type == "module":
+                BindingOps.unbind(session, b.id)
+            elif b.right_id == doc_id and b.left_type == "module":
+                BindingOps.unbind(session, b.id)
+        # 绑定到新模块
+        BindingOps.bind(session, doc_type, doc_id, "module", new_module)
+        session.commit()
+        session.close()
         return {"success": True, "message": f"已迁移到 {new_module}"}
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"success": False, "message": str(e)})
+
+
+@app.get("/api/docs/unassociated")
+async def get_unassociated_docs():
+    """获取所有未关联模块的文档。"""
+    from database import get_session
+    from database.operations import DocOps
+    try:
+        session = get_session()
+        docs = DocOps.get_unassociated_docs(session)
+        result = [
+            {"doc_id": d.id, "module": "", "type": d.doc_type, "chunks": d.chunk_count}
+            for d in docs
+        ]
+        session.close()
+        return {"success": True, "docs": result}
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"success": False, "message": str(e)})
+
+
+@app.post("/api/docs/disassociate")
+async def disassociate_doc(data: dict):
+    """解除文档的模块关联（删除 SQLite bindings 表中该文档的模块绑定）。"""
+    from database import get_session
+    from database.operations import BindingOps
+    doc_id = data.get("doc_id", "")
+    if not doc_id:
+        return JSONResponse(status_code=400, content={"success": False, "message": "缺少 doc_id"})
+    try:
+        session = get_session()
+        # 删除该文档与所有模块的绑定
+        for b in BindingOps.get_bindings(session):
+            left_match = b.left_id == doc_id and b.right_type == "module"
+            right_match = b.right_id == doc_id and b.left_type == "module"
+            if left_match or right_match:
+                BindingOps.unbind(session, b.id)
+        session.commit()
+        session.close()
+        return {"success": True, "message": "已解除关联"}
     except Exception as e:
         return JSONResponse(status_code=500, content={"success": False, "message": str(e)})
 

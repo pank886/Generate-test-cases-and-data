@@ -140,7 +140,7 @@ def create(name: str, parent_id: str = "root") -> dict:
 
 
 def rename(module_id: str, new_name: str):
-    """重命名模块，级联更新向量库中所有 chunks 的 metadata.module。"""
+    """重命名模块（业务关系已在 SQLite 中由 ModuleOps 管理）。"""
     data = _ensure_file()
     for mod in data["modules"]:
         if mod["id"] == module_id:
@@ -148,9 +148,6 @@ def rename(module_id: str, new_name: str):
             mod["name"] = new_name
             mod["path"] = path_of(module_id)
             _save(data)
-            # 级联更新向量库
-            _update_vector_metadata(old_name, new_name)
-            # 递归更新子模块路径
             _refresh_paths(data)
             return {"old_name": old_name, "new_name": new_name}
     return None
@@ -174,9 +171,6 @@ def merge(source_id: str, target_id: str):
     target = get_by_id(target_id)
     if not source or not target:
         raise ValueError("模块不存在")
-
-    # 重映射向量库 metadata
-    _update_vector_metadata(source["name"], target["name"])
 
     # 迁移子模块
     data = _ensure_file()
@@ -208,31 +202,6 @@ def _refresh_paths(data: dict):
 
     for mod in data["modules"]:
         mod["path"] = calc_path(mod)
-
-
-def _update_vector_metadata(old_name: str, new_name: str):
-    """级联更新向量库中所有 metadata.module 的旧名为新名。"""
-    try:
-        from agent_components.dual_chroma import DualChromaDB
-        db = DualChromaDB()
-
-        # product_docs 集合
-        old_docs = db.product_store.get(where={"module": old_name})
-        if old_docs and old_docs.get("ids"):
-            db.product_store.update(
-                ids=old_docs["ids"],
-                metadatas=[{"module": new_name}] * len(old_docs["ids"]),
-            )
-
-        # api_defs 集合
-        old_apis = db.api_store.get(where={"module": old_name})
-        if old_apis and old_apis.get("ids"):
-            db.api_store.update(
-                ids=old_apis["ids"],
-                metadatas=[{"module": new_name}] * len(old_apis["ids"]),
-            )
-    except Exception as e:
-        logger.warning(f"   ⚠️ 向量库 metadata 更新失败: {e}")
 
 
 # ==================== 术语表管理 ====================
