@@ -1,0 +1,38 @@
+# created by virtualenv automatically
+
+# 忽略虚拟环境
+.venv/
+venv/
+.env
+
+# 忽略 IDE 配置
+.idea/
+.vscode/
+
+# 忽略 Python 编译文件
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# 忽略测试缓存与报告
+.pytest_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# 忽略工作流运行日志
+logs/
+
+# 忽略 Claude Code 会话工作区
+.claude/
+
+# 忽略运行时数据
+uploads/
+data/
+testcase_out/
+
+# 忽略构建产物
+*.egg-info/
+dist/
+build/

@@ -1,0 +1,6 @@
+# 强制所有文本文件使用 LF 换行符
+* text=auto eol=lf
+
+# 确保 Windows 批处理脚本使用 CRLF
+*.bat text eol=crlf
+*.cmd text eol=crlf

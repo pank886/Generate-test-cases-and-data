@@ -1,0 +1,29 @@
+# ============================================================
+# 数据工厂方法注册表
+# 在此注册的所有方法通过 ${} 语法在 YAML 中使用，
+# 由测试框架在运行时自动解析替换。
+#
+# 新增方法只需在此文件追加条目，无需修改代码。
+# ============================================================
+
+methods:
+  - name: random_plates
+    syntax: '${random_plates(N)}'
+    description: 生成不重复的随机中国大陆车牌，全局自动去重
+    params:
+      N: 车牌数量（1=单个, 3=逗号分隔3个, clear=清空）
+    usage_tips:
+      - '生成单个车牌: ${random_plates(1)} → "京A12345"'
+      - '生成多个车牌: ${random_plates(3)} → "京A12345,沪B67890,浙C11223"'
+      - '搭配 extract 使用: 将生成的车牌提取供下游步骤引用'
+      - '搭配 input_extract 使用: 将车牌存入 extract.yaml'
+
+  - name: get_current_time
+    syntax: '${get_current_time(format)}'
+    description: 获取系统当前时间
+    params:
+      format: ydm=仅日期（YYYY-MM-DD）, hms=日期+时间（YYYY-MM-DD HH:MM:SS）
+    usage_tips:
+      - '仅日期: ${get_current_time(ydm)} → "2026-07-02"'
+      - '日期时间: ${get_current_time(hms)} → "2026-07-02 14:30:00"'
+      - '常用于 time、currentTime、payTime 等时间字段'
