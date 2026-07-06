@@ -1,13 +1,8 @@
 #!/usr/bin/env python3
-"""统一文件处理入口：识别文件类型，分派给对应处理器
+"""⚠️ 已弃用：统一文件处理入口。
 
-用法:
-    python ingest_file.py <文件路径>
-
-  或从其他模块调用:
-    from ingest_file import build_vector_store
-    build_vector_store("path/to/doc.pdf")
-    build_vector_store("path/to/doc.md")
+请改用 ingest_v2.py 的双集合流程（process_product_doc / process_api_doc / process_axure_zip）。
+此文件仅在需要旧版单集合 ChromaDB 流程时保留，计划后续版本移除。
 """
 import os
 import sys

@@ -9,6 +9,10 @@ import os
 import uuid
 from datetime import datetime
 
+from observability import get_logger
+
+logger = get_logger(__name__)
+
 _MODULE_FILE = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "modules.json")
 
 
@@ -228,7 +232,86 @@ def _update_vector_metadata(old_name: str, new_name: str):
                 metadatas=[{"module": new_name}] * len(old_apis["ids"]),
             )
     except Exception as e:
-        print(f"   ⚠️ 向量库 metadata 更新失败: {e}")
+        logger.warning(f"   ⚠️ 向量库 metadata 更新失败: {e}")
+
+
+# ==================== 术语表管理 ====================
+
+def get_glossary(module_name: str) -> list[dict]:
+    """获取模块的业务术语表。"""
+    data = _ensure_file()
+    for mod in data["modules"]:
+        if mod["name"] == module_name:
+            return mod.get("glossary", [])
+    return []
+
+
+def replace_glossary_by_doc(module_name: str, doc_id: str, terms: list[dict]) -> bool:
+    """批量替换某文档关联的术语（先删该文档旧术语，再插入新术语）。
+
+    Args:
+        module_name: 模块名
+        doc_id: 来源文档 ID
+        terms: [{term, definition, notes}] 新的术语列表
+    """
+    data = _ensure_file()
+    for mod in data["modules"]:
+        if mod["name"] == module_name:
+            glossary = mod.get("glossary", [])
+            # 1) 删除同一来源文档的旧术语
+            glossary = [t for t in glossary if t.get("source_doc") != doc_id]
+            # 2) 插入新术语
+            for t in terms:
+                glossary.append({
+                    "term": t.get("term", t.get("name", "?")),
+                    "definition": t.get("definition", ""),
+                    "notes": t.get("notes", ""),
+                    "source_doc": doc_id,
+                })
+            mod["glossary"] = glossary
+            _save(data)
+            return True
+    return False
+
+
+def delete_glossary_by_doc(doc_id: str):
+    """删除所有来自指定文档的术语（文档被删除时调用，支持按 doc_id 精确匹配或按文件名模糊匹配）。"""
+    data = _ensure_file()
+    for mod in data["modules"]:
+        mod["glossary"] = [
+            t for t in mod.get("glossary", [])
+            if t.get("source_doc") != doc_id and doc_id not in t.get("source_doc", "")
+        ]
+    _save(data)
+
+
+def add_glossary_term(module_name: str, term: str, definition: str, notes: str = "") -> bool:
+    """手动添加单条术语（不带来源文档，source_doc 为空）。"""
+    data = _ensure_file()
+    for mod in data["modules"]:
+        if mod["name"] == module_name:
+            glossary = mod.get("glossary", [])
+            existing = next((t for t in glossary if t.get("term") == term), None)
+            if existing:
+                existing["definition"] = definition
+                existing["notes"] = notes
+            else:
+                glossary.append({"term": term, "definition": definition, "notes": notes, "source_doc": ""})
+            mod["glossary"] = glossary
+            _save(data)
+            return True
+    return False
+
+
+def delete_glossary_term(module_name: str, term: str) -> bool:
+    """删除单条术语。"""
+    data = _ensure_file()
+    for mod in data["modules"]:
+        if mod["name"] == module_name:
+            mod["glossary"] = [t for t in mod.get("glossary", []) if t.get("term") != term]
+            _save(data)
+            return True
+    return False
 
 
 # ==================== CLI 测试 ====================
@@ -237,14 +320,14 @@ if __name__ == "__main__":
     import sys
     if len(sys.argv) >= 3 and sys.argv[1] == "create":
         m = create(sys.argv[2])
-        print(f"创建模块: {m}")
+        logger.warning(f"创建模块: {m}")
     elif len(sys.argv) >= 3 and sys.argv[1] == "rename":
         mod = get_by_name(sys.argv[2])
         if mod:
             r = rename(mod["id"], sys.argv[3])
-            print(f"重命名: {r}")
+            logger.warning(f"重命名: {r}")
     elif len(sys.argv) >= 2 and sys.argv[1] == "list":
         import json as _j
-        print(_j.dumps(get_tree(), ensure_ascii=False, indent=2))
+        logger.warning(_j.dumps(get_tree(), ensure_ascii=False, indent=2))
     else:
-        print("用法: python module_tree.py <create|rename|list> [参数]")
+        logger.warning("用法: python module_tree.py <create|rename|list> [参数]")

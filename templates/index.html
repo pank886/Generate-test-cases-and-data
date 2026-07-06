@@ -6,580 +6,970 @@
     <title>智能测试助手</title>
     <style>
         * { box-sizing: border-box; margin: 0; padding: 0; }
+        :root {
+            --primary: #1a73e8; --primary-bg: #e8f0fe; --success: #34a853;
+            --danger: #c5221f; --danger-bg: #fce8e6; --gray: #f5f5f5;
+            --border: #e0e0e0; --text: #333; --text-dim: #888;
+            --radius: 8px; --shadow: 0 1px 3px rgba(0,0,0,.08);
+        }
         body {
             font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-            background: #f5f5f5; color: #333; min-height: 100vh;
-            display: flex; flex-direction: column;
+            background: #f0f2f5; color: var(--text); min-height: 100vh;
         }
         header {
-            background: #1a73e8; color: #fff; padding: 16px 24px;
-            font-size: 20px; font-weight: 600;
+            background: var(--primary); color: #fff; padding: 0 24px;
+            height: 48px; display: flex; align-items: center; gap: 32px;
+            font-size: 16px; font-weight: 600; position: sticky; top: 0; z-index: 100;
         }
-        .container { max-width: 960px; margin: 0 auto; padding: 24px; flex: 1; }
-        .card {
-            background: #fff; border-radius: 8px; padding: 24px;
-            box-shadow: 0 1px 3px rgba(0,0,0,.1); margin-bottom: 24px;
+        header .logo { font-size: 18px; }
+        nav { display: flex; gap: 4px; height: 100%; }
+        nav a {
+            color: rgba(255,255,255,.75); text-decoration: none; padding: 0 16px;
+            display: flex; align-items: center; font-size: 14px; font-weight: 400;
+            border-bottom: 3px solid transparent; transition: .2s;
         }
-        .card h2 { font-size: 16px; margin-bottom: 12px; color: #555; }
+        nav a:hover { color: #fff; }
+        nav a.active { color: #fff; border-bottom-color: #fff; }
+        .body { max-width: 1200px; margin: 0 auto; padding: 24px 24px 48px; }
+        .tab { display: none; }
+        .tab.active { display: block; }
 
-        /* 上传区域 */
-        .upload-area { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
-        .upload-area input[type="file"] { flex: 1; min-width: 200px; }
-        .btn {
-            background: #1a73e8; color: #fff; border: none; padding: 8px 24px;
-            border-radius: 4px; cursor: pointer; font-size: 14px;
+        .card {
+            background: #fff; border-radius: var(--radius); padding: 24px;
+            box-shadow: var(--shadow); margin-bottom: 20px;
         }
+        .card h3 { font-size: 15px; color: #555; margin-bottom: 16px; display: flex; align-items: center; gap: 8px; }
+
+        /* 按钮 */
+        .btn { display: inline-flex; align-items: center; gap: 4px; background: var(--primary);
+            color: #fff; border: none; padding: 8px 18px; border-radius: 4px;
+            cursor: pointer; font-size: 13px; transition: .15s; }
         .btn:hover { background: #1557b0; }
         .btn:disabled { background: #ccc; cursor: not-allowed; }
-        .status-badge {
-            display: inline-block; padding: 2px 10px; border-radius: 10px;
-            font-size: 12px; font-weight: 600;
-        }
-        .badge-ready { background: #e6f4ea; color: #1e7e34; }
-        .badge-pending { background: #fce8e6; color: #c5221f; }
-        .msg { margin-top: 8px; font-size: 13px; }
+        .btn-sm { padding: 4px 12px; font-size: 12px; }
+        .btn-outline { background: #fff; color: var(--primary); border: 1px solid var(--primary); }
+        .btn-outline:hover { background: var(--primary-bg); }
+        .btn-success { background: var(--success); }
+        .btn-success:hover { background: #2d9249; }
+        .btn-danger { background: var(--danger); }
+        .btn-danger:hover { background: #a50e0e; }
+        .btn-danger-outline { background: #fff; color: var(--danger); border: 1px solid var(--danger); }
+        .btn-danger-outline:hover { background: var(--danger-bg); }
 
-        /* 已导入文件列表 */
-        .file-list { margin-top: 12px; }
-        .file-list table { width: 100%; border-collapse: collapse; font-size: 14px; }
-        .file-list th {
-            text-align: left; padding: 8px 12px; border-bottom: 2px solid #eee;
-            color: #888; font-weight: 600; font-size: 12px;
-        }
-        .file-list td { padding: 8px 12px; border-bottom: 1px solid #f0f0f0; }
-        .file-list tr:hover td { background: #f8f9ff; }
-        .file-list .file-name { font-weight: 500; color: #1a73e8; }
-        .file-empty { color: #aaa; font-size: 13px; padding: 16px 0; text-align: center; }
+        /* 标签 */
+        .badge { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 11px; font-weight: 600; }
+        .badge-ok { background: #e6f4ea; color: #1e7e34; }
+        .badge-warn { background: #fef7e0; color: #e37400; }
+        .badge-err { background: var(--danger-bg); color: var(--danger); }
 
-        /* 聊天区域 */
-        #chat-box {
-            border: 1px solid #ddd; border-radius: 6px; min-height: 300px;
-            max-height: 500px; overflow-y: auto; padding: 16px; margin-bottom: 12px;
-            background: #fafafa; font-size: 14px; line-height: 1.6;
+        /* 文件上传卡片 */
+        .upload-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 20px; }
+        @media (max-width: 800px) { .upload-grid { grid-template-columns: 1fr; } }
+        .upload-card {
+            border: 2px dashed var(--border); border-radius: var(--radius);
+            padding: 24px 18px; text-align: center; cursor: pointer; transition: .2s;
+            background: #fafbfc; display: block;
         }
-        .chat-entry { margin-bottom: 12px; }
-        .chat-entry .label { font-weight: 600; color: #1a73e8; }
-        .chat-entry .label.ai { color: #34a853; }
-        .chat-entry .content { white-space: pre-wrap; margin-top: 4px; }
-        .chat-input-row { display: flex; gap: 8px; }
-        .chat-input-row input {
-            flex: 1; padding: 10px 12px; border: 1px solid #ddd;
-            border-radius: 4px; font-size: 14px;
-        }
+        .upload-card:hover { border-color: var(--primary); background: var(--primary-bg); }
+        .upload-card .icon { font-size: 36px; margin-bottom: 8px; }
+        .upload-card .title { font-size: 15px; font-weight: 600; margin-bottom: 4px; }
+        .upload-card .hint { font-size: 12px; color: var(--text-dim); margin-bottom: 12px; }
+        .upload-card input[type="file"] { display: none; }
+        .upload-card.dragover { border-color: var(--success); background: #e6f4ea; }
 
-        /* Excel 计划区域 */
-        .plan-info {
-            background: #e8f0fe; border-radius: 6px; padding: 12px 16px;
-            margin-top: 12px; font-size: 14px;
-        }
-        .plan-info .plan-file { color: #1a73e8; font-weight: 600; word-break: break-all; }
-        .plan-actions { display: flex; gap: 12px; margin-top: 12px; flex-wrap: wrap; }
-        .btn-outline {
-            background: #fff; color: #1a73e8; border: 1px solid #1a73e8;
-            padding: 8px 24px; border-radius: 4px; cursor: pointer; font-size: 14px;
-        }
-        .btn-outline:hover { background: #e8f0fe; }
-        .btn-green {
-            background: #34a853; color: #fff; border: none;
-            padding: 8px 24px; border-radius: 4px; cursor: pointer; font-size: 14px;
-        }
-        .btn-green:hover { background: #2d9249; }
-        .btn-delete {
-            background: none; border: none; cursor: pointer; font-size: 16px;
-            padding: 2px 6px; border-radius: 4px; transition: background .15s;
-        }
-        .btn-delete:hover { background: #fce8e6; }
+        /* 文件列表 */
+        .file-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+        .file-table th { text-align: left; padding: 10px 12px; border-bottom: 2px solid #eee;
+            color: var(--text-dim); font-weight: 600; font-size: 11px; text-transform: uppercase; }
+        .file-table td { padding: 10px 12px; border-bottom: 1px solid #f0f0f0; vertical-align: middle; }
+        .file-table tr:hover td { background: #f8f9ff; }
+        .file-table .name { font-weight: 500; color: var(--primary); }
+        .empty-hint { color: #aaa; font-size: 13px; padding: 24px 0; text-align: center; }
 
-        /* 状态栏 */
-        .status-bar {
-            text-align: center; padding: 8px; font-size: 13px; color: #888;
+        /* 模块管理 */
+        .module-layout { display: grid; grid-template-columns: 320px 1fr; gap: 20px; }
+        @media (max-width: 700px) { .module-layout { grid-template-columns: 1fr; } }
+        .module-tree { font-size: 13px; max-height: 500px; overflow-y: auto; }
+        .module-tree .item {
+            display: flex; align-items: center; gap: 6px; padding: 6px 8px;
+            border-radius: 4px; cursor: pointer; transition: .1s;
         }
+        .module-tree .item:hover { background: var(--primary-bg); }
+        .module-tree .item.selected { background: var(--primary); color: #fff; }
+        .module-tree .item.root { font-weight: 600; }
+        .module-detail { font-size: 14px; }
+        .module-detail .section { margin-bottom: 16px; }
+        .module-detail .section h4 { font-size: 13px; color: var(--text-dim); margin-bottom: 8px; }
+        .tag {
+            display: inline-flex; align-items: center; gap: 4px;
+            background: var(--primary-bg); color: var(--primary); padding: 3px 10px;
+            border-radius: 12px; font-size: 12px; margin: 2px;
+        }
+        .tag .remove { cursor: pointer; font-weight: 700; opacity: .5; }
+        .tag .remove:hover { opacity: 1; color: var(--danger); }
+
+        /* 聊天 */
+        .chat-layout { display: grid; grid-template-columns: 1fr 380px; gap: 20px; }
+        @media (max-width: 900px) { .chat-layout { grid-template-columns: 1fr; } }
+        .chat-box {
+            border: 1px solid var(--border); border-radius: var(--radius);
+            min-height: 360px; max-height: 480px; overflow-y: auto;
+            padding: 16px; background: #fafafa; font-size: 13px; line-height: 1.7;
+        }
+        .chat-msg { margin-bottom: 12px; }
+        .chat-msg .who { font-weight: 600; font-size: 12px; margin-bottom: 2px; }
+        .chat-msg .who.user { color: var(--primary); }
+        .chat-msg .who.ai { color: var(--success); }
+        .chat-msg .body { white-space: pre-wrap; }
+        .chat-input-row { display: flex; gap: 8px; margin-top: 12px; }
+        .chat-input-row input { flex:1; padding:10px 12px; border:1px solid var(--border); border-radius:4px; font-size:13px; }
+
+        /* 进度 */
+        .progress-wrap { margin-top: 12px; }
+        .progress-bar {
+            width: 100%; height: 6px; background: #eee; border-radius: 3px;
+            overflow: hidden; margin-bottom: 6px;
+        }
+        .progress-fill { height: 100%; background: var(--primary); border-radius: 3px; transition: width .3s; }
+
+        /* 文件编辑器 */
+        .file-editor { display: none; }
+        .file-editor textarea {
+            width: 100%; min-height: 300px; font-family: 'Consolas', 'Courier New', monospace;
+            font-size: 13px; border: 1px solid var(--border); border-radius: 4px;
+            padding: 12px; line-height: 1.5; resize: vertical;
+        }
+        .file-editor .actions { display: flex; gap: 8px; margin-top: 12px; }
+
+        /* 结果面板 */
+        .result-panel {
+            background: #fff; border-radius: var(--radius); box-shadow: var(--shadow);
+            padding: 16px; font-size: 13px; max-height: 600px; overflow-y: auto;
+        }
+        .result-panel .file-row {
+            display: flex; align-items: center; justify-content: space-between;
+            padding: 8px 0; border-bottom: 1px solid #f0f0f0;
+        }
+        .result-panel .file-row:last-child { border: none; }
+
+        .toast {
+            position: fixed; bottom: 24px; right: 24px; z-index: 9999;
+            background: #333; color: #fff; padding: 12px 20px; border-radius: 6px;
+            font-size: 13px; opacity: 0; transform: translateY(16px); transition: .3s;
+            pointer-events: none;
+        }
+        .toast.show { opacity: 1; transform: translateY(0); }
+
+        .modal-overlay {
+            position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+            background: rgba(0,0,0,.4); z-index: 1000;
+            display: flex; align-items: center; justify-content: center;
+        }
+        .modal {
+            background: #fff; border-radius: var(--radius); padding: 24px;
+            max-width: 640px; width: 92%; max-height: 80vh; overflow-y: auto;
+            box-shadow: 0 8px 32px rgba(0,0,0,.2);
+        }
+        .modal h3 { margin-bottom: 16px; }
+        .modal input[type="text"] { width:100%; padding:8px; border:1px solid var(--border); border-radius:4px; font-size:13px; margin-bottom:8px; }
+        .modal .btn-row { display: flex; gap: 8px; justify-content: flex-end; margin-top: 16px; }
+        .hidden { display: none !important; }
     </style>
 </head>
 <body>
-    <header>🛠️ 智能测试助手</header>
-    <div class="container">
-        <!-- 上传 API 文档 -->
-        <div class="card" id="upload-card">
-            <h2>📄 上传 API 文档</h2>
-            <div class="upload-area">
-                <input type="file" id="doc-file" accept=".pdf,.md,.docx,.zip">
-                <button class="btn" id="upload-btn" onclick="uploadFile()">上传并构建</button>
-                <span id="vector-status"
-                      class="status-badge {{ 'badge-ready' if vector_ready else 'badge-pending' }}">
-                    {{ '✅ 已就绪' if vector_ready else '❌ 未上传' }}
-                </span>
-            </div>
-            <div id="upload-msg" class="msg"></div>
-        </div>
+<header>
+    <span class="logo">🛠️ 智能测试助手</span>
+    <nav>
+        <a href="#" data-tab="upload" class="active" onclick="switchTab('upload')">📄 文档上传</a>
+        <a href="#" data-tab="modules" onclick="switchTab('modules')">📁 模块管理</a>
+        <a href="#" data-tab="chat" onclick="switchTab('chat')">💬 测试生成</a>
+    </nav>
+    <span id="nav-status" style="margin-left:auto; font-size:12px; font-weight:400; opacity:.8;"></span>
+</header>
 
-        <!-- 模块管理 -->
-        <div class="card" id="module-card">
-            <h2>📁 模块管理</h2>
-            <div style="margin-bottom:10px;display:flex;gap:8px;">
-                <input type="text" id="new-module-name" placeholder="新模块名称"
-                       style="flex:1;padding:8px;border:1px solid #ddd;border-radius:4px;">
-                <button class="btn" onclick="createModule()">创建</button>
-                <button class="btn-outline" onclick="refreshModuleTree()">刷新</button>
+<div class="body">
+
+<!-- ==================== Tab 1: 文档上传 ==================== -->
+<div class="tab active" id="tab-upload">
+
+    <div class="card">
+        <h3>📤 上传文档</h3>
+        <div class="upload-grid">
+            <!-- 产品文档 -->
+            <label class="upload-card" id="up-product"
+                 ondragover="event.preventDefault();this.classList.add('dragover')"
+                 ondragleave="this.classList.remove('dragover')"
+                 ondrop="event.preventDefault();this.classList.remove('dragover');handleDrop(event,'product')">
+                <input type="file" accept=".pdf,.docx" onchange="uploadFile(this,'product')">
+                <div class="icon">📘</div>
+                <div class="title">产品文档</div>
+                <div class="hint">PDF / Word 格式<br>自动提取模块与术语表</div>
+            </label>
+            <!-- 接口文档 -->
+            <label class="upload-card" id="up-api"
+                 ondragover="event.preventDefault();this.classList.add('dragover')"
+                 ondragleave="this.classList.remove('dragover')"
+                 ondrop="event.preventDefault();this.classList.remove('dragover');handleDrop(event,'api')">
+                <input type="file" accept=".md" onchange="uploadFile(this,'api')">
+                <div class="icon">📝</div>
+                <div class="title">接口文档</div>
+                <div class="hint">Markdown 格式<br>自动提取接口定义</div>
+            </label>
+            <!-- Axure 原型 -->
+            <label class="upload-card" id="up-axure"
+                 ondragover="event.preventDefault();this.classList.add('dragover')"
+                 ondragleave="this.classList.remove('dragover')"
+                 ondrop="event.preventDefault();this.classList.remove('dragover');handleDrop(event,'axure')">
+                <input type="file" accept=".zip" onchange="uploadFile(this,'axure')">
+                <div class="icon">🎨</div>
+                <div class="title">Axure 原型</div>
+                <div class="hint">ZIP 压缩包<br>自动解析页面与交互</div>
+            </label>
+        </div>
+    </div>
+
+    <!-- 上传进度 -->
+    <div class="card hidden" id="upload-progress-card">
+        <h3>⏳ 处理中</h3>
+        <div class="progress-bar"><div class="progress-fill" id="upload-fill" style="width:0%"></div></div>
+        <div style="font-size:12px;color:var(--text-dim);margin-top:6px;" id="upload-progress-text"></div>
+    </div>
+
+    <div class="card">
+        <h3>📂 已上传文件 <span style="font-size:12px;color:var(--text-dim);font-weight:400;">（<span id="file-count">0</span> 个文件）</span></h3>
+        <div id="file-empty" class="empty-hint">暂无已导入文件</div>
+        <table class="file-table hidden" id="file-table">
+            <thead><tr><th>文件名</th><th>类型</th><th>大小</th><th>文本块</th><th>时间</th><th>操作</th></tr></thead>
+            <tbody id="file-tbody"></tbody>
+        </table>
+    </div>
+</div>
+
+<!-- ==================== Tab 2: 模块管理 ==================== -->
+<div class="tab" id="tab-modules">
+    <div class="module-layout">
+        <div class="card" style="padding:16px;">
+            <h3 style="margin-bottom:12px;">📁 模块树</h3>
+            <div style="display:flex;gap:6px;margin-bottom:12px;">
+                <input type="text" id="new-mod-name" placeholder="新模块名" style="flex:1;padding:6px 8px;border:1px solid var(--border);border-radius:4px;font-size:12px;">
+                <button class="btn btn-sm" onclick="createModule()">+</button>
             </div>
-            <div id="module-tree" style="font-size:14px;max-height:300px;overflow-y:auto;">
-                <div style="color:#aaa;padding:8px;">加载中...</div>
+            <div style="font-size:11px;color:var(--text-dim);margin-bottom:8px;">💡 选中模块后点 + 创建子模块</div>
+            <div class="module-tree" id="module-tree"></div>
+        </div>
+        <div class="card module-detail" id="module-detail">
+            <h3>📋 模块详情</h3>
+            <p style="color:var(--text-dim);">← 选择左侧模块查看详情</p>
+            <div id="module-docs-section" class="hidden">
+                <h4 style="font-size:13px;color:var(--text-dim);margin-bottom:8px;">📄 关联文档</h4>
+                <div id="module-docs-list" style="font-size:13px;"></div>
             </div>
         </div>
+    </div>
+</div>
 
-        <!-- 已导入文件 -->
-        <div class="card">
-            <h2>📂 已导入文件</h2>
-            <div class="file-list">
-                <div id="file-empty" class="file-empty">暂无导入文件</div>
-                <table id="file-table" style="display:none;">
-                    <thead>
-                        <tr><th>文件名</th><th>类型</th><th>大小</th><th>文本块</th><th>导入时间</th><th>操作</th></tr>
-                    </thead>
-                    <tbody id="file-tbody"></tbody>
-                </table>
-            </div>
-        </div>
-
-        <!-- 聊天测试 -->
-        <div class="card">
-            <h2>💬 输入测试需求</h2>
-            <div id="chat-box">
-                <div class="chat-entry">
-                    <div class="content" style="color:#888;">
-                        上传 API 文档后，在这里输入测试需求，例如：
-                        "测试车辆入场后查询在场记录的功能"
+<!-- ==================== Tab 3: 测试生成 ==================== -->
+<div class="tab" id="tab-chat">
+    <div class="chat-layout">
+        <div>
+            <div class="card" style="padding:16px;">
+                <h3>💬 测试需求</h3>
+                <div class="chat-box" id="chat-box">
+                    <div class="chat-msg">
+                        <div class="body" style="color:var(--text-dim);">
+                            上传文档后，在这里输入测试需求开始生成。<br>
+                            例：「测试健身房新增、修改、删除和分页查询功能」
+                        </div>
                     </div>
                 </div>
+                <div class="chat-input-row">
+                    <input type="text" id="chat-input" placeholder="输入测试需求，Enter 发送..."
+                           onkeydown="if(event.key==='Enter')sendChat()">
+                    <button class="btn" id="chat-btn" onclick="sendChat()">发送</button>
+                </div>
+                <div class="progress-wrap hidden" id="chat-progress">
+                    <div class="progress-bar"><div class="progress-fill" id="chat-fill" style="width:0%"></div></div>
+                    <span style="font-size:12px;color:var(--text-dim);" id="chat-progress-text">处理中...</span>
+                </div>
             </div>
-            <div class="chat-input-row">
-                <input type="text" id="chat-input" placeholder="输入测试需求，按 Enter 发送..."
-                       onkeydown="if(event.key==='Enter') sendChat()">
-                <button class="btn" id="chat-btn" onclick="sendChat()">发送</button>
+
+            <!-- 生成结果 -->
+            <div class="card hidden" id="result-card">
+                <h3>📊 生成结果</h3>
+                <div id="result-content"></div>
+            </div>
+        </div>
+
+        <!-- 右侧文件面板 -->
+        <div class="result-panel hidden" id="file-panel">
+            <h4 style="font-size:14px; margin-bottom:12px;">📂 生成文件</h4>
+            <div id="file-list-panel"></div>
+            <div class="file-editor hidden" id="file-editor">
+                <h4 style="font-size:13px;margin-bottom:8px;color:var(--primary);" id="editor-title"></h4>
+                <textarea id="editor-area" oninput="editorChanged()"></textarea>
+                <div class="actions">
+                    <button class="btn btn-sm" onclick="saveEditor()">💾 保存</button>
+                    <button class="btn btn-sm btn-outline" onclick="openFileExternal()">🔗 外部打开</button>
+                    <button class="btn btn-sm btn-success" onclick="saveEditor(); revalidate();">✅ 保存并重新校验</button>
+                    <span style="font-size:12px;color:var(--text-dim);margin-left:8px;" id="editor-status"></span>
+                </div>
             </div>
         </div>
     </div>
-    <!-- 测试计划卡片（聊天生成后显示） -->
-    <div class="card" id="plan-card" style="display:none;">
-        <h2>📊 测试计划</h2>
-        <div id="plan-content"></div>
-    </div>
+</div>
 
-    <!-- 上传审核弹窗 -->
-    <div id="audit-modal" style="display:none; position:fixed; top:0; left:0; right:0; bottom:0;
-         background:rgba(0,0,0,.4); z-index:1000; align-items:center; justify-content:center;">
-        <div style="background:#fff; border-radius:8px; padding:24px; max-width:480px; width:90%; box-shadow:0 4px 24px rgba(0,0,0,.2);">
-            <h3 style="margin-bottom:16px;">📋 模块确认</h3>
-            <div id="audit-content"></div>
-            <div style="margin-top:16px; display:flex; gap:8px; justify-content:flex-end;">
-                <button class="btn-outline" onclick="closeAudit()">跳过</button>
-                <button class="btn" onclick="confirmAudit()">确认</button>
-            </div>
-        </div>
-    </div>
+</div><!-- .body -->
 
-    <div class="status-bar" id="loading" style="display:none;">⏳ 处理中，请稍候...</div>
+<!-- Toast -->
+<div class="toast" id="toast"></div>
+<!-- 文件查看 Modal -->
+<div class="modal-overlay hidden" id="view-modal" onclick="if(event.target===this)closeView()">
+    <div class="modal"><div id="view-content"></div></div>
+</div>
 
-    <script>
-        // ========== 审计状态 ==========
-        let _pendingAudit = null;  // { doc_id, module_name, related_modules }
+<script>
+    const INITIAL_FILES = {{ imported_files | tojson | safe }};
+    const VECTOR_READY = {{ 'true' if vector_ready else 'false' }};
+    let currentTab = 'upload';
+    let selectedModuleId = null;
+    let editorPath = null;
+    let editorDirty = false;
+    let resultFiles = [];  // 生成的文件列表 [{path, name, type}]
 
-        function showAudit(docId, moduleName, relatedModules) {
-            _pendingAudit = { doc_id: docId, module_name: moduleName, related_modules: relatedModules || [] };
-            const content = document.getElementById('audit-content');
-            let html = `<p style="margin-bottom:12px;">系统识别到以下模块信息，请确认或修改:</p>`;
-            html += `<div style="margin-bottom:10px;">
-                <label style="font-weight:600;font-size:13px;color:#555;">所属模块</label>
-                <input id="audit-module" value="${escapeHtml(moduleName)}"
-                       style="width:100%;padding:8px;border:1px solid #ddd;border-radius:4px;margin-top:4px;">
-            </div>`;
-            html += `<div>
-                <label style="font-weight:600;font-size:13px;color:#555;">关联模块（逗号分隔）</label>
-                <input id="audit-related" value="${escapeHtml((relatedModules||[]).join(', '))}"
-                       style="width:100%;padding:8px;border:1px solid #ddd;border-radius:4px;margin-top:4px;">
-            </div>`;
-            content.innerHTML = html;
-            document.getElementById('audit-modal').style.display = 'flex';
-        }
+    // ==================== 导航 ====================
+    function switchTab(name) {
+        document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+        document.querySelectorAll('nav a').forEach(a => a.classList.remove('active'));
+        document.getElementById('tab-' + name).classList.add('active');
+        document.querySelector('nav a[data-tab="'+name+'"]').classList.add('active');
+        currentTab = name;
+        if (name === 'modules') refreshModuleTree();
+        if (name === 'upload') refreshFileList();
+    }
 
-        function closeAudit() {
-            document.getElementById('audit-modal').style.display = 'none';
-            _pendingAudit = null;
-        }
+    // ==================== Toast ====================
+    let _toastTimer;
+    function toast(msg) {
+        const el = document.getElementById('toast');
+        el.textContent = msg; el.classList.add('show');
+        clearTimeout(_toastTimer);
+        _toastTimer = setTimeout(() => el.classList.remove('show'), 3000);
+    }
 
-        async function confirmAudit() {
-            if (!_pendingAudit) return closeAudit();
-            const moduleName = document.getElementById('audit-module').value.trim();
-            const relatedRaw = document.getElementById('audit-related').value.trim();
-            const related = relatedRaw ? relatedRaw.split(/[,，\\s]+/).filter(Boolean) : [];
+    function escapeHtml(s) { return s ? String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;') : ''; }
+
+    // ==================== 轮询 ====================
+    async function pollTask(taskId, onProgress, onDone) {
+        for (let i = 0; i < 120; i++) {
+            await sleep(2000);
             try {
-                await fetch('/update-module', {
-                    method: 'POST',
-                    headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({
-                        doc_id: _pendingAudit.doc_id,
-                        module_name: moduleName || _pendingAudit.module_name,
-                        related_modules: related,
-                    }),
-                });
-                showToast('✅ 模块信息已更新');
-            } catch (e) {
-                showToast('❌ 更新失败: ' + e.message);
-            }
-            closeAudit();
+                const r = await fetch('/task/' + taskId);
+                const d = await r.json();
+                if (!d.success) { onDone({error: d.message}); return; }
+                const t = d.task;
+                if (onProgress) onProgress(t);
+                if (t.status === 'completed') { onDone(t.result); return; }
+                if (t.status === 'failed') { onDone({error: t.error || '未知错误'}); return; }
+            } catch(e) { /* retry */ }
         }
+        onDone({error: '任务超时'});
+    }
+    function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
-        // ========== 初始文件列表（服务端渲染） ==========
-        const INITIAL_FILES = {{ imported_files | tojson | safe }};
+    // ==================== 上传 ====================
+    function handleDrop(e, type) {
+        const files = e.dataTransfer.files;
+        if (files.length) uploadWithFile(files[0], type);
+    }
 
-        // ========== 页面加载时刷新文件列表 ==========
-        window.addEventListener('load', function() {
-            if (INITIAL_FILES && INITIAL_FILES.length > 0) {
-                renderFileList(INITIAL_FILES);
+    function uploadFile(input, type) {
+        if (input.files.length) uploadWithFile(input.files[0], type);
+        input.value = '';
+    }
+
+    function uploadWithFile(file, type) {
+        const formData = new FormData();
+        formData.append('file', file);
+
+        // 显示进度条
+        const progCard = document.getElementById('upload-progress-card');
+        const progFill = document.getElementById('upload-fill');
+        const progText = document.getElementById('upload-progress-text');
+        progCard.classList.remove('hidden');
+        progFill.style.width = '0%';
+        progText.textContent = '上传 ' + file.name + ' ...';
+
+        fetch('/upload-file', { method: 'POST', body: formData })
+        .then(r => r.json())
+        .then(data => {
+            if (data.success && data.task_id) {
+                const tid = data.task_id;
+                progText.textContent = '文件已接收，处理中...';
+                pollTask(tid,
+                    t => {
+                        progFill.style.width = (t.progress || 0) + '%';
+                        progText.textContent = t.message || '处理中...';
+                    },
+                    result => {
+                        if (result && !result.error) {
+                            progFill.style.width = '100%';
+                            progText.textContent = '✅ ' + (result.message || '完成');
+                            toast('✅ ' + (result.message || '完成'));
+                            refreshFileList();
+                            if (result.module_name) showView(result);
+                        } else {
+                            progText.textContent = '❌ ' + (result ? result.error : '失败');
+                            toast('❌ ' + (result ? result.error : '失败'));
+                        }
+                        setTimeout(() => progCard.classList.add('hidden'), 3000);
+                    }
+                );
             } else {
-                refreshFileList();
+                progText.textContent = '❌ ' + (data.message || '上传失败');
+                toast('❌ ' + (data.message || '上传失败'));
+                setTimeout(() => progCard.classList.add('hidden'), 3000);
             }
-            refreshModuleTree();
+        })
+        .catch(e => {
+            progText.textContent = '❌ ' + e.message;
+            toast('❌ ' + e.message);
+            setTimeout(() => progCard.classList.add('hidden'), 3000);
         });
+    }
 
-        // ========== 上传文件（PDF / MD） ==========
-        async function uploadFile() {
-            const fileInput = document.getElementById('doc-file');
-            const msg = document.getElementById('upload-msg');
-            const status = document.getElementById('vector-status');
-            const btn = document.getElementById('upload-btn');
+    // ==================== 文件列表 ====================
+    async function refreshFileList() {
+        try {
+            const r = await fetch('/uploaded-files');
+            const d = await r.json();
+            renderFileList(d.files);
+            document.getElementById('nav-status').textContent = d.vector_ready ? '✅ 已就绪' : '❌ 未上传';
+        } catch(e) { console.error(e); }
+    }
 
-            if (!fileInput.files.length) {
-                msg.innerHTML = '⚠️ 请选择 PDF 或 MD 文件';
-                return;
-            }
+    function renderFileList(files) {
+        const empty = document.getElementById('file-empty');
+        const table = document.getElementById('file-table');
+        const tbody = document.getElementById('file-tbody');
+        document.getElementById('file-count').textContent = files.length;
+        if (!files.length) { empty.classList.remove('hidden'); table.classList.add('hidden'); return; }
+        empty.classList.add('hidden'); table.classList.remove('hidden');
+        tbody.innerHTML = files.map(f => {
+            const typeLabel = {axure:'🎨 Axure', pdf:'📄 PDF', md:'📝 MD', docx:'📘 Word'}[f.type] || f.type || '?';
+            return `<tr>
+                <td class="name">${escapeHtml(f.name)}</td>
+                <td>${typeLabel}</td>
+                <td>${escapeHtml(f.size)}</td>
+                <td>${f.chunks}</td>
+                <td>${escapeHtml(f.time)}</td>
+                <td>
+                    <button class="btn btn-sm btn-outline" onclick="viewFile('${escapeHtml(f.name)}')">🔍 查看</button>
+                    <button class="btn btn-sm btn-danger-outline" style="margin-left:4px;" onclick="deleteFile('${escapeHtml(f.name)}')">🗑</button>
+                </td>
+            </tr>`;
+        }).join('');
+    }
 
-            const formData = new FormData();
-            formData.append('file', fileInput.files[0]);
+    function viewFile(filename) {
+        // 显示文件基本信息
+        const f = INITIAL_FILES.find(x => x.name === filename) || {};
+        let html = `<h3>📋 ${escapeHtml(filename)}</h3>`;
+        html += `<table style="width:100%;font-size:13px;">`;
+        html += `<tr><td style="padding:8px;color:var(--text-dim);">类型</td><td>${escapeHtml(f.type||'?')}</td></tr>`;
+        html += `<tr><td style="padding:8px;color:var(--text-dim);">大小</td><td>${escapeHtml(f.size||'?')}</td></tr>`;
+        html += `<tr><td style="padding:8px;color:var(--text-dim);">文本块</td><td>${f.chunks||'?'}</td></tr>`;
+        html += `<tr><td style="padding:8px;color:var(--text-dim);">时间</td><td>${escapeHtml(f.time||'?')}</td></tr>`;
+        html += `</table>`;
+        html += `<div class="btn-row"><button class="btn" onclick="closeView()">关闭</button></div>`;
+        showModal(html);
+    }
 
-            btn.disabled = true;
-            msg.innerHTML = '⏳ 正在上传并构建向量库...';
-
-            try {
-                const resp = await fetch('/upload-file', { method: 'POST', body: formData });
-                const data = await resp.json();
-                if (data.success) {
-                    msg.innerHTML = '✅ ' + data.message;
-                    status.className = 'status-badge badge-ready';
-                    status.textContent = '✅ 已就绪';
-                    refreshFileList();
-                    // 如果有模块信息，弹出审核弹窗
-                    if (data.module_name) {
-                        showAudit(data.doc_id, data.module_name, data.related_modules);
-                    }
-                } else {
-                    msg.innerHTML = '❌ ' + data.message;
-                }
-            } catch (e) {
-                msg.innerHTML = '❌ 请求失败: ' + e.message;
-            } finally {
-                btn.disabled = false;
-            }
+    function showView(data) {
+        let html = `<h3>📋 文档信息</h3>`;
+        if (data.file) {
+            html += `<p><strong>文件:</strong> ${escapeHtml(data.file.name)}</p>`;
         }
-
-        // ========== 刷新文件列表 ==========
-        async function refreshFileList() {
-            try {
-                const resp = await fetch('/uploaded-files');
-                const data = await resp.json();
-                renderFileList(data.files);
-                // 同步更新向量库状态
-                const status = document.getElementById('vector-status');
-                if (data.vector_ready) {
-                    status.className = 'status-badge badge-ready';
-                    status.textContent = '✅ 已就绪';
-                } else {
-                    status.className = 'status-badge badge-pending';
-                    status.textContent = '❌ 未上传';
-                }
-            } catch (e) {
-                console.error('刷新文件列表失败:', e);
-            }
+        if (data.module_name) html += `<p><strong>模块:</strong> ${escapeHtml(data.module_name)}</p>`;
+        if (data.related_modules && data.related_modules.length) {
+            html += `<p><strong>关联模块:</strong> ${data.related_modules.map(escapeHtml).join(', ')}</p>`;
         }
+        html += `<div class="btn-row"><button class="btn" onclick="closeView()">关闭</button></div>`;
+        showModal(html);
+    }
 
-        function renderFileList(files) {
-            const empty = document.getElementById('file-empty');
-            const table = document.getElementById('file-table');
-            const tbody = document.getElementById('file-tbody');
+    function showModal(html) {
+        document.getElementById('view-content').innerHTML = html;
+        document.getElementById('view-modal').classList.remove('hidden');
+    }
 
-            if (!files || files.length === 0) {
-                empty.style.display = 'block';
-                table.style.display = 'none';
-                return;
-            }
+    function closeView() {
+        document.getElementById('view-modal').classList.add('hidden');
+    }
 
-            empty.style.display = 'none';
-            table.style.display = 'table';
-            function typeIcon(t) {
-                if (t === 'axure') return '🎨 Axure';
-                if (t === 'pdf') return '📄 PDF';
-                if (t === 'md') return '📝 MD';
-                return '📁 ' + (t || '?');
-            }
-            tbody.innerHTML = files.map(f => `
-                <tr>
-                    <td class="file-name">${escapeHtml(f.name)}</td>
-                    <td>${typeIcon(f.type)}</td>
-                    <td>${escapeHtml(f.size)}</td>
-                    <td>${f.chunks}</td>
-                    <td>${escapeHtml(f.time)}</td>
-                    <td>
-                        <button class="btn-delete" onclick="deleteFile('${escapeHtml(f.name)}')" title="删除文件">🗑️</button>
-                    </td>
-                </tr>
-            `).join('');
+    async function deleteFile(filename) {
+        if (!confirm('确认删除 "' + filename + '" ？\n向量库数据也将一并删除。')) return;
+        try {
+            const fd = new FormData(); fd.append('filename', filename);
+            const r = await fetch('/delete-file', { method: 'POST', body: fd });
+            const d = await r.json();
+            toast(d.success ? '✅ 已删除' : '❌ ' + d.message);
+            if (d.success) refreshFileList();
+        } catch(e) { toast('❌ ' + e.message); }
+    }
+
+    // ==================== 模块管理 ====================
+    async function refreshModuleTree() {
+        try {
+            const r = await fetch('/api/modules');
+            const d = await r.json();
+            if (d.success) renderModuleTree(d.tree);
+        } catch(e) { console.error(e); }
+    }
+
+    function renderModuleTree(tree) {
+        const container = document.getElementById('module-tree');
+        if (!tree || !tree.length) {
+            container.innerHTML = '<div style="color:#aaa;padding:12px;">暂无模块</div>';
+            return;
         }
+        container.innerHTML = tree.map(n => renderTreeNode(n, 0)).join('');
+    }
 
-        // ========== 模块管理 ==========
-        async function refreshModuleTree() {
-            try {
-                const resp = await fetch('/api/modules');
-                const data = await resp.json();
-                if (!data.success) return;
-                renderModuleTree(data.tree);
-            } catch(e) {
-                console.error('模块树加载失败:', e);
-            }
+    function renderTreeNode(node, depth) {
+        const indent = depth * 16;
+        const hasChildren = node.children && node.children.length;
+        const icon = depth === 0 ? '🏠' : (hasChildren ? '📂' : '📄');
+        const selClass = node.id === selectedModuleId ? ' selected' : '';
+        let html = `<div class="item${selClass}" style="padding-left:${indent+8}px;" onclick="selectModule('${node.id}','${escapeHtml(node.name)}')">
+            <span>${icon}</span><span>${escapeHtml(node.name)}</span>
+            ${node.id !== 'root' ? `<span style="margin-left:auto;display:inline-flex;gap:2px;">
+                <button class="btn btn-sm btn-outline" style="padding:1px 6px;font-size:10px;" onclick="event.stopPropagation();renameModule('${node.id}','${escapeHtml(node.name)}')">✏️</button>
+                <button class="btn btn-sm btn-danger-outline" style="padding:1px 6px;font-size:10px;" onclick="event.stopPropagation();deleteModule('${node.id}','${escapeHtml(node.name)}')">🗑</button>
+            </span>` : ''}
+        </div>`;
+        if (hasChildren) {
+            html += node.children.map(c => renderTreeNode(c, depth + 1)).join('');
         }
+        return html;
+    }
 
-        function renderModuleTree(tree) {
-            const container = document.getElementById('module-tree');
-            if (!tree || tree.length === 0) {
-                container.innerHTML = '<div style="color:#aaa;padding:8px;">暂无模块</div>';
-                return;
-            }
-            function renderNode(node, depth) {
-                const indent = depth * 20;
-                const isRoot = node.id === 'root';
-                const label = isRoot ? '' : `<span style="margin-left:${indent}px;display:inline-flex;gap:6px;align-items:center;padding:4px 0;">
-                    ${node.children && node.children.length ? '📂' : '📄'} <strong>${escapeHtml(node.name)}</strong>
-                    <button onclick="renameModule('${node.id}','${escapeHtml(node.name)}')" style="border:none;background:none;cursor:pointer;font-size:12px;color:#1a73e8;padding:0 4px;">✏️</button>
-                    ${node.id !== 'root' ? `<button onclick="deleteModule('${node.id}','${escapeHtml(node.name)}')" style="border:none;background:none;cursor:pointer;font-size:12px;color:#c5221f;padding:0 4px;">🗑️</button>` : ''}
-                </span>`;
-                let html = label;
-                if (node.children) {
-                    html += '<div style="margin-left:4px;">' + node.children.map(c => renderNode(c, depth + 1)).join('') + '</div>';
-                }
-                return html;
-            }
-            container.innerHTML = tree.map(n => renderNode(n, 0)).join('');
-        }
-
-        async function createModule() {
-            const input = document.getElementById('new-module-name');
-            const name = input.value.trim();
-            if (!name) return;
-            try {
-                const resp = await fetch('/api/modules', {
-                    method: 'POST',
-                    headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({name: name}),
-                });
-                const data = await resp.json();
-                if (data.success) {
-                    input.value = '';
-                    refreshModuleTree();
-                    showToast('✅ 模块已创建');
-                }
-            } catch(e) {
-                showToast('❌ 创建失败: ' + e.message);
-            }
-        }
-
-        async function renameModule(id, currentName) {
-            const newName = prompt('重命名模块:', currentName);
-            if (!newName || newName === currentName) return;
-            try {
-                const resp = await fetch('/api/modules/' + id, {
-                    method: 'PUT',
-                    headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({name: newName}),
-                });
-                const data = await resp.json();
-                if (data.success) {
-                    refreshModuleTree();
-                    showToast('✅ ' + data.message);
-                }
-            } catch(e) {
-                showToast('❌ 重命名失败: ' + e.message);
-            }
-        }
-
-        async function deleteModule(id, name) {
-            if (!confirm('确定删除模块 "' + name + '" 吗？')) return;
-            try {
-                const resp = await fetch('/api/modules/' + id, { method: 'DELETE' });
-                const data = await resp.json();
-                if (data.success) {
-                    refreshModuleTree();
-                    showToast('✅ 已删除');
-                } else {
-                    showToast('❌ ' + data.message);
-                }
-            } catch(e) {
-                showToast('❌ 删除失败: ' + e.message);
-            }
-        }
-
-        // ========== 发送聊天 ==========
-        async function sendChat() {
-            const input = document.getElementById('chat-input');
-            const box = document.getElementById('chat-box');
-            const btn = document.getElementById('chat-btn');
-            const loading = document.getElementById('loading');
-            const text = input.value.trim();
-            if (!text) return;
-
-            box.innerHTML += '<div class="chat-entry"><div class="label">🧑 你:</div><div class="content">'
-                          + escapeHtml(text) + '</div></div>';
-            input.value = '';
-            box.scrollTop = box.scrollHeight;
-
-            btn.disabled = true;
-            loading.style.display = 'block';
-
-            try {
-                const formData = new FormData();
-                formData.append('user_input', text);
-                const resp = await fetch('/chat', { method: 'POST', body: formData });
-                const data = await resp.json();
-                if (data.success) {
-                    const thinking = Array.isArray(data.thinking) ? data.thinking.join('<br>') : data.thinking;
-                    let chatHtml = '<div class="chat-entry"><div class="label ai">🤖 AI:</div><div class="content">';
-
-                    // 需人工审查警告
-                    if (data.requires_review) {
-                        const errs = data.error_info || [];
-                        let errHtml = errs.slice(0, 8).map(e => '<div>• ' + escapeHtml(e) + '</div>').join('');
-                        if (errs.length > 8) errHtml += '<div>... 共 ' + errs.length + ' 个错误</div>';
-                        chatHtml += '<div style="background:#fce8e6;border:1px solid #c5221f;border-radius:4px;padding:8px 12px;margin-bottom:8px;font-size:13px;">'
-                                 + '<strong>⚠️ 需人工审查</strong>: Excel 计划校验失败，请手动修改后重新校验。<br>'
-                                 + errHtml + '</div>';
-                    }
-
-                    chatHtml += '<details><summary>思考过程</summary>' + escapeHtml(thinking) + '</details>'
-                             + escapeHtml(data.reply) + '</div></div>';
-                    box.innerHTML += chatHtml;
-
-                    // 如果有 Excel 计划，展示计划卡片
-                    if (data.excel_path) {
-                        showPlanCard(data.excel_path, data.excel_name || data.excel_path.split('\\\\').pop());
-                    }
-                } else {
-                    box.innerHTML += '<div class="chat-entry"><div class="label ai">❌ 错误:</div><div class="content">'
-                                  + escapeHtml(data.message) + '</div></div>';
-                }
-            } catch (e) {
-                box.innerHTML += '<div class="chat-entry"><div class="label ai">❌ 错误:</div><div class="content">'
-                              + escapeHtml(e.message) + '</div></div>';
-            } finally {
-                btn.disabled = false;
-                loading.style.display = 'none';
-                box.scrollTop = box.scrollHeight;
-            }
-        }
-
-        // ========== 打开本地文件 ==========
-        async function openFile(filePath) {
-            if (!filePath) return;
-            try {
-                const formData = new FormData();
-                formData.append('file_path', filePath);
-                await fetch('/open-file', { method: 'POST', body: formData });
-            } catch (e) {
-                console.error('打开文件失败:', e);
-            }
-        }
-
-        // ========== Excel 计划展示与确认 ==========
-        function showPlanCard(excelPath, excelName) {
-            const card = document.getElementById('plan-card');
-            const content = document.getElementById('plan-content');
-            const outputDir = excelPath.substring(0, excelPath.lastIndexOf('\\\\'));
-            card.style.display = 'block';
-            content.innerHTML = `
-                <div class="plan-info">
-                    <div style="margin-bottom:6px;">📄 <strong>计划文件:</strong></div>
-                    <input type="text" id="excel-path-input" value="${escapeHtml(excelPath)}"
-                           style="width:100%; padding:6px 8px; border:1px solid #ddd; border-radius:4px; font-size:13px; margin-bottom:8px;">
-                    <div style="font-size:12px; color:#666; word-break:break-all;">📂 <strong>输出目录:</strong> ${escapeHtml(outputDir)}</div>
+    function selectModule(id, name) {
+        selectedModuleId = id;
+        refreshModuleTree();
+        const detail = document.getElementById('module-detail');
+        detail.innerHTML = `<h3>📋 ${escapeHtml(name)}</h3>
+            <div class="section"><h4>模块 ID</h4><code style="font-size:12px;">${escapeHtml(id)}</code></div>
+            <div class="section">
+                <h4>操作</h4>
+                <button class="btn btn-sm" onclick="renameModule('${id}','${escapeHtml(name)}')">✏️ 重命名</button>
+                <button class="btn btn-sm btn-outline" onclick="mergeModule('${id}','${escapeHtml(name)}')" style="margin-left:4px;">🔗 合并</button>
+            </div>
+            <div class="section">
+                <h4>📖 业务术语表</h4>
+                <div style="display:flex;gap:4px;margin-bottom:6px;">
+                    <input type="text" id="new-term-name" placeholder="术语" style="width:80px;padding:4px 6px;border:1px solid var(--border);border-radius:4px;font-size:11px;">
+                    <input type="text" id="new-term-def" placeholder="解释" style="flex:1;padding:4px 6px;border:1px solid var(--border);border-radius:4px;font-size:11px;">
+                    <input type="text" id="new-term-notes" placeholder="备注（可选）" style="flex:1;padding:4px 6px;border:1px solid var(--border);border-radius:4px;font-size:11px;">
+                    <button class="btn btn-sm" style="padding:2px 10px;font-size:11px;" onclick="addGlossaryTerm('${escapeHtml(name)}')">+</button>
                 </div>
-                <div class="plan-actions">
-                    <button class="btn-outline" onclick="openFile(this.dataset.path)" data-path="${excelPath.replace(/\\/g, '/')}">✏️ 打开编辑</button>
-                    <button class="btn-green" onclick="confirmPlan()">✅ 确认并继续</button>
-                </div>
-            `;
-            card.scrollIntoView({ behavior: 'smooth' });
-        }
+                <div id="glossary-list" style="font-size:12px;color:var(--text-dim);">⏳ 加载中...</div>
+            </div>
+            <div class="section">
+                <h4>📄 关联文档 & 接口</h4>
+                <div id="module-docs-list" style="font-size:13px;color:var(--text-dim);">⏳ 加载中...</div>
+            </div>`;
+        loadGlossary(name);
+        loadModuleDocs(name);
+    }
 
-        async function confirmPlan() {
-            const content = document.getElementById('plan-content');
-            const excelPath = document.getElementById('excel-path-input')?.value || '';
-            content.innerHTML = '<div style="color:#888;">⏳ 正在生成测试文件...</div>';
-            try {
-                const formData = new FormData();
-                if (excelPath) formData.append('excel_path', excelPath);
-                const resp = await fetch('/confirm-plan', { method: 'POST', body: formData });
-                const data = await resp.json();
-                if (data.success) {
-                    let html = '<div style="color:#34a853; margin-bottom:8px;">✅ ' + escapeHtml(data.message) + '</div>';
-                    if (data.py_file) {
-                        html += '<div style="font-size:13px; color:#555;">📄 ' + escapeHtml(data.py_file) + '</div>';
-                    }
-                    content.innerHTML = html;
-                } else {
-                    content.innerHTML = '<div style="color:#c5221f;">❌ ' + escapeHtml(data.message) + '</div>';
-                }
-            } catch (e) {
-                content.innerHTML = '<div style="color:#c5221f;">❌ ' + escapeHtml(e.message) + '</div>';
-            }
-        }
-
-        // ========== 删除文件 ==========
-        async function deleteFile(filename) {
-            if (!confirm(`确定要删除 "${filename}" 吗？\n对应的向量数据也会一并清除。`)) {
+    async function loadGlossary(moduleName) {
+        const list = document.getElementById('glossary-list');
+        try {
+            const r = await fetch('/api/modules/' + encodeURIComponent(moduleName) + '/glossary');
+            const d = await r.json();
+            if (!d.success || !d.terms || !d.terms.length) {
+                list.innerHTML = '<span style="color:#aaa;font-size:11px;">暂无术语（上传产品文档后自动提取）</span>';
                 return;
             }
+            list.innerHTML = d.terms.map(t => {
+                const notes = t.notes ? `<span style="color:var(--text-dim);font-size:10px;"> — ${escapeHtml(t.notes)}</span>` : '';
+                const src = t.source_doc ? `<span style="color:#aaa;font-size:9px;margin-left:4px;">[${escapeHtml(t.source_doc.split('_').slice(1,-1).join('_') || t.source_doc)}]</span>` : '';
+                return `<div style="display:flex;align-items:flex-start;justify-content:space-between;padding:4px 0;border-bottom:1px solid #f5f5f5;">
+                    <span style="flex:1;"><strong>${escapeHtml(t.term)}</strong>: ${escapeHtml(t.definition)}${notes}${src}</span>
+                    <button class="btn btn-sm btn-danger-outline" style="padding:1px 5px;font-size:10px;flex-shrink:0;"
+                        onclick="deleteGlossaryTerm('${escapeHtml(moduleName)}','${escapeHtml(t.term)}')">✕</button>
+                </div>`;
+            }).join('');
+        } catch(e) {
+            list.innerHTML = '<span style="color:var(--danger);">加载失败</span>';
+        }
+    }
 
-            const row = event.target.closest('tr');
-            if (row) row.style.opacity = '0.4';
+    async function addGlossaryTerm(moduleName) {
+        const term = document.getElementById('new-term-name').value.trim();
+        const def = document.getElementById('new-term-def').value.trim();
+        const notes = document.getElementById('new-term-notes').value.trim();
+        if (!term) return;
+        try {
+            const r = await fetch('/api/modules/' + encodeURIComponent(moduleName) + '/glossary', {
+                method:'POST', headers:{'Content-Type':'application/json'},
+                body: JSON.stringify({term, definition: def, notes}),
+            });
+            const d = await r.json();
+            if (d.success) {
+                document.getElementById('new-term-name').value = '';
+                document.getElementById('new-term-def').value = '';
+                document.getElementById('new-term-notes').value = '';
+                loadGlossary(moduleName);
+                toast('✅ 术语已保存');
+            } else { toast('❌ ' + d.message); }
+        } catch(e) { toast('❌ ' + e.message); }
+    }
 
-            try {
-                const formData = new FormData();
-                formData.append('filename', filename);
-                const resp = await fetch('/delete-file', { method: 'POST', body: formData });
-                const data = await resp.json();
-                if (data.success) {
-                    showToast('✅ ' + data.message);
-                    refreshFileList();
-                } else {
-                    showToast('❌ ' + data.message);
-                    if (row) row.style.opacity = '1';
+    async function deleteGlossaryTerm(moduleName, term) {
+        try {
+            const r = await fetch('/api/modules/' + encodeURIComponent(moduleName) + '/glossary/' + encodeURIComponent(term), { method:'DELETE' });
+            const d = await r.json();
+            if (d.success) { loadGlossary(moduleName); toast('✅ 已删除'); }
+            else { toast('❌ ' + d.message); }
+        } catch(e) { toast('❌ ' + e.message); }
+    }
+
+    async function loadModuleDocs(moduleName) {
+        const list = document.getElementById('module-docs-list');
+        try {
+            const r = await fetch('/api/modules/' + encodeURIComponent(moduleName) + '/docs');
+            const d = await r.json();
+            if (!d.success || !d.docs || !d.docs.length) {
+                list.innerHTML = '<span style="color:#aaa;">暂无关联文档</span>';
+                return;
+            }
+            let html = '';
+            d.docs.forEach(doc => {
+                const icon = doc.type === 'api_def' ? '🔌' : '📄';
+                const label = doc.type === 'api_def'
+                    ? `接口文档 (${doc.api_count || doc.chunks} 个接口)`
+                    : `产品文档 (${doc.chunks} 个文本块)`;
+                html += `<div style="display:flex;align-items:center;justify-content:space-between;padding:4px 0;border-bottom:1px solid #f5f5f5;">
+                    <span>${icon} <span title="${escapeHtml(doc.doc_id)}">${label}</span></span>
+                    <button class="btn btn-sm btn-outline" style="font-size:10px;padding:2px 6px;"
+                        onclick="changeDocModule('${escapeHtml(doc.doc_id)}','${escapeHtml(moduleName)}')">迁移</button>
+                </div>`;
+                // 接口文档展示详细接口列表
+                if (doc.type === 'api_def' && doc.api_names && doc.api_names.length) {
+                    html += '<div style="font-size:11px;color:var(--text-dim);padding-left:20px;">';
+                    doc.api_names.slice(0, 10).forEach(n => html += `<span style="margin-right:8px;">• ${escapeHtml(n)}</span>`);
+                    if (doc.api_names.length > 10) html += ` ...共${doc.api_names.length}个`;
+                    html += '</div>';
                 }
-            } catch (e) {
-                showToast('❌ 请求失败: ' + e.message);
-                if (row) row.style.opacity = '1';
-            }
+            });
+            list.innerHTML = html;
+        } catch(e) {
+            list.innerHTML = '<span style="color:var(--danger);">加载失败</span>';
         }
+    }
 
-        // ========== 简单的 Toast 提示 ==========
-        function showToast(msg) {
-            const el = document.getElementById('upload-msg');
-            if (el) {
-                el.innerHTML = msg;
-                setTimeout(() => { if (el.innerHTML === msg) el.innerHTML = ''; }, 4000);
+    async function changeDocModule(docId, oldModule) {
+        const newMod = prompt('迁移到哪个模块？', oldModule);
+        if (!newMod || newMod === oldModule) return;
+        try {
+            const r = await fetch('/api/docs/change-module', {
+                method:'POST', headers:{'Content-Type':'application/json'},
+                body: JSON.stringify({doc_id: docId, module: newMod}),
+            });
+            const d = await r.json();
+            if (d.success) {
+                toast('✅ ' + d.message);
+                loadModuleDocs(oldModule);
+            } else {
+                toast('❌ ' + d.message);
             }
-        }
+        } catch(e) { toast('❌ ' + e.message); }
+    }
 
-        function escapeHtml(str) {
-            if (!str) return '';
-            return String(str).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+    async function createModule() {
+        const input = document.getElementById('new-mod-name');
+        const name = input.value.trim();
+        if (!name) return;
+        try {
+            const r = await fetch('/api/modules', {
+                method:'POST', headers:{'Content-Type':'application/json'},
+                body: JSON.stringify({name, parent_id: selectedModuleId || 'root'}),
+            });
+            const d = await r.json();
+            if (d.success) { input.value = ''; refreshModuleTree(); toast('✅ 已创建'); }
+            else toast('❌ ' + d.message);
+        } catch(e) { toast('❌ ' + e.message); }
+    }
+
+    async function renameModule(id, cur) {
+        const name = prompt('新名称:', cur);
+        if (!name || name === cur) return;
+        try {
+            const r = await fetch('/api/modules/' + id, {
+                method:'PUT', headers:{'Content-Type':'application/json'},
+                body: JSON.stringify({name}),
+            });
+            const d = await r.json();
+            if (d.success) { refreshModuleTree(); toast('✅ ' + d.message); }
+            else toast('❌ ' + d.message);
+        } catch(e) { toast('❌ ' + e.message); }
+    }
+
+    async function deleteModule(id, name) {
+        if (!confirm('确定删除 "' + name + '" ？')) return;
+        try {
+            const r = await fetch('/api/modules/' + id, { method:'DELETE' });
+            const d = await r.json();
+            if (d.success) { if (selectedModuleId === id) selectedModuleId = null; refreshModuleTree(); toast('✅ 已删除'); }
+            else toast('❌ ' + d.message);
+        } catch(e) { toast('❌ ' + e.message); }
+    }
+
+    function mergeModule(id, name) {
+        const target = prompt('合并到哪个模块？（输入目标模块名）:');
+        if (!target) return;
+        fetch('/api/modules/merge', {
+            method:'POST', headers:{'Content-Type':'application/json'},
+            body: JSON.stringify({source_id: id, target_id: target}),
+        }).then(r => r.json()).then(d => {
+            if (d.success) { refreshModuleTree(); toast('✅ 已合并'); }
+            else toast('❌ ' + d.message);
+        });
+    }
+
+    // ==================== 聊天 ====================
+    async function sendChat() {
+        const input = document.getElementById('chat-input');
+        const box = document.getElementById('chat-box');
+        const text = input.value.trim();
+        if (!text) return;
+
+        box.innerHTML += `<div class="chat-msg"><div class="who user">🧑 你</div><div class="body">${escapeHtml(text)}</div></div>`;
+        input.value = ''; box.scrollTop = box.scrollHeight;
+
+        document.getElementById('chat-btn').disabled = true;
+        const progress = document.getElementById('chat-progress');
+        const fill = document.getElementById('chat-fill');
+        const ptxt = document.getElementById('chat-progress-text');
+        progress.classList.remove('hidden'); fill.style.width = '0%'; ptxt.textContent = '提交中...';
+
+        try {
+            const fd = new FormData(); fd.append('user_input', text);
+            const r = await fetch('/chat', { method: 'POST', body: fd });
+            const d = await r.json();
+            if (d.success && d.task_id) {
+                pollTask(d.task_id,
+                    t => { fill.style.width = (t.progress||0)+'%'; ptxt.textContent = t.message || '处理中...'; },
+                    result => {
+                        progress.classList.add('hidden');
+                        document.getElementById('chat-btn').disabled = false;
+                        if (result && !result.error) showChatResult(result);
+                        else showChatError(result ? result.error : '未知错误');
+                    }
+                );
+            } else {
+                progress.classList.add('hidden');
+                document.getElementById('chat-btn').disabled = false;
+                showChatError(d.message || '请求失败');
+            }
+        } catch(e) {
+            progress.classList.add('hidden');
+            document.getElementById('chat-btn').disabled = false;
+            showChatError(e.message);
         }
-    </script>
+    }
+
+    function showChatResult(result) {
+        const box = document.getElementById('chat-box');
+        let html = `<div class="chat-msg"><div class="who ai">🤖 AI</div><div class="body">`;
+        if (result.requires_review) {
+            html += `<div style="background:var(--danger-bg);border:1px solid var(--danger);border-radius:4px;padding:8px 12px;margin-bottom:8px;">
+                <strong>⚠️ 需人工审查</strong><br>`;
+            (result.error_info||[]).slice(0,6).forEach(e => html += '• ' + escapeHtml(e) + '<br>');
+            html += `</div>`;
+        }
+        if (result.thinking) {
+            html += `<details><summary>思考过程</summary>${escapeHtml(Array.isArray(result.thinking)?result.thinking.join('<br>'):result.thinking)}</details>`;
+        }
+        html += escapeHtml(result.reply || '') + `</div></div>`;
+        box.innerHTML += html; box.scrollTop = box.scrollHeight;
+
+        if (result.excel_path) {
+            resultFiles = [];
+            addResultFile(result.excel_path, '📊 测试计划');
+            if (result.output_dir) loadOutputFiles(result.output_dir);
+            document.getElementById('result-card').classList.remove('hidden');
+            document.getElementById('file-panel').classList.remove('hidden');
+            showPlanCard(result);
+        }
+    }
+
+    function showChatError(msg) {
+        const box = document.getElementById('chat-box');
+        box.innerHTML += `<div class="chat-msg"><div class="who ai" style="color:var(--danger);">❌ 错误</div><div class="body">${escapeHtml(msg)}</div></div>`;
+        box.scrollTop = box.scrollHeight;
+    }
+
+    function showPlanCard(result) {
+        const content = document.getElementById('result-content');
+        content.innerHTML = `
+            <div style="background:var(--primary-bg);padding:12px;border-radius:6px;margin-bottom:12px;">
+                <strong>📄 ${escapeHtml(result.excel_name || 'test_plan.xlsx')}</strong>
+                <div style="font-size:12px;color:var(--text-dim);margin-top:4px;">${escapeHtml(result.excel_path)}</div>
+            </div>
+            <button class="btn btn-success" onclick="confirmPlan('${escapeHtml(result.excel_path||'')}')">✅ 确认并生成 PY + YAML</button>`;
+    }
+
+    function addResultFile(path, label) {
+        if (!path || resultFiles.find(f => f.path === path)) return;
+        const ext = (path||'').split('.').pop().toLowerCase();
+        resultFiles.push({path, name: label || path.split(/[\\/]/).pop(), type: ext});
+        renderFilePanel();
+    }
+
+    async function loadOutputFiles(dir) {
+        // 简单列出 testcase_out 下的已知文件
+        const known = ['test_plan.xlsx'];
+        for (const name of known) {
+            const p = dir.replace(/\\/g,'/') + '/' + name;
+            if (resultFiles.find(f => f.path === p)) continue;
+            resultFiles.push({path: p, name, type: 'xlsx'});
+        }
+        renderFilePanel();
+    }
+
+    function renderFilePanel() {
+        const panel = document.getElementById('file-list-panel');
+        if (!resultFiles.length) { panel.innerHTML = '<div style="color:var(--text-dim);">暂无文件</div>'; return; }
+        panel.innerHTML = resultFiles.map(f => `
+            <div class="file-row">
+                <span>${f.name}</span>
+                <div>
+                    <button class="btn btn-sm btn-outline" onclick="editFile('${escapeHtml(f.path)}','${escapeHtml(f.name)}')">✏️ 编辑</button>
+                    <button class="btn btn-sm btn-outline" onclick="openFileExternal('${escapeHtml(f.path)}')">🔗 打开</button>
+                </div>
+            </div>`).join('');
+    }
+
+    async function editFile(path, name) {
+        document.getElementById('file-editor').classList.remove('hidden');
+        document.getElementById('editor-title').textContent = '✏️ ' + name;
+        document.getElementById('editor-status').textContent = '⏳ 加载中...';
+        document.getElementById('editor-area').value = '';
+        editorPath = path;
+        editorDirty = false;
+
+        try {
+            const r = await fetch('/api/file-content?path=' + encodeURIComponent(path));
+            const d = await r.json();
+            if (d.success) {
+                if (d.binary) {
+                    document.getElementById('editor-area').value = '# 二进制文件，无法直接编辑。请使用"外部打开"。';
+                    document.getElementById('editor-status').textContent = '⚠️ 二进制文件';
+                } else {
+                    document.getElementById('editor-area').value = d.content;
+                    document.getElementById('editor-status').textContent = '✅ 已加载 | ' + (d.content||'').length + ' 字符';
+                }
+            } else {
+                document.getElementById('editor-status').textContent = '❌ ' + d.message;
+            }
+        } catch(e) {
+            document.getElementById('editor-status').textContent = '❌ ' + e.message;
+        }
+    }
+
+    function editorChanged() { editorDirty = true; }
+
+    async function saveEditor() {
+        if (!editorPath) return;
+        const content = document.getElementById('editor-area').value;
+        try {
+            const r = await fetch('/api/file-save', {
+                method:'POST', headers:{'Content-Type':'application/json'},
+                body: JSON.stringify({path: editorPath, content}),
+            });
+            const d = await r.json();
+            if (d.success) {
+                editorDirty = false;
+                toast('✅ 已保存');
+                document.getElementById('editor-status').textContent = '✅ 已保存';
+            } else {
+                toast('❌ ' + d.message);
+            }
+        } catch(e) { toast('❌ ' + e.message); }
+    }
+
+    async function revalidate() {
+        if (!resultFiles.length) return;
+        const excelFile = resultFiles.find(f => f.type === 'xlsx');
+        if (!excelFile) { toast('⚠️ 未找到 Excel 文件'); return; }
+        toast('⏳ 重新校验中...');
+        try {
+            const fd = new FormData(); fd.append('excel_path', excelFile.path);
+            const r = await fetch('/confirm-plan', { method:'POST', body: fd });
+            const d = await r.json();
+            if (d.success && d.task_id) {
+                pollTask(d.task_id,
+                    null,
+                    result => {
+                        if (result && !result.error) {
+                            toast('✅ 校验通过，文件已重新生成');
+                            // 添加生成的文件
+                            if (result.py_file) addResultFile(excelFile.path.replace('test_plan.xlsx', '') + result.py_file, '🐍 ' + result.py_file);
+                            document.getElementById('editor-status').textContent = '✅ 校验通过';
+                        } else {
+                            toast('❌ 校验失败: ' + (result ? (result.error || '') : ''));
+                            document.getElementById('editor-status').textContent = '❌ 校验失败，请修改后重试';
+                        }
+                    }
+                );
+            } else {
+                toast('❌ ' + d.message);
+            }
+        } catch(e) { toast('❌ ' + e.message); }
+    }
+
+    function openFileExternal(path) {
+        const p = path || editorPath;
+        if (!p) return;
+        const fd = new FormData(); fd.append('file_path', p);
+        fetch('/open-file', { method:'POST', body: fd }).catch(() => {});
+    }
+
+    async function confirmPlan(excelPath) {
+        toast('⏳ 正在生成测试文件...');
+        try {
+            const fd = new FormData();
+            if (excelPath) fd.append('excel_path', excelPath);
+            const r = await fetch('/confirm-plan', { method:'POST', body: fd });
+            const d = await r.json();
+            if (d.success && d.task_id) {
+                pollTask(d.task_id,
+                    t => toast(t.message || '生成中...'),
+                    result => {
+                        if (result && !result.error) {
+                            toast('✅ ' + (result.message || '完成'));
+                            if (result.py_file) addResultFile(result.py_file, '🐍 ' + result.py_file);
+                            document.getElementById('result-content').innerHTML +=
+                                '<div style="color:var(--success);margin-top:8px;">✅ ' + escapeHtml(result.message||'') + '</div>';
+                        } else {
+                            toast('❌ ' + (result ? (result.error || '失败') : '失败'));
+                        }
+                    }
+                );
+            } else if (!d.success) {
+                toast('❌ ' + d.message);
+            }
+        } catch(e) { toast('❌ ' + e.message); }
+    }
+
+    // ==================== 初始化 ====================
+    window.addEventListener('load', () => {
+        if (INITIAL_FILES && INITIAL_FILES.length) renderFileList(INITIAL_FILES);
+        else refreshFileList();
+        document.getElementById('nav-status').textContent = VECTOR_READY ? '✅ 已就绪' : '❌ 未上传';
+    });
+</script>
 </body>
 </html>

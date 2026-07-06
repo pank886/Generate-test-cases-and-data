@@ -11,7 +11,7 @@ class ProperResponse(BaseModel):
 
 class ApiDefinition(BaseModel):
     name: str = Field(description="接口名称")
-    url: str = Field(description="接口完整路径，如 http://localhost:8000/api/login")
+    url: str = Field(description="接口路径部分（不含域名和基础地址），如 /api/login")
     method: str = Field(description="HTTP方法: GET, POST, PUT, DELETE")
     description: str = Field(description="接口功能描述")
     parameters: Dict[str, Any] = Field(description="请求参数结构示例")
@@ -102,7 +102,7 @@ class TestPointList(BaseModel):
 
 class GlossaryExtract(BaseModel):
     """业务术语表提取结果"""
-    terms: List[Dict[str, str]] = Field(description="术语列表，每项含 term(术语名)和 definition(定义)")
+    terms: List[Dict[str, str]] = Field(description="术语列表，每项含 term(术语名)、definition(解释)和 notes(备注)")
 
 
 class DocModuleExtract(BaseModel):

@@ -29,6 +29,7 @@ logs/
 
 # 忽略运行时数据
 uploads/
+*.meta.json
 data/
 testcase_out/
 

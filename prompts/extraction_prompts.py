@@ -26,9 +26,10 @@ def glossary_extract_prompt() -> ChatPromptTemplate:
          "### 提取规则\n"
          "1. 只提取有明确业务含义的术语（专业名词、状态值、缩写）。\n"
          "2. 跳过通用词汇（用户、系统、数据等）。\n"
-         "3. 每个术语包含 term（名称）和 definition（解释）。\n\n"
+         "3. 每个术语包含三个字段：term（名称）、definition（解释）、notes（备注，如取值范围、使用场景、关联模块等补充信息，可为空字符串）。\n\n"
          "### 输出\n"
-         "直接输出 JSON 对象，包含 terms 数组。不包含 Markdown。"),
+         '输出 JSON 对象：{{"terms": [{{"term": "...", "definition": "...", "notes": "..."}}]}}\n'
+         "不包含 Markdown。"),
         ("human", "### 文档内容\n{doc_text}\n\n请提取业务术语表：")
     ])
 
@@ -67,13 +68,17 @@ def api_def_extract_prompt() -> ChatPromptTemplate:
          "你是 API 分析师。阅读以下接口文档内容，提取所有接口定义。\n\n"
          "### 提取规则\n"
          "1. 提取文档中出现的每一个接口，不要遗漏。\n"
-         "2. method 必须是大写的 GET/POST/PUT/DELETE/PATCH。\n"
-         "3. url 只提取路径部分，不含域名。\n"
-         "4. parameters 提取请求参数结构，无参数填 {{}}。\n"
-         "5. returns 提取响应字段结构。\n"
-         "6. module_name 根据接口的用途判断所属模块。\n\n"
-         "### 输出\n"
-         "直接输出 JSON 对象，包含 apis 数组和 module_name。不包含 Markdown。"),
+         "2. 每个接口必须包含以下字段：\n"
+         '   - name: 接口名称（从文档中的"接口名称"字段提取，如"新增创建"、"分页查询"）\n'
+         '   - description: 接口功能描述（从文档中概括，如"新增健身房设施"）\n'
+         "   - method: 大写的 GET/POST/PUT/DELETE/PATCH\n"
+         "   - url: 只提取路径部分，不含域名，如 /gymFacility/add\n"
+         "   - parameters: 请求参数结构（字段名→类型），无参数填 {{}}\n"
+         "   - returns: 响应字段结构（字段名→类型）\n"
+         "3. module_name 根据接口的用途判断所属模块。\n\n"
+         "### 输出格式\n"
+         '输出 JSON 对象：{{"apis": [{{"name": "...", "description": "...", "method": "...", "url": "...", "parameters": {{...}}, "returns": {{...}}}}], "module_name": "..."}}\n'
+         "每个接口必须包含 name、description、method、url、parameters、returns 六个字段。不包含 Markdown。"),
         ("human", "### 接口文档内容\n{doc_text}\n\n请提取所有接口定义：")
     ])
 

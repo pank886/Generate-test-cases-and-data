@@ -130,3 +130,77 @@ class DualChromaDB:
             src = doc.metadata.get("module", "?")
             parts.append(f"[{src}] {doc.page_content}")
         return "\n\n---\n\n".join(parts)
+
+    # ---- 关系查询 ----
+
+    def get_module_docs(self, module_name: str) -> list[dict]:
+        """获取指定模块下的所有文档摘要（从两个集合查询）。"""
+        docs = []
+        # 产品文档
+        pd_results = self.product_store.get(where={"module": module_name})
+        if pd_results and pd_results.get("ids"):
+            doc_groups = {}
+            for i, mid in enumerate(pd_results["ids"]):
+                meta = pd_results["metadatas"][i] if pd_results.get("metadatas") else {}
+                doc_id = meta.get("doc_id", "?")
+                if doc_id not in doc_groups:
+                    doc_groups[doc_id] = {
+                        "doc_id": doc_id,
+                        "module": meta.get("module", module_name),
+                        "type": meta.get("type", "product_doc"),
+                        "chunks": 0,
+                        "related": meta.get("related_modules", ""),
+                    }
+                doc_groups[doc_id]["chunks"] += 1
+            docs.extend(doc_groups.values())
+
+        # 接口定义
+        api_results = self.api_store.get(where={"module": module_name})
+        if api_results and api_results.get("ids"):
+            api_count = len(api_results["ids"])
+            # 按 doc_id 分组
+            api_groups = {}
+            for i, mid in enumerate(api_results["ids"]):
+                meta = api_results["metadatas"][i] if api_results.get("metadatas") else {}
+                doc_id = meta.get("doc_id", "?")
+                if doc_id not in api_groups:
+                    api_groups[doc_id] = {
+                        "doc_id": doc_id,
+                        "module": meta.get("module", module_name),
+                        "type": "api_def",
+                        "chunks": 0,
+                        "api_count": 0,
+                        "api_names": [],
+                    }
+                api_groups[doc_id]["api_count"] += 1
+                name = meta.get("api_name", "")
+                if name:
+                    api_groups[doc_id]["api_names"].append(name)
+            docs.extend(api_groups.values())
+
+        return docs
+
+    def get_doc_apis(self, doc_id: str) -> list[dict]:
+        """获取指定文档下的所有接口定义。"""
+        results = self.api_store.get(where={"doc_id": doc_id})
+        if not results or not results.get("ids"):
+            return []
+        apis = []
+        for i, mid in enumerate(results["ids"]):
+            meta = results["metadatas"][i] if results.get("metadatas") else {}
+            apis.append({
+                "api_name": meta.get("api_name", "?"),
+                "module": meta.get("module", "?"),
+                "content": results["documents"][i] if results.get("documents") else "",
+            })
+        return apis
+
+    def update_doc_module(self, doc_id: str, new_module: str):
+        """将文档迁移到另一个模块（更新两个集合的 metadata.module）。"""
+        for store in [self.product_store, self.api_store]:
+            results = store.get(where={"doc_id": doc_id})
+            if results and results.get("ids"):
+                store.update(
+                    ids=results["ids"],
+                    metadatas=[{"module": new_module}] * len(results["ids"]),
+                )

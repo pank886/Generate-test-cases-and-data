@@ -11,11 +11,14 @@ from pydantic import BaseModel, ValidationError
 import yaml
 from openpyxl import Workbook
 from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
+from openpyxl.utils import get_column_letter
 from langchain_core.exceptions import OutputParserException
 from agent_components.llm.deepseek import DeepSeekChatOpenAI
 
 import config
+from observability import get_logger
 from agent_components.chromadb_file import ReadersChromadb
+from data_factory.mock_data import MOCK_PRODUCT_DOCS, MOCK_API_DEFS
 from agent_components.state import State, ApiDefinitionList
 from prompts.response_model import (
     ProperResponse,
@@ -28,6 +31,8 @@ from prompts.response_model import (
     TestPointList,
 )
 from prompts.definitions import PromptFactory
+
+logger = get_logger(__name__)
 
 
 class ChatTestAgentGraph:
@@ -61,21 +66,21 @@ class ChatTestAgentGraph:
         self._run_data = {}
         self._run_timestamp = None
 
-        print("🔍 [节点] 正在调用外部工具检索...")
+        logger.info("🔍 [节点] 正在调用外部工具检索...")
         if not self.vector_store:
             context = "未检索到知识库"
         else:
             # 使用较大的 k 值以覆盖所有接口（每个块 ≈ 一个接口）
             context = self.vector_store.search_context(
                 user_question_str=state["user_input"],
-                k=50,
+                k=config.RETRIEVAL_K,
             )
         self._log_node_output("retrieve", {"context": context})
         return {"context": context}
 
     def _parse_api_node(self, state: State):
         """分析接口定义"""
-        print("\n正在分析文档，提取接口定义...")
+        logger.info("\n正在分析文档，提取接口定义...")
 
         prompt = self.prompt_factory.parse_api_node()
         chain = prompt | self.llm.with_structured_output(
@@ -92,11 +97,11 @@ class ChatTestAgentGraph:
             result = ApiDefinitionList(apis=result)
         api_list = result.apis
         if isinstance(api_list, list):
-            print(f"   🛠️ 成功提取到 {len(api_list)} 个接口:")
+            logger.info(f"   🛠️ 成功提取到 {len(api_list)} 个接口:")
             for api in api_list:
-                print(f"      - {api.name}: {api.url}")
+                logger.info(f"      - {api.name}: {api.url}")
         else:
-            print(f"   ⚠️ 提取结果异常: {result}")
+            logger.info(f"   ⚠️ 提取结果异常: {result}")
             api_list = []
 
         self._log_node_output("parse_api", {"api_definition_list": api_list})
@@ -104,7 +109,7 @@ class ChatTestAgentGraph:
 
     def _generate_excel_plan_node(self, state: State):
         """生成 Excel 测试计划（含自动校验修复循环）"""
-        print("\n📊 正在生成 Excel 测试计划...")
+        logger.info("\n📊 正在生成 Excel 测试计划...")
 
         from prompts.extraction_prompts import repair_excel_plan_prompt
         from agent_components.validator import validate_excel_file
@@ -115,7 +120,7 @@ class ChatTestAgentGraph:
         prompt_vars = {"all_apis_info": all_apis_json, "user_context": state["original_input"]}
 
         bad_output_text = ""
-        for attempt in range(3):
+        for attempt in range(config.EXCEL_REPAIR_ATTEMPTS):
             if attempt == 0:
                 plan = self._invoke_structured(prompt, ExcelPlan,
                     method="json_mode", thinking=True, **prompt_vars)
@@ -134,7 +139,7 @@ class ChatTestAgentGraph:
             if pydantic_errors:
                 repair_errors = pydantic_errors
                 bad_output_text = str(plan.model_dump())
-                print(f"   ⚠️ 校验失败 (第{attempt+1}次): {len(pydantic_errors)} 个错误")
+                logger.warning(f"   ⚠️ 校验失败 (第{attempt+1}次): {len(pydantic_errors)} 个错误")
                 continue
 
             # 成功 → 写 Excel
@@ -177,9 +182,9 @@ class ChatTestAgentGraph:
                     c.border, c.alignment = thin_border, wrap_align
             col_widths = [16, 14, 24, 14, 30, 14, 16, 30, 22, 10]
             for i, w in enumerate(col_widths, 1):
-                ws.column_dimensions[chr(64 + i)].width = w
+                ws.column_dimensions[get_column_letter(i)].width = w
             wb.save(excel_path)
-            print(f"   📄 Excel 已保存: {excel_path} ({len(plan.rows)}条/{len(set(r.module_name for r in plan.rows))}模块)")
+            logger.info(f"   📄 Excel 已保存: {excel_path} ({len(plan.rows)}条/{len(set(r.module_name for r in plan.rows))}模块)")
 
             # 文件层校验
             file_ok, file_errors = validate_excel_file(excel_path)
@@ -189,114 +194,81 @@ class ChatTestAgentGraph:
             else:
                 repair_errors = file_errors
                 bad_output_text = str(plan.model_dump())
-                print(f"   ⚠️ 文件校验失败 (第{attempt+1}次): {len(file_errors)} 个错误")
+                logger.warning(f"   ⚠️ 文件校验失败 (第{attempt+1}次): {len(file_errors)} 个错误")
                 continue
 
         # 所有重试耗尽
-        print(f"   ❌ 校验失败（已重试 3 次），标记需人工审查")
+        logger.error(f"   ❌ 校验失败（已重试 3 次），标记需人工审查")
         return {"requires_review": True, "error_info": repair_errors, "output_dir": output_dir}
 
     # ==================== 图外方法（确认后执行） ====================
 
     # ==================== Phase C 多跳检索 + 测试点分析 ====================
 
-    # ---- Mock 数据（Phase C 硬编码，A 阶段替换为真实检索） ----
-    _MOCK_PRODUCT_DOCS = {
-        "合同管理": [
-            {"module": "合同管理", "content": "合同管理模块是整个系统的核心模块，负责合同的创建、审批、签署、归档全生命周期管理。主要功能包括合同起草、合同审批流程、电子签章、合同变更、合同终止。", "related_modules": ["房产模块", "商户模块"]},
-            {"module": "合同管理", "content": "合同签约场景：用户选择已录入的房产和商户信息，填写合同条款（租金、周期、付款方式），上传附件，提交审批。审批通过后进入电子签章环节。", "related_modules": ["房产模块", "商户模块"]},
-            {"module": "合同管理", "content": "合同变更是对已生效合同进行条款修改，需重新走审批流程。变更记录需完整留痕，支持版本追溯。", "related_modules": []},
-        ],
-        "房产模块": [
-            {"module": "房产模块", "content": "房产模块负责管理所有物业资产信息，包括房产基本信息（地址、面积、户型）、产权信息、房产状态（空置/出租/维修）。合同签约时需要选择房产作为标的物。", "related_modules": ["合同管理"]},
-        ],
-        "商户模块": [
-            {"module": "商户模块", "content": "商户模块管理所有合作商户信息，包括商户基本信息（名称、法人、联系方式）、资质文件、信用评级。合同签约时需要选择商户作为签约方。", "related_modules": ["合同管理"]},
-        ],
-    }
-
-    _MOCK_API_DEFS = {
-        "合同管理": [
-            {"name": "合同创建", "url": "/api/contract/create", "method": "POST", "params": {"house_id": "string", "merchant_id": "string", "terms": "object"}, "returns": {"contract_id": "string", "status": "string"}},
-            {"name": "合同审批", "url": "/api/contract/approve", "method": "POST", "params": {"contract_id": "string", "action": "string"}, "returns": {"success": "boolean", "code": "integer"}},
-            {"name": "合同查询", "url": "/api/contract/list", "method": "GET", "params": {"page": "integer", "size": "integer", "status": "string"}, "returns": {"total": "integer", "list": "array"}},
-        ],
-        "房产模块": [
-            {"name": "房产信息查询", "url": "/api/house/info", "method": "GET", "params": {"house_id": "string"}, "returns": {"house_id": "string", "address": "string", "area": "number", "status": "string"}},
-        ],
-        "商户模块": [
-            {"name": "商户信息查询", "url": "/api/merchant/info", "method": "GET", "params": {"merchant_id": "string"}, "returns": {"merchant_id": "string", "name": "string", "credit_rating": "string"}},
-        ],
-        "公共基础服务": [
-            {"name": "人员查询", "url": "/api/user/search", "method": "GET", "params": {"keyword": "string"}, "returns": {"user_list": "array"}},
-            {"name": "文件上传", "url": "/api/file/upload", "method": "POST", "params": {"file": "binary"}, "returns": {"file_id": "string"}},
-        ],
-    }
-
     def _retrieve_product_docs(self, state: State):
         """Hop 1: 根据用户输入检索产品文档。"""
-        print("\n--- [Hop 1] 检索产品文档 ---")
+        logger.info("\n--- [Hop 1] 检索产品文档 ---")
         query = state["user_input"]
 
         # Phase C: 硬编码匹配模块名
         matched_module = None
-        for mod_name in self._MOCK_PRODUCT_DOCS:
+        for mod_name in MOCK_PRODUCT_DOCS:
             if mod_name in query:
                 matched_module = mod_name
                 break
         if not matched_module:
             matched_module = "合同管理"
 
-        docs = self._MOCK_PRODUCT_DOCS.get(matched_module, [])
-        print(f"   => 找到模块 [{matched_module}], {len(docs)} 条文档片段")
+        docs = MOCK_PRODUCT_DOCS.get(matched_module, [])
+        logger.info(f"   => 找到模块 [{matched_module}], {len(docs)} 条文档片段")
         return {"product_docs": docs, "context": "\n".join(d["content"] for d in docs)}
 
     def _extract_related_modules(self, state: State):
         """从产品文档 metadata 中提取关联模块。"""
-        print("\n--- 提取关联模块 ---")
+        logger.info("\n--- 提取关联模块 ---")
         related = set()
         for doc in state.get("product_docs", []):
             for m in doc.get("related_modules", []):
                 related.add(m)
         mods = sorted(related)
-        print(f"   => 关联模块: {mods if mods else '无'}")
+        logger.info(f"   => 关联模块: {mods if mods else '无'}")
         return {"related_modules": mods}
 
     def _retrieve_related_data(self, state: State):
         """Hop 2a+2b: 并发检索关联模块的文档和接口定义。"""
-        print("\n--- [Hop 2] 检索关联数据 ---")
+        logger.info("\n--- [Hop 2] 检索关联数据 ---")
         modules = state.get("related_modules", [])
         all_docs = list(state.get("product_docs", []))
 
         # Hop 2a: 检索关联模块的产品文档
         for mod in modules:
-            extra = self._MOCK_PRODUCT_DOCS.get(mod, [])
+            extra = MOCK_PRODUCT_DOCS.get(mod, [])
             for d in extra:
                 if d not in all_docs:
                     all_docs.append(d)
-                    print(f"   + 追加文档: {mod}")
+                    logger.info(f"   + 追加文档: {mod}")
 
         # Hop 2b: 检索主模块 + 关联模块 + 公共基础服务的接口定义
         api_defs = []
         main_module = None
-        for mod_name in self._MOCK_PRODUCT_DOCS:
+        for mod_name in MOCK_PRODUCT_DOCS:
             if any(mod_name in d.get("module", "") for d in state.get("product_docs", [])):
                 main_module = mod_name
                 break
         search_modules = list(dict.fromkeys([m for m in [main_module] + modules if m]))
         search_modules.append("公共基础服务")
         for mod in search_modules:
-            apis = self._MOCK_API_DEFS.get(mod, [])
+            apis = MOCK_API_DEFS.get(mod, [])
             if apis:
                 api_defs.extend(apis)
-                print(f"   + 接口: {mod} ({len(apis)} 个)")
+                logger.info(f"   + 接口: {mod} ({len(apis)} 个)")
 
-        print(f"   => 汇总: {len(all_docs)} 文档片段, {len(api_defs)} 个接口")
+        logger.info(f"   => 汇总: {len(all_docs)} 文档片段, {len(api_defs)} 个接口")
         return {"product_docs": all_docs, "api_definitions": api_defs}
 
     def _analyze_test_points(self, state: State):
         """根据产品文档 + 接口定义分析测试点（thinking 模式）。"""
-        print("\n--- 分析测试点（深度思考）---")
+        logger.info("\n--- 分析测试点（深度思考）---")
         prompt = self.prompt_factory.analyze_test_points()
 
         docs_text = "\n\n".join(
@@ -322,13 +294,13 @@ class ChatTestAgentGraph:
             result = TestPointList(test_points=result, project_name="Unknown", summary="")
 
         count = len(result.test_points)
-        print(f"   => 完成: {count} 个测试点")
+        logger.info(f"   => 完成: {count} 个测试点")
         if result.risk_areas:
             areas_str = "; ".join(
                 f"{r.area}({r.reason})" if hasattr(r, 'reason') else str(r)
                 for r in result.risk_areas
             )
-            print(f"   => 风险区域: {areas_str}")
+            logger.info(f"   => 风险区域: {areas_str}")
 
         return {"test_points": result.model_dump()}
 
@@ -345,7 +317,7 @@ class ChatTestAgentGraph:
                 parameters=d.get("parameters", d.get("params", {})),
                 returns=d.get("returns", {}),
             ))
-        print(f"   => 桥接: {len(api_definition_list)} 个接口 -> api_definition_list")
+        logger.info(f"   => 桥接: {len(api_definition_list)} 个接口 -> api_definition_list")
         return {"api_definition_list": api_definition_list}
 
     def _generate_data_plan(self, case_steps: str, api_defs_json: str,
@@ -354,7 +326,7 @@ class ChatTestAgentGraph:
         from prompts.extraction_prompts import generate_data_plan_prompt
         from prompts.response_model import DataPlan
 
-        print("\n--- 场景数据规划（深度思考）---")
+        logger.info("\n--- 场景数据规划（深度思考）---")
         prompt = generate_data_plan_prompt()
         result = self._invoke_structured(prompt, DataPlan,
             method="json_mode",
@@ -365,7 +337,7 @@ class ChatTestAgentGraph:
         )
         if isinstance(result, list):
             result = DataPlan(steps=result, scenario_name="")
-        print(f"   => 规划完成: {len(result.steps)} 步")
+        logger.info(f"   => 规划完成: {len(result.steps)} 步")
         return {"data_plan": result.model_dump()}
 
     @staticmethod
@@ -383,10 +355,10 @@ class ChatTestAgentGraph:
 
     def _generate_py_file(self, excel_path: str, project_name: str = None) -> dict:
         """逐模块生成 .py 测试文件（外层循环 I/O，内层 LLM 单 class 生成）"""
-        print("\n🐍 正在生成 Python 测试文件...")
+        logger.info("\n🐍 正在生成 Python 测试文件...")
 
         if not excel_path:
-            print("   ⚠️ 无 Excel 路径，跳过 .py 生成")
+            logger.info("   ⚠️ 无 Excel 路径，跳过 .py 生成")
             return {"py_path": "", "py_file_name": "", "modules": 0, "cases": 0}
 
         from openpyxl import load_workbook
@@ -449,7 +421,7 @@ class ChatTestAgentGraph:
                 mod_lines.append(f"    步骤: {c['steps']}")
             module_text = "\n".join(mod_lines)
 
-            print(f"   [{idx + 1}/{len(mod_names)}] 生成 class: {mod_name} ...")
+            logger.info(f"   [{idx + 1}/{len(mod_names)}] 生成 class: {mod_name} ...")
 
             result = self._invoke_structured(prompt, ClassCode,
                 method="json_mode",
@@ -471,8 +443,8 @@ class ChatTestAgentGraph:
         with open(py_path, "w", encoding="utf-8") as f:
             f.write(full_content)
 
-        print(f"   📄 Python 文件已保存: {py_path}")
-        print(f"   📦 {len(mod_names)} 个模块, {total_cases} 条用例")
+        logger.info(f"   📄 Python 文件已保存: {py_path}")
+        logger.info(f"   📦 {len(mod_names)} 个模块, {total_cases} 条用例")
 
         result = {
             "py_path": py_path,
@@ -509,10 +481,10 @@ class ChatTestAgentGraph:
 
     def _generate_all_yamls(self, excel_path: str, api_defs_json: str, user_ctx: str) -> dict:
         """读 Excel → 按场景分目录 → 多线程逐条生成 YAML（供 /confirm-plan 调用）"""
-        print("\n🔢 正在生成 YAML 测试数据...")
+        logger.info("\n🔢 正在生成 YAML 测试数据...")
 
         if not excel_path:
-            print("   ⚠️ 无 Excel 路径，跳过 YAML 生成")
+            logger.info("   ⚠️ 无 Excel 路径，跳过 YAML 生成")
             return {"total": 0, "success": 0, "failed": 0}
 
         from openpyxl import load_workbook
@@ -553,18 +525,18 @@ class ChatTestAgentGraph:
             })
 
         if not rows:
-            print("   ⚠️ 没有启用的用例需要生成 YAML")
+            logger.info("   ⚠️ 没有启用的用例需要生成 YAML")
             result = {"total": 0, "success": 0, "failed": 0}
             self._log_node_output("generate_all_yamls", result)
             return result
 
         total = len(rows)
-        print(f"   📋 共需生成 {total} 个 YAML 文件（按 module 分目录），并发 5 个线程")
+        logger.info(f"   📋 共需生成 {total} 个 YAML 文件（按 module 分目录），并发 5 个线程")
 
         from concurrent.futures import ThreadPoolExecutor, as_completed
         success = 0
         failed = 0
-        with ThreadPoolExecutor(max_workers=5) as executor:
+        with ThreadPoolExecutor(max_workers=config.YAML_CONCURRENCY) as executor:
             future_map = {
                 executor.submit(
                     self._generate_one_yaml, row, api_defs_json, user_ctx, row["output_path"]
@@ -577,13 +549,13 @@ class ChatTestAgentGraph:
                     future.result()
                     success += 1
                     done = success + failed
-                    print(f"      [{done}/{total}] ✅ {row['test_data_yaml']}  ({row['module_name']})")
+                    logger.info(f"      [{done}/{total}] ✅ {row['test_data_yaml']}  ({row['module_name']})")
                 except Exception as e:
                     failed += 1
                     done = success + failed
-                    print(f"      [{done}/{total}] ❌ {row['test_data_yaml']}: {e}")
+                    logger.info(f"      [{done}/{total}] ❌ {row['test_data_yaml']}: {e}")
 
-        print(f"   ✅ 完成: {success}/{total}，失败 {failed}")
+        logger.info(f"   ✅ 完成: {success}/{total}，失败 {failed}")
         result = {"total": total, "success": success, "failed": failed}
         self._log_node_output("generate_all_yamls", result)
         return result
@@ -761,7 +733,7 @@ class ChatTestAgentGraph:
         return "\n".join(lines)
 
     def _invoke_structured(self, prompt, model_class: Type[BaseModel],
-                           max_retries: int = 2,
+                           max_retries: int = config.MAX_RETRIES,
                            method: str = "function_calling",
                            thinking: bool = False,
                            **kwargs) -> BaseModel:
@@ -795,14 +767,12 @@ class ChatTestAgentGraph:
                 result = chain.invoke(kwargs)
                 if isinstance(result, dict):
                     result = model_class(**result)
-                elif isinstance(result, model_class):
-                    result.model_dump()
                 return result
             except (ValidationError, ValueError, TypeError, OutputParserException,
                     openai.BadRequestError) as e:
                 last_error = e
                 if attempt < max_retries:
-                    print(f"   ⚠️ 输出校验失败，第 {attempt + 1} 次重试... ({e})")
+                    logger.warning(f"   ⚠️ 输出校验失败，第 {attempt + 1} 次重试... ({e})")
 
         raise RuntimeError(
             f"LLM 结构化输出校验失败（已重试 {max_retries} 次）: {last_error}"
