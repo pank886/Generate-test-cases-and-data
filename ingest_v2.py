@@ -11,12 +11,18 @@
 """
 
 import os
+import re
 import sys
+
+from database import init_db
+
+# 启动时一次性建表
+init_db()
 
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 from observability import get_logger
-from agent_components.dual_chroma import DualChromaDB
+from agent_components.dual_chroma import get_chroma_db
 from agent_components.nodes import ChatTestAgentGraph
 from prompts.response_model import DocModuleExtract, ApiDefExtract
 from prompts.extraction_prompts import (
@@ -87,6 +93,23 @@ def _extract_docx(file_path: str) -> str:
     return result
 
 
+def _safe_doc_id(prefix: str, *parts: str) -> str:
+    """Sanitize and join parts into a safe doc_id."""
+    sanitized = [p.replace('/', '_').replace('\\', '_').replace('$', '_') for p in parts if p]
+    if sanitized:
+        return prefix + "_" + "_".join(sanitized)
+    return prefix
+
+
+def _cascade_bind_to_module_docs(session, doc_type: str, doc_id: str, module_name: str):
+    """级联关联：文档绑定模块时，自动与该模块下所有异类文档建立 doc↔doc 绑定。"""
+    from database.operations import BindingOps
+    bound_docs = BindingOps.get_bound_docs(session, module_name)
+    for other_doc in bound_docs:
+        if other_doc.doc_type != doc_type and other_doc.id != doc_id:
+            BindingOps.bind(session, doc_type, doc_id, other_doc.doc_type, other_doc.id)
+
+
 def _save_to_sqlite(doc_id: str, file_name: str, file_type: str, doc_type: str,
                     chunk_count: int, module_name: str = "",
                     related_modules: list = None,
@@ -100,21 +123,13 @@ def _save_to_sqlite(doc_id: str, file_name: str, file_type: str, doc_type: str,
 
     session = get_session()
     try:
-        # 1. 文档记录（幂等：先删旧数据再写入）
-        existing = DocOps.get_document(session, doc_id)
-        if existing:
-            DocOps.delete_document(session, doc_id)
-            session.flush()
-
-        DocOps.add_document(
-            session,
-            doc_id=doc_id,
-            file_name=file_name,
-            file_type=file_type,
-            doc_type=doc_type,
-            chunk_count=chunk_count,
-            status="pending",
+        # 1. 文档记录（session.merge() 实现原子 upsert）
+        from database.models import Document
+        doc = Document(
+            id=doc_id, file_name=file_name, file_type=file_type,
+            doc_type=doc_type, chunk_count=chunk_count, status="pending",
         )
+        session.merge(doc)
 
         # 2. 术语（如果提供了）
         if glossary_terms:
@@ -123,12 +138,21 @@ def _save_to_sqlite(doc_id: str, file_name: str, file_type: str, doc_type: str,
                 source_doc=file_name,
             )
 
-        # 3. 绑定关系到模块
+        # 3. 绑定关系到模块（含级联：自动关联同模块下异类文档）
         if module_name:
-            BindingOps.bind(session, doc_type, doc_id, "module", module_name)
+            ok, msg = BindingOps.bind(session, doc_type, doc_id, "module", module_name)
+            if ok:
+                _cascade_bind_to_module_docs(session, doc_type, doc_id, module_name)
+            else:
+                logger.warning("   [SQLite] 绑定模块失败: %s → %s, reason=%s", doc_id, module_name, msg)
+
         for rel_mod in (related_modules or []):
             if rel_mod and rel_mod != module_name:
-                BindingOps.bind(session, doc_type, doc_id, "module", rel_mod)
+                ok, msg = BindingOps.bind(session, doc_type, doc_id, "module", rel_mod)
+                if ok:
+                    _cascade_bind_to_module_docs(session, doc_type, doc_id, rel_mod)
+                else:
+                    logger.warning("   [SQLite] 绑定关联模块失败: %s → %s, reason=%s", doc_id, rel_mod, msg)
 
         session.commit()
     except Exception as e:
@@ -148,7 +172,7 @@ def process_product_doc(file_path: str, progress_cb=None) -> dict:
     logger.info(f"\n{'=' * 60}")
     logger.info(f"[Phase A] 处理产品文档: {os.path.basename(file_path)}")
 
-    db = DualChromaDB()
+    db = get_chroma_db()
     graph = ChatTestAgentGraph(db_path=None)
     file_name = os.path.basename(file_path)
     file_type = os.path.splitext(file_path)[1].lstrip(".")
@@ -203,7 +227,7 @@ def process_product_doc(file_path: str, progress_cb=None) -> dict:
 
     # 4. 写入 ChromaDB（纯向量，不含 module/related_modules）
     cb(85, "向量化入库中...")
-    doc_id = f"prod_{file_name}_{module_name}"
+    doc_id = _safe_doc_id("prod", file_name, module_name)
     db.delete_by_doc_id(doc_id)
     db.add_product_doc_chunks(doc_id, chunks)
     logger.info(f"   [ChromaDB] 入库完成 (doc_id={doc_id})")
@@ -262,7 +286,7 @@ def process_api_doc(file_path: str, default_module: str = None, progress_cb=None
     logger.info(f"\n{'=' * 60}")
     logger.info(f"[Phase A] 处理接口文档: {os.path.basename(file_path)}")
 
-    db = DualChromaDB()
+    db = get_chroma_db()
     graph = ChatTestAgentGraph(db_path=None)
     file_name = os.path.basename(file_path)
     file_type = os.path.splitext(file_path)[1].lstrip(".")
@@ -315,7 +339,7 @@ def process_api_doc(file_path: str, default_module: str = None, progress_cb=None
 
     # 写入 ChromaDB（纯向量，不含 module）
     cb(90, "向量化入库中...")
-    doc_id = f"api_{file_name}_{module}"
+    doc_id = _safe_doc_id("api", file_name, module)
     db.delete_by_doc_id(doc_id)
     db.add_api_defs(doc_id, apis)
     logger.info(f"   [ChromaDB] 入库完成 (doc_id={doc_id})")
@@ -336,6 +360,110 @@ def process_api_doc(file_path: str, default_module: str = None, progress_cb=None
     return {"doc_id": doc_id, "module_name": module, "api_count": len(apis)}
 
 
+def process_api_doc_extract(file_path: str, default_module: str = None,
+                             progress_cb=None) -> dict:
+    """Phase 1: 提取接口列表（不入库），返回给前端确认。
+
+    Returns: {"module_name": str, "apis": [dict], "file_name": str}
+    """
+    cb = progress_cb or (lambda p, m: None)
+    logger.info(f"[Phase A] 提取接口: {os.path.basename(file_path)}")
+
+    graph = ChatTestAgentGraph(db_path=None)
+    file_name = os.path.basename(file_path)
+
+    cb(5, "读取文档...")
+    full_text = _extract_text(file_path).strip()
+    if not full_text:
+        raise ValueError("文档内容为空")
+
+    batch_limit = config.MAX_INGEST_CHARS_PER_BATCH
+    batches = _split_text_by_headers(full_text, batch_limit) if len(full_text) > batch_limit else [full_text]
+
+    all_apis = []
+    module = default_module
+
+    for bi, batch_text in enumerate(batches, 1):
+        pct = int(10 + (bi / len(batches)) * 70)
+        cb(pct, f"AI 提取接口定义 ({bi}/{len(batches)})...")
+        prompt = api_def_extract_prompt()
+        result = graph._invoke_structured(
+            prompt, ApiDefExtract, method="json_mode", doc_text=batch_text,
+        )
+        if not module:
+            module = result.module_name
+        apis_raw = result.apis if hasattr(result, "apis") else []
+        apis = [a.model_dump() if hasattr(a, "model_dump") else a for a in apis_raw]
+        all_apis.extend(apis)
+
+    # URL 去重
+    seen = {}
+    for api in all_apis:
+        key = f"{api.get('method', '')} {api.get('url', '')}"
+        seen[key] = api
+    apis = list(seen.values())
+
+    module = module or "Unknown"
+    return {"module_name": module, "apis": apis, "file_name": file_name}
+
+
+def commit_api_docs(file_path: str, module_name: str, apis: list[dict],
+                    progress_cb=None, delete_original: bool = False) -> dict:
+    """Phase 2: 用户确认后，每个接口独立入库 + 级联关联。
+
+    为每个 API 创建独立的 documents 行和 ChromaDB 向量。
+    仅 delete_original=True 时删除原文件。
+    """
+    cb = progress_cb or (lambda p, m: None)
+    logger.info(f"[Phase A] 入库 {len(apis)} 个接口文档")
+
+    db = get_chroma_db()
+    file_name = os.path.basename(file_path)
+    file_type = os.path.splitext(file_path)[1].lstrip(".")
+    doc_ids = []
+
+    for i, api in enumerate(apis):
+        api_name = api.get("name", f"api_{i}")
+        # doc_id 必须包含 method+url 才能保证唯一性，纯用 name 会导致
+        # 同名接口（如多个 GET 接口都叫"查询"）后写入的覆盖前面的
+        url = api.get("url", "")
+        method = api.get("method", "?")
+        doc_id = _safe_doc_id("api", file_name, module_name, method, url, api_name)
+
+        cb(int(10 + (i / len(apis)) * 80), f"入库 {api.get('method', '?')} {api.get('url', '')}")
+
+        # ChromaDB: 每个接口一个文档
+        db.delete_by_doc_id(doc_id)
+        db.add_api_defs(doc_id, [api])
+
+        # SQLite: 每个接口一条记录
+        _save_to_sqlite(
+            doc_id=doc_id,
+            file_name=f"{api.get('method', '?')} {api.get('url', '')}",
+            file_type=file_type,
+            doc_type="api",
+            chunk_count=1,
+            module_name=module_name,
+        )
+        doc_ids.append(doc_id)
+
+    # 仅当全部接口选中时才废弃原文件
+    if delete_original:
+        try:
+            os.remove(file_path)
+            meta_path = file_path + ".meta.json"
+            if os.path.exists(meta_path):
+                os.remove(meta_path)
+            logger.info(f"   => 已删除原文件: {file_name}")
+        except OSError:
+            pass
+    else:
+        logger.info(f"   => 保留原文件（部分接口未入库）: {file_name}")
+
+    cb(95, "入库完成")
+    return {"doc_ids": doc_ids, "module_name": module_name, "api_count": len(apis)}
+
+
 def process_axure_zip(file_path: str, module_name: str = None, progress_cb=None) -> dict:
     """处理 Axure HTML 演示包：解析页面树 + UI 文本 + 交互 -> 存入 product_docs + SQLite。
 
@@ -350,57 +478,60 @@ def process_axure_zip(file_path: str, module_name: str = None, progress_cb=None)
     logger.info(f"\n{'=' * 60}")
     logger.info(f"[Phase A] 处理 Axure 原型: {os.path.basename(file_path)}")
 
-    db = DualChromaDB()
+    db = get_chroma_db()
     file_name = os.path.basename(file_path)
 
     cb(5, "解压 Axure 包...")
     parser = AxureParser(file_path)
-    cb(15, "解析页面树和 sitemap...")
-    parsed = parser.parse()
-    project_name = parsed.get("project_name", "Unknown")
-    module = module_name or project_name
-    cb(40, "提取 UI 文本和交互...")
-    chunks = parser.to_product_doc_chunks(parsed)
+    try:
+        cb(15, "解析页面树和 sitemap...")
+        parsed = parser.parse()
+        project_name = parsed.get("project_name", "Unknown")
+        module = module_name or project_name
+        cb(40, "提取 UI 文本和交互...")
+        chunks = parser.to_product_doc_chunks(parsed)
 
-    page_details = parsed.get("page_details", {})
-    logger.info(f"   => 项目: {project_name}, 页面: {len(page_details)}")
+        page_details = parsed.get("page_details", {})
+        logger.info(f"   => 项目: {project_name}, 页面: {len(page_details)}")
 
-    if not chunks:
-        logger.warning(f"   ⚠️ Axure 解析后无内容（0 个页面），跳过入库")
-        return {"doc_id": "", "module_name": module, "chunks": 0}
+        if not chunks:
+            logger.warning(f"   ⚠️ Axure 解析后无内容（0 个页面），跳过入库")
+            return {"doc_id": "", "module_name": module, "chunks": 0}
 
-    # 估计关联模块（从页面内容的关键词简单判断）
-    cb(70, "分析关联模块...")
-    related = set()
-    for url, detail in page_details.items():
-        text = (detail.get("ui_text", "") or "") + str(detail.get("interactions", []))
-        for mod_keyword in ["管理", "模块", "系统设置", "报表"]:
-            if mod_keyword in text:
-                related.add(mod_keyword)
-    related.discard(module)
+        # 估计关联模块（从页面内容的关键词简单判断）
+        cb(70, "分析关联模块...")
+        related = set()
+        for url, detail in page_details.items():
+            text = (detail.get("ui_text", "") or "") + str(detail.get("interactions", []))
+            for mod_keyword in ["管理", "模块", "系统设置", "报表"]:
+                if mod_keyword in text:
+                    related.add(mod_keyword)
+        related.discard(module)
 
-    # 写入 ChromaDB（纯向量，不含 module/related_modules）
-    cb(85, "向量化入库中...")
-    doc_id = f"axure_{file_name}_{module}"
-    db.delete_by_doc_id(doc_id)
-    db.add_product_doc_chunks(doc_id, chunks)
-    logger.info(f"   [ChromaDB] 入库完成 (doc_id={doc_id}), {len(chunks)} 块")
+        # 写入 ChromaDB（纯向量，不含 module/related_modules）
+        cb(85, "向量化入库中...")
+        doc_id = _safe_doc_id("axure", file_name, module)
+        db.delete_by_doc_id(doc_id)
+        db.add_product_doc_chunks(doc_id, chunks)
+        logger.info(f"   [ChromaDB] 入库完成 (doc_id={doc_id}), {len(chunks)} 块")
 
-    # 写入 SQLite（文档元数据 + 绑定关系）
-    cb(90, "写入业务数据...")
-    _save_to_sqlite(
-        doc_id=doc_id,
-        file_name=file_name,
-        file_type="zip",
-        doc_type="axure",
-        chunk_count=len(chunks),
-        module_name=module,
-        related_modules=list(related),
-    )
-    logger.info(f"   [SQLite] 入库完成")
+        # 写入 SQLite（文档元数据 + 绑定关系）
+        cb(90, "写入业务数据...")
+        _save_to_sqlite(
+            doc_id=doc_id,
+            file_name=file_name,
+            file_type="zip",
+            doc_type="axure",
+            chunk_count=len(chunks),
+            module_name=module,
+            related_modules=list(related),
+        )
+        logger.info(f"   [SQLite] 入库完成")
 
-    cb(95, "入库完成")
-    return {"doc_id": doc_id, "module_name": module, "chunks": len(chunks)}
+        cb(95, "入库完成")
+        return {"doc_id": doc_id, "module_name": module, "chunks": len(chunks)}
+    finally:
+        parser.cleanup()
 
 
 if __name__ == "__main__":

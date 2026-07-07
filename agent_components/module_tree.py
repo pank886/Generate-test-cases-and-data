@@ -1,302 +1,267 @@
 """模块目录树管理。
 
-支持树形结构（parent_id 邻接表）、增删改查、名称变更级联更新向量库 metadata。
-存储方式：JSON 文件（后续可替换为数据库）。
+已从 JSON 文件存储迁移到 SQLite（database/operations.py）。
+所有函数委托给 SQLite 操作，保持签名不变以兼容现有调用方。
 """
 
-import json
 import os
 import uuid
-from datetime import datetime
 
 from observability import get_logger
 
 logger = get_logger(__name__)
 
+# 保留常量用于 init_db 种子导入
 _MODULE_FILE = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "modules.json")
 
 
-def _ensure_file():
-    """确保模块数据文件存在。"""
-    os.makedirs(os.path.dirname(_MODULE_FILE), exist_ok=True)
-    if not os.path.exists(_MODULE_FILE):
-        default = {
-            "version": 1,
-            "modules": [
-                {
-                    "id": "root",
-                    "name": "全部模块",
-                    "parent_id": None,
-                    "path": "/",
-                    "created_at": datetime.now().isoformat(),
-                }
-            ],
-        }
-        with open(_MODULE_FILE, "w", encoding="utf-8") as f:
-            json.dump(default, f, ensure_ascii=False, indent=2)
-        return default
-    with open(_MODULE_FILE, "r", encoding="utf-8") as f:
-        return json.load(f)
-
-
-def _save(data: dict):
-    with open(_MODULE_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+def _get_session():
+    from database import get_session
+    return get_session()
 
 
 # ==================== 查询 ====================
 
 def get_all() -> list:
-    """获取所有模块列表（扁平）。"""
-    data = _ensure_file()
-    return data["modules"]
+    """获取所有模块列表（扁平）。返回 dict 列表兼容旧格式。"""
+    from database.operations import ModuleOps
+    session = _get_session()
+    try:
+        modules = ModuleOps.get_all(session)
+        return [
+            {"id": m.id, "name": m.name, "parent_id": m.parent_id, "path": m.path,
+             "created_at": m.created_at.isoformat() if m.created_at else ""}
+            for m in modules
+        ]
+    finally:
+        session.close()
 
 
 def get_tree() -> list:
-    """获取树形结构。"""
-    modules = get_all()
-    children_map = {}
-    for mod in modules:
-        pid = mod.get("parent_id")
-        if pid not in children_map:
-            children_map[pid] = []
-        children_map[pid].append(mod)
-
-    def build(node):
-        node["children"] = build_tree(children_map.get(node["id"], []))
-        return node
-
-    def build_tree(nodes):
-        return [build(n) for n in sorted(nodes, key=lambda x: x.get("name", ""))]
-
-    roots = children_map.get(None, [])
-    return [build(r) for r in sorted(roots, key=lambda x: x.get("name", ""))]
+    """获取树形结构。返回 dict 兼容旧格式。"""
+    from database.operations import ModuleOps
+    session = _get_session()
+    try:
+        return ModuleOps.get_tree(session)
+    finally:
+        session.close()
 
 
-def get_by_id(module_id: str) -> dict:
+def get_by_id(module_id: str) -> dict | None:
     """按 ID 获取模块。"""
-    for mod in get_all():
-        if mod["id"] == module_id:
-            return mod
-    return None
+    from database.operations import ModuleOps
+    session = _get_session()
+    try:
+        m = ModuleOps.get_by_id(session, module_id)
+        if not m:
+            return None
+        return {"id": m.id, "name": m.name, "parent_id": m.parent_id, "path": m.path,
+                "created_at": m.created_at.isoformat() if m.created_at else ""}
+    finally:
+        session.close()
 
 
-def get_by_name(name: str) -> dict:
+def get_by_name(name: str) -> dict | None:
     """按名称获取模块。"""
-    for mod in get_all():
-        if mod["name"] == name:
-            return mod
-    return None
+    from database.operations import ModuleOps
+    session = _get_session()
+    try:
+        m = ModuleOps.get_by_name(session, name)
+        if not m:
+            return None
+        return {"id": m.id, "name": m.name, "parent_id": m.parent_id, "path": m.path,
+                "created_at": m.created_at.isoformat() if m.created_at else ""}
+    finally:
+        session.close()
 
 
 def get_descendants(module_id: str) -> list:
-    """获取模块的所有后代（含自身）。"""
-    modules = get_all()
-    children_map = {}
-    for mod in modules:
-        pid = mod.get("parent_id")
-        children_map.setdefault(pid, []).append(mod)
-
-    result = []
-
-    def collect(mid):
-        result.append(mid)
-        for child in children_map.get(mid, []):
-            collect(child["id"])
-
-    collect(module_id)
-    return result
+    """获取模块的所有后代 ID（含自身）。"""
+    from database.operations import ModuleOps
+    session = _get_session()
+    try:
+        return ModuleOps.get_descendants(session, module_id)
+    finally:
+        session.close()
 
 
 def path_of(module_id: str) -> str:
     """获取模块的完整路径。"""
     mod = get_by_id(module_id)
-    if not mod:
-        return ""
-    if mod.get("parent_id"):
-        parent = get_by_id(mod["parent_id"])
-        parent_path = path_of(parent["id"]) if parent else ""
-        return parent_path + "/" + mod["name"]
-    return mod["name"]
+    return mod["path"] if mod else ""
 
 
 # ==================== 增删改 ====================
 
 def create(name: str, parent_id: str = "root") -> dict:
     """创建模块。"""
-    data = _ensure_file()
-    new_id = str(uuid.uuid4())[:8]
-    module = {
-        "id": new_id,
-        "name": name,
-        "parent_id": parent_id,
-        "path": "",
-        "created_at": datetime.now().isoformat(),
-    }
-    module["path"] = path_of(new_id) or name
-    data["modules"].append(module)
-    _save(data)
-    return module
+    from database.operations import ModuleOps
+    session = _get_session()
+    try:
+        # 获取根模块的实际 ID（"root" 是 JSON 时代的遗留 ID）
+        actual_parent_id = parent_id
+        if parent_id == "root":
+            root = ModuleOps.get_by_name(session, "全部模块")
+            if root:
+                actual_parent_id = root.id
+        m = ModuleOps.create_module(session, name, actual_parent_id)
+        session.commit()
+        return {"id": m.id, "name": m.name, "parent_id": m.parent_id, "path": m.path}
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()
 
 
 def rename(module_id: str, new_name: str):
-    """重命名模块（业务关系已在 SQLite 中由 ModuleOps 管理）。"""
-    data = _ensure_file()
-    for mod in data["modules"]:
-        if mod["id"] == module_id:
-            old_name = mod["name"]
-            mod["name"] = new_name
-            mod["path"] = path_of(module_id)
-            _save(data)
-            _refresh_paths(data)
-            return {"old_name": old_name, "new_name": new_name}
-    return None
+    """重命名模块（自动同步 bindings 中的模块名）。"""
+    from database.operations import ModuleOps
+    session = _get_session()
+    try:
+        result = ModuleOps.rename_module(session, module_id, new_name)
+        session.commit()
+        return result
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()
 
 
 def delete(module_id: str):
-    """删除模块（非叶子节点禁止删除，除非 force）。"""
-    if module_id == "root":
-        raise ValueError("不能删除根节点")
-    data = _ensure_file()
-    descendants = get_descendants(module_id)
-    if len(descendants) > 1:
-        raise ValueError(f"模块包含子模块，请先删除子模块")
-    data["modules"] = [m for m in data["modules"] if m["id"] != module_id]
-    _save(data)
+    """删除模块。先检查约束，再执行级联解绑。"""
+    from database.operations import ModuleOps, BindingOps
+    from database.models import Module
+    session = _get_session()
+    try:
+        mod = ModuleOps.get_by_id(session, module_id)
+        if not mod:
+            raise ValueError("模块不存在")
+        if mod.name == "全部模块":
+            raise ValueError("不能删除根节点")
+
+        # 先检查是否有子模块（避免先做清理再回滚）
+        children = session.query(Module).filter(Module.parent_id == module_id).count()
+        if children > 0:
+            raise ValueError("模块包含子模块，请先删除子模块")
+
+        # 1. 找出该模块下所有绑定的文档
+        bound_docs = BindingOps.get_bound_docs(session, mod.name)
+        bound_doc_ids = [d.id for d in bound_docs]
+
+        # 2. 解除这些文档之间的所有 doc↔doc 绑定
+        BindingOps.delete_bindings_between_docs(session, bound_doc_ids)
+
+        # 3. 解除这些文档与模块的 doc↔module 绑定
+        for doc in bound_docs:
+            BindingOps.unbind_by_pair(session, "module", mod.name, doc.doc_type, doc.id)
+
+        # 4. 解除模块与其他模块的绑定
+        BindingOps.delete_bindings_for_module(session, mod.name)
+
+        # 5. 删除模块本身
+        session.delete(mod)
+        session.commit()
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()
 
 
 def merge(source_id: str, target_id: str):
-    """合并模块：将 source 下所有文档重映射到 target，删除 source。"""
-    source = get_by_id(source_id)
-    target = get_by_id(target_id)
-    if not source or not target:
-        raise ValueError("模块不存在")
-
-    # 迁移子模块
-    data = _ensure_file()
-    for mod in data["modules"]:
-        if mod.get("parent_id") == source_id:
-            mod["parent_id"] = target_id
-
-    # 删除源模块
-    data["modules"] = [m for m in data["modules"] if m["id"] != source_id]
-    _refresh_paths(data)
-    _save(data)
+    """合并模块：将 source 的绑定关系和子模块迁移到 target，删除 source。"""
+    from database.operations import ModuleOps
+    session = _get_session()
+    try:
+        result = ModuleOps.merge_modules(session, source_id, target_id)
+        session.commit()
+        return result
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()
 
 
-def _refresh_paths(data: dict):
-    """刷新所有模块的 path 字段。"""
-    def resolve_pid(pid):
-        for m in data["modules"]:
-            if m["id"] == pid:
-                return m
-        return None
-
-    def calc_path(mod):
-        if mod["id"] == "root":
-            return "/"
-        parent = resolve_pid(mod.get("parent_id"))
-        if parent:
-            return calc_path(parent) + "/" + mod["name"] if calc_path(parent) != "/" else "/" + mod["name"]
-        return "/" + mod["name"]
-
-    for mod in data["modules"]:
-        mod["path"] = calc_path(mod)
-
-
-# ==================== 术语表管理 ====================
+# ==================== 术语表管理（已迁移到文档级别） ====================
 
 def get_glossary(module_name: str) -> list[dict]:
-    """获取模块的业务术语表。"""
-    data = _ensure_file()
-    for mod in data["modules"]:
-        if mod["name"] == module_name:
-            return mod.get("glossary", [])
-    return []
-
-
-def replace_glossary_by_doc(module_name: str, doc_id: str, terms: list[dict]) -> bool:
-    """批量替换某文档关联的术语（先删该文档旧术语，再插入新术语）。
-
-    Args:
-        module_name: 模块名
-        doc_id: 来源文档 ID
-        terms: [{term, definition, notes}] 新的术语列表
-    """
-    data = _ensure_file()
-    for mod in data["modules"]:
-        if mod["name"] == module_name:
-            glossary = mod.get("glossary", [])
-            # 1) 删除同一来源文档的旧术语
-            glossary = [t for t in glossary if t.get("source_doc") != doc_id]
-            # 2) 插入新术语
-            for t in terms:
-                glossary.append({
-                    "term": t.get("term", t.get("name", "?")),
-                    "definition": t.get("definition", ""),
-                    "notes": t.get("notes", ""),
-                    "source_doc": doc_id,
-                })
-            mod["glossary"] = glossary
-            _save(data)
-            return True
-    return False
-
-
-def delete_glossary_by_doc(doc_id: str):
-    """删除所有来自指定文档的术语（文档被删除时调用，支持按 doc_id 精确匹配或按文件名模糊匹配）。"""
-    data = _ensure_file()
-    for mod in data["modules"]:
-        mod["glossary"] = [
-            t for t in mod.get("glossary", [])
-            if t.get("source_doc") != doc_id and doc_id not in t.get("source_doc", "")
+    """获取模块下所有文档的术语（聚合视图）。"""
+    from database.operations import GlossaryOps
+    session = _get_session()
+    try:
+        terms = GlossaryOps.get_terms_for_module(session, module_name)
+        return [
+            {"term": t.term, "definition": t.definition, "notes": t.notes,
+             "source_doc": t.source_doc, "id": t.id}
+            for t in terms
         ]
-    _save(data)
+    finally:
+        session.close()
 
 
-def add_glossary_term(module_name: str, term: str, definition: str, notes: str = "") -> bool:
-    """手动添加单条术语（不带来源文档，source_doc 为空）。"""
-    data = _ensure_file()
-    for mod in data["modules"]:
-        if mod["name"] == module_name:
-            glossary = mod.get("glossary", [])
-            existing = next((t for t in glossary if t.get("term") == term), None)
-            if existing:
-                existing["definition"] = definition
-                existing["notes"] = notes
-            else:
-                glossary.append({"term": term, "definition": definition, "notes": notes, "source_doc": ""})
-            mod["glossary"] = glossary
-            _save(data)
-            return True
-    return False
+def get_glossary_by_doc(doc_id: str) -> list[dict]:
+    """获取某文档的术语。"""
+    from database.operations import GlossaryOps
+    session = _get_session()
+    try:
+        terms = GlossaryOps.get_terms(session, doc_id)
+        return [
+            {"term": t.term, "definition": t.definition, "notes": t.notes,
+             "source_doc": t.source_doc, "id": t.id}
+            for t in terms
+        ]
+    finally:
+        session.close()
+
+
+def add_glossary_term(module_name: str, term: str, definition: str,
+                      notes: str = "", doc_id: str = None) -> bool:
+    """添加术语（需要指定 doc_id，或用模块下第一个产品文档）。"""
+    from database.operations import GlossaryOps, BindingOps
+    session = _get_session()
+    try:
+        if not doc_id:
+            # 找模块下第一个产品文档
+            bound_docs = BindingOps.get_bound_docs(session, module_name)
+            product_docs = [d for d in bound_docs if d.doc_type == "product"]
+            if not product_docs:
+                return False
+            doc_id = product_docs[0].id
+
+        # upsert: 有则更新，无则插入（避免删后崩溃术语丢失）
+        existing = GlossaryOps.get_terms(session, doc_id)
+        found = next((t for t in existing if t.term == term), None)
+        if found:
+            found.definition = definition
+            found.notes = notes
+        else:
+            GlossaryOps.add_term(session, doc_id, term, definition, notes)
+        session.commit()
+        return True
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()
 
 
 def delete_glossary_term(module_name: str, term: str) -> bool:
-    """删除单条术语。"""
-    data = _ensure_file()
-    for mod in data["modules"]:
-        if mod["name"] == module_name:
-            mod["glossary"] = [t for t in mod.get("glossary", []) if t.get("term") != term]
-            _save(data)
-            return True
-    return False
-
-
-# ==================== CLI 测试 ====================
-
-if __name__ == "__main__":
-    import sys
-    if len(sys.argv) >= 3 and sys.argv[1] == "create":
-        m = create(sys.argv[2])
-        logger.warning(f"创建模块: {m}")
-    elif len(sys.argv) >= 3 and sys.argv[1] == "rename":
-        mod = get_by_name(sys.argv[2])
-        if mod:
-            r = rename(mod["id"], sys.argv[3])
-            logger.warning(f"重命名: {r}")
-    elif len(sys.argv) >= 2 and sys.argv[1] == "list":
-        import json as _j
-        logger.warning(_j.dumps(get_tree(), ensure_ascii=False, indent=2))
-    else:
-        logger.warning("用法: python module_tree.py <create|rename|list> [参数]")
+    """删除模块下某条术语（按名称匹配）。"""
+    from database.operations import GlossaryOps
+    session = _get_session()
+    try:
+        all_terms = get_glossary(module_name)
+        for t in all_terms:
+            if t["term"] == term:
+                GlossaryOps.delete_term(session, t["id"])
+                session.commit()
+                return True
+        return False
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()

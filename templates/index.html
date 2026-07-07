@@ -1,1063 +1,663 @@
 <!DOCTYPE html>
 <html lang="zh-CN">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>智能测试助手</title>
-    <style>
-        * { box-sizing: border-box; margin: 0; padding: 0; }
-        :root {
-            --primary: #1a73e8; --primary-bg: #e8f0fe; --success: #34a853;
-            --danger: #c5221f; --danger-bg: #fce8e6; --gray: #f5f5f5;
-            --border: #e0e0e0; --text: #333; --text-dim: #888;
-            --radius: 8px; --shadow: 0 1px 3px rgba(0,0,0,.08);
-        }
-        body {
-            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-            background: #f0f2f5; color: var(--text); min-height: 100vh;
-        }
-        header {
-            background: var(--primary); color: #fff; padding: 0 24px;
-            height: 48px; display: flex; align-items: center; gap: 32px;
-            font-size: 16px; font-weight: 600; position: sticky; top: 0; z-index: 100;
-        }
-        header .logo { font-size: 18px; }
-        nav { display: flex; gap: 4px; height: 100%; }
-        nav a {
-            color: rgba(255,255,255,.75); text-decoration: none; padding: 0 16px;
-            display: flex; align-items: center; font-size: 14px; font-weight: 400;
-            border-bottom: 3px solid transparent; transition: .2s;
-        }
-        nav a:hover { color: #fff; }
-        nav a.active { color: #fff; border-bottom-color: #fff; }
-        .body { max-width: 1200px; margin: 0 auto; padding: 24px 24px 48px; }
-        .tab { display: none; }
-        .tab.active { display: block; }
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>智能测试助手</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+:root{--primary:#1a73e8;--primary-bg:#e8f0fe;--success:#34a853;--danger:#c5221f;--danger-bg:#fce8e6;--gray:#f5f5f5;--border:#e0e0e0;--text:#333;--text-dim:#888;--radius:8px;--shadow:0 1px 3px rgba(0,0,0,.08)}
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:#f0f2f5;color:var(--text);min-height:100vh}
+header{background:var(--primary);color:#fff;padding:0 24px;height:48px;display:flex;align-items:center;gap:32px;font-size:16px;font-weight:600;position:sticky;top:0;z-index:100}
+header .logo{font-size:18px}
+nav{display:flex;gap:4px;height:100%}
+nav a{color:rgba(255,255,255,.75);text-decoration:none;padding:0 16px;display:flex;align-items:center;font-size:14px;font-weight:400;border-bottom:3px solid transparent;transition:.2s}
+nav a:hover,nav a.active{color:#fff;border-bottom-color:#fff}
+.body{max-width:1400px;margin:0 auto;padding:20px 24px 48px}
+.tab{display:none}.tab.active{display:block}
+.card{background:#fff;border-radius:var(--radius);padding:20px;box-shadow:var(--shadow);margin-bottom:16px}
+.card h3{font-size:14px;color:#555;margin-bottom:12px;display:flex;align-items:center;gap:8px}
+.btn{display:inline-flex;align-items:center;gap:4px;background:var(--primary);color:#fff;border:none;padding:7px 16px;border-radius:4px;cursor:pointer;font-size:13px;transition:.15s}
+.btn:hover{background:#1557b0}.btn:disabled{background:#ccc;cursor:not-allowed}
+.btn-sm{padding:3px 10px;font-size:11px}
+.btn-outline{background:#fff;color:var(--primary);border:1px solid var(--primary)}.btn-outline:hover{background:var(--primary-bg)}
+.btn-success{background:var(--success)}.btn-success:hover{background:#2d9249}
+.btn-danger{background:var(--danger)}.btn-danger:hover{background:#a50e0e}
+.btn-danger-outline{background:#fff;color:var(--danger);border:1px solid var(--danger)}.btn-danger-outline:hover{background:var(--danger-bg)}
+.badge{display:inline-block;padding:2px 8px;border-radius:10px;font-size:11px;font-weight:600}
+.badge-ok{background:#e6f4ea;color:#1e7e34}.badge-warn{background:#fef7e0;color:#e37400}.badge-err{background:var(--danger-bg);color:var(--danger)}
+.tag{display:inline-flex;align-items:center;gap:4px;background:var(--primary-bg);color:var(--primary);padding:3px 10px;border-radius:12px;font-size:12px;margin:2px}
+.tag .remove{cursor:pointer;font-weight:700;opacity:.5}.tag .remove:hover{opacity:1;color:var(--danger)}
+.upload-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:20px}@media(max-width:800px){.upload-grid{grid-template-columns:1fr}}
+.upload-card{border:2px dashed var(--border);border-radius:var(--radius);padding:24px 18px;text-align:center;cursor:pointer;transition:.2s;background:#fafbfc;display:block}
+.upload-card:hover{border-color:var(--primary);background:var(--primary-bg)}
+.upload-card .icon{font-size:36px;margin-bottom:8px}.upload-card .title{font-size:15px;font-weight:600;margin-bottom:4px}
+.upload-card .hint{font-size:12px;color:var(--text-dim);margin-bottom:12px}
+.upload-card input[type=file]{display:none}.upload-card.dragover{border-color:var(--success);background:#e6f4ea}
+.file-table{width:100%;border-collapse:collapse;font-size:13px}
+.file-table th{text-align:left;padding:10px 12px;border-bottom:2px solid #eee;color:var(--text-dim);font-weight:600;font-size:11px;text-transform:uppercase}
+.file-table td{padding:10px 12px;border-bottom:1px solid #f0f0f0;vertical-align:middle}
+.file-table tr:hover td{background:#f8f9ff}.file-table .name{font-weight:500;color:var(--primary)}
+.empty-hint{color:#aaa;font-size:13px;padding:24px 0;text-align:center}
 
-        .card {
-            background: #fff; border-radius: var(--radius); padding: 24px;
-            box-shadow: var(--shadow); margin-bottom: 20px;
-        }
-        .card h3 { font-size: 15px; color: #555; margin-bottom: 16px; display: flex; align-items: center; gap: 8px; }
+/* 三栏布局 */
+.three-col{display:grid;grid-template-columns:260px 1fr 300px;gap:16px;height:calc(100vh - 120px)}
+@media(max-width:1000px){.three-col{grid-template-columns:1fr;height:auto}}
+.col-left,.col-center,.col-right{overflow-y:auto}
+.col-left{min-width:0}.col-right{min-width:0}
+.module-tree{font-size:13px}.module-tree .item{display:flex;align-items:center;gap:6px;padding:6px 8px;border-radius:4px;cursor:pointer;transition:.1s;position:relative}
+.module-tree .item:hover{background:var(--primary-bg)}
+.module-tree .item.selected{background:var(--primary);color:#fff}
+.module-tree .item .actions{display:none;margin-left:auto;gap:2px}
+.module-tree .item:hover .actions{display:flex}
+.module-tree .item.selected .actions{display:flex}
+.module-tree .item .actions button{background:none;border:none;cursor:pointer;font-size:12px;padding:1px 4px;color:inherit;opacity:.7}
+.module-tree .item .actions button:hover{opacity:1}
+.module-tree .create-row{display:flex;gap:4px;margin-top:8px}
+.module-tree .create-row input{flex:1;padding:6px 8px;border:1px solid var(--border);border-radius:4px;font-size:12px}
 
-        /* 按钮 */
-        .btn { display: inline-flex; align-items: center; gap: 4px; background: var(--primary);
-            color: #fff; border: none; padding: 8px 18px; border-radius: 4px;
-            cursor: pointer; font-size: 13px; transition: .15s; }
-        .btn:hover { background: #1557b0; }
-        .btn:disabled { background: #ccc; cursor: not-allowed; }
-        .btn-sm { padding: 4px 12px; font-size: 12px; }
-        .btn-outline { background: #fff; color: var(--primary); border: 1px solid var(--primary); }
-        .btn-outline:hover { background: var(--primary-bg); }
-        .btn-success { background: var(--success); }
-        .btn-success:hover { background: #2d9249; }
-        .btn-danger { background: var(--danger); }
-        .btn-danger:hover { background: #a50e0e; }
-        .btn-danger-outline { background: #fff; color: var(--danger); border: 1px solid var(--danger); }
-        .btn-danger-outline:hover { background: var(--danger-bg); }
+/* 文档列表 */
+.doc-type-tabs{display:flex;gap:4px;margin-bottom:12px}
+.doc-type-tabs button{padding:5px 14px;border:1px solid var(--border);background:#fff;border-radius:4px 4px 0 0;cursor:pointer;font-size:12px}
+.doc-type-tabs button.active{background:var(--primary);color:#fff;border-color:var(--primary)}
+.doc-list{font-size:13px}.doc-item{border:1px solid var(--border);border-radius:4px;padding:10px 12px;margin-bottom:6px;cursor:pointer;transition:.1s}
+.doc-item:hover{border-color:var(--primary)}.doc-item.selected{border-color:var(--primary);background:var(--primary-bg)}
+.doc-item .meta{font-size:11px;color:var(--text-dim);margin-top:3px}
+.doc-item .actions{display:flex;gap:4px;margin-top:6px}
+.chunk-viewer{margin-top:12px;border:1px solid var(--border);border-radius:4px;padding:12px;background:#fafbfc;font-size:13px;max-height:400px;overflow-y:auto;white-space:pre-wrap;line-height:1.7}
+.chunk-nav{display:flex;gap:8px;align-items:center;margin-bottom:8px;font-size:12px}
 
-        /* 标签 */
-        .badge { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 11px; font-weight: 600; }
-        .badge-ok { background: #e6f4ea; color: #1e7e34; }
-        .badge-warn { background: #fef7e0; color: #e37400; }
-        .badge-err { background: var(--danger-bg); color: var(--danger); }
+/* 关联面板 */
+.assoc-section{margin-bottom:14px}.assoc-section h4{font-size:12px;color:var(--text-dim);margin-bottom:6px;text-transform:uppercase}
+.assoc-item{display:flex;align-items:center;justify-content:space-between;padding:5px 8px;margin:2px 0;border-radius:4px;background:#fafbfc;font-size:12px}
+.assoc-item:hover{background:var(--primary-bg)}
+.assoc-item .remove{color:var(--danger);cursor:pointer;font-size:14px;font-weight:700}
+.assoc-item .remove:hover{opacity:.7}
+.glossary-section{margin-top:16px;border-top:1px solid var(--border);padding-top:12px}
+.glossary-item{padding:6px 0;border-bottom:1px solid #f0f0f0;font-size:12px}
+.glossary-item .term-name{font-weight:600;color:var(--primary)}
+.glossary-item .term-def{color:var(--text-dim);margin-top:2px}
+.glossary-item .remove{float:right;color:var(--danger);cursor:pointer}
+.new-term-row{display:flex;gap:4px;margin-top:8px}
+.new-term-row input{flex:1;padding:5px 8px;border:1px solid var(--border);border-radius:4px;font-size:11px}
+.search-box input{width:100%;padding:7px 10px;border:1px solid var(--border);border-radius:4px;font-size:12px;margin-bottom:10px}
 
-        /* 文件上传卡片 */
-        .upload-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 20px; }
-        @media (max-width: 800px) { .upload-grid { grid-template-columns: 1fr; } }
-        .upload-card {
-            border: 2px dashed var(--border); border-radius: var(--radius);
-            padding: 24px 18px; text-align: center; cursor: pointer; transition: .2s;
-            background: #fafbfc; display: block;
-        }
-        .upload-card:hover { border-color: var(--primary); background: var(--primary-bg); }
-        .upload-card .icon { font-size: 36px; margin-bottom: 8px; }
-        .upload-card .title { font-size: 15px; font-weight: 600; margin-bottom: 4px; }
-        .upload-card .hint { font-size: 12px; color: var(--text-dim); margin-bottom: 12px; }
-        .upload-card input[type="file"] { display: none; }
-        .upload-card.dragover { border-color: var(--success); background: #e6f4ea; }
+/* 弹窗 */
+.progress-wrap{margin-top:12px}.progress-bar{width:100%;height:6px;background:#eee;border-radius:3px;overflow:hidden}.progress-fill{height:100%;background:var(--primary);border-radius:3px;transition:width .3s}
+.toast{position:fixed;bottom:24px;right:24px;z-index:9999;background:#333;color:#fff;padding:12px 20px;border-radius:6px;font-size:13px;opacity:0;transform:translateY(16px);transition:.3s;pointer-events:none}
+.toast.show{opacity:1;transform:translateY(0)}
+.modal-overlay{position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,.4);z-index:1000;display:flex;align-items:center;justify-content:center}
+.modal{background:#fff;border-radius:var(--radius);padding:24px;max-width:700px;width:92%;max-height:80vh;overflow-y:auto;box-shadow:0 8px 32px rgba(0,0,0,.2)}
+.modal h3{margin-bottom:14px}.modal .btn-row{display:flex;gap:8px;justify-content:flex-end;margin-top:16px}
+.hidden{display:none!important}
 
-        /* 文件列表 */
-        .file-table { width: 100%; border-collapse: collapse; font-size: 13px; }
-        .file-table th { text-align: left; padding: 10px 12px; border-bottom: 2px solid #eee;
-            color: var(--text-dim); font-weight: 600; font-size: 11px; text-transform: uppercase; }
-        .file-table td { padding: 10px 12px; border-bottom: 1px solid #f0f0f0; vertical-align: middle; }
-        .file-table tr:hover td { background: #f8f9ff; }
-        .file-table .name { font-weight: 500; color: var(--primary); }
-        .empty-hint { color: #aaa; font-size: 13px; padding: 24px 0; text-align: center; }
-
-        /* 模块管理 */
-        .module-layout { display: grid; grid-template-columns: 320px 1fr; gap: 20px; }
-        @media (max-width: 700px) { .module-layout { grid-template-columns: 1fr; } }
-        .module-tree { font-size: 13px; max-height: 500px; overflow-y: auto; }
-        .module-tree .item {
-            display: flex; align-items: center; gap: 6px; padding: 6px 8px;
-            border-radius: 4px; cursor: pointer; transition: .1s;
-        }
-        .module-tree .item:hover { background: var(--primary-bg); }
-        .module-tree .item.selected { background: var(--primary); color: #fff; }
-        .module-tree .item.root { font-weight: 600; }
-        .module-detail { font-size: 14px; }
-        .module-detail .section { margin-bottom: 16px; }
-        .module-detail .section h4 { font-size: 13px; color: var(--text-dim); margin-bottom: 8px; }
-        .tag {
-            display: inline-flex; align-items: center; gap: 4px;
-            background: var(--primary-bg); color: var(--primary); padding: 3px 10px;
-            border-radius: 12px; font-size: 12px; margin: 2px;
-        }
-        .tag .remove { cursor: pointer; font-weight: 700; opacity: .5; }
-        .tag .remove:hover { opacity: 1; color: var(--danger); }
-
-        /* 聊天 */
-        .chat-layout { display: grid; grid-template-columns: 1fr 380px; gap: 20px; }
-        @media (max-width: 900px) { .chat-layout { grid-template-columns: 1fr; } }
-        .chat-box {
-            border: 1px solid var(--border); border-radius: var(--radius);
-            min-height: 360px; max-height: 480px; overflow-y: auto;
-            padding: 16px; background: #fafafa; font-size: 13px; line-height: 1.7;
-        }
-        .chat-msg { margin-bottom: 12px; }
-        .chat-msg .who { font-weight: 600; font-size: 12px; margin-bottom: 2px; }
-        .chat-msg .who.user { color: var(--primary); }
-        .chat-msg .who.ai { color: var(--success); }
-        .chat-msg .body { white-space: pre-wrap; }
-        .chat-input-row { display: flex; gap: 8px; margin-top: 12px; }
-        .chat-input-row input { flex:1; padding:10px 12px; border:1px solid var(--border); border-radius:4px; font-size:13px; }
-
-        /* 进度 */
-        .progress-wrap { margin-top: 12px; }
-        .progress-bar {
-            width: 100%; height: 6px; background: #eee; border-radius: 3px;
-            overflow: hidden; margin-bottom: 6px;
-        }
-        .progress-fill { height: 100%; background: var(--primary); border-radius: 3px; transition: width .3s; }
-
-        /* 文件编辑器 */
-        .file-editor { display: none; }
-        .file-editor textarea {
-            width: 100%; min-height: 300px; font-family: 'Consolas', 'Courier New', monospace;
-            font-size: 13px; border: 1px solid var(--border); border-radius: 4px;
-            padding: 12px; line-height: 1.5; resize: vertical;
-        }
-        .file-editor .actions { display: flex; gap: 8px; margin-top: 12px; }
-
-        /* 结果面板 */
-        .result-panel {
-            background: #fff; border-radius: var(--radius); box-shadow: var(--shadow);
-            padding: 16px; font-size: 13px; max-height: 600px; overflow-y: auto;
-        }
-        .result-panel .file-row {
-            display: flex; align-items: center; justify-content: space-between;
-            padding: 8px 0; border-bottom: 1px solid #f0f0f0;
-        }
-        .result-panel .file-row:last-child { border: none; }
-
-        .toast {
-            position: fixed; bottom: 24px; right: 24px; z-index: 9999;
-            background: #333; color: #fff; padding: 12px 20px; border-radius: 6px;
-            font-size: 13px; opacity: 0; transform: translateY(16px); transition: .3s;
-            pointer-events: none;
-        }
-        .toast.show { opacity: 1; transform: translateY(0); }
-
-        .modal-overlay {
-            position: fixed; top: 0; left: 0; right: 0; bottom: 0;
-            background: rgba(0,0,0,.4); z-index: 1000;
-            display: flex; align-items: center; justify-content: center;
-        }
-        .modal {
-            background: #fff; border-radius: var(--radius); padding: 24px;
-            max-width: 640px; width: 92%; max-height: 80vh; overflow-y: auto;
-            box-shadow: 0 8px 32px rgba(0,0,0,.2);
-        }
-        .modal h3 { margin-bottom: 16px; }
-        .modal input[type="text"] { width:100%; padding:8px; border:1px solid var(--border); border-radius:4px; font-size:13px; margin-bottom:8px; }
-        .modal .btn-row { display: flex; gap: 8px; justify-content: flex-end; margin-top: 16px; }
-        .hidden { display: none !important; }
-    </style>
+/* 聊天 (Tab 3) */
+.chat-layout{display:grid;grid-template-columns:1fr 380px;gap:20px}@media(max-width:900px){.chat-layout{grid-template-columns:1fr}}
+.chat-box{border:1px solid var(--border);border-radius:var(--radius);min-height:360px;max-height:480px;overflow-y:auto;padding:16px;background:#fafafa;font-size:13px;line-height:1.7}
+.chat-msg{margin-bottom:12px}.chat-msg .who{font-weight:600;font-size:12px;margin-bottom:2px}
+.chat-msg .who.user{color:var(--primary)}.chat-msg .who.ai{color:var(--success)}
+.chat-msg .body{white-space:pre-wrap}.chat-input-row{display:flex;gap:8px;margin-top:12px}
+.chat-input-row input{flex:1;padding:10px 12px;border:1px solid var(--border);border-radius:4px;font-size:13px}
+.file-editor{display:none}.file-editor textarea{width:100%;min-height:300px;font-family:Consolas,'Courier New',monospace;font-size:13px;border:1px solid var(--border);border-radius:4px;padding:12px;line-height:1.5;resize:vertical}
+.file-editor .actions{display:flex;gap:8px;margin-top:12px}
+.result-panel{background:#fff;border-radius:var(--radius);box-shadow:var(--shadow);padding:16px;font-size:13px;max-height:600px;overflow-y:auto}
+/* 文件分类展示 */
+.files-header{display:flex;align-items:center;justify-content:space-between;margin-bottom:12px}
+.filter-bar{display:flex;align-items:center;gap:6px;margin-bottom:14px;flex-wrap:wrap}
+.filter-btn{padding:5px 14px;border:1px solid var(--border);background:#fff;border-radius:14px;cursor:pointer;font-size:12px;transition:.15s;white-space:nowrap}
+.filter-btn:hover{border-color:var(--primary);color:var(--primary)}
+.filter-btn.active{background:var(--primary);color:#fff;border-color:var(--primary)}
+.filter-search{flex:1;min-width:160px;padding:6px 10px;border:1px solid var(--border);border-radius:14px;font-size:12px;outline:none}
+.filter-search:focus{border-color:var(--primary)}
+.file-section{margin-bottom:16px;border:1px solid var(--border);border-radius:var(--radius);overflow:hidden}
+.file-section-header{display:flex;align-items:center;gap:8px;padding:10px 14px;background:#fafbfc;cursor:pointer;font-size:13px;font-weight:600;user-select:none;transition:.15s}
+.file-section-header:hover{background:#f0f4ff}
+.file-section-header .count{font-size:11px;color:var(--text-dim);font-weight:400}
+.file-section-header .arrow{transition:.2s;font-size:10px;color:var(--text-dim)}
+.file-section-header .arrow.open{transform:rotate(90deg)}
+.file-section-body{padding:0}
+.file-section-body .file-table{width:100%}
+.file-section-body .file-table th:first-child,.file-section-body .file-table td:first-child{padding-left:20px}
+.file-table .name-row{display:flex;align-items:center;gap:6px}
+.file-table .no-file{color:var(--text-dim);font-size:12px;padding:10px 20px;display:block}
+</style>
 </head>
 <body>
 <header>
-    <span class="logo">🛠️ 智能测试助手</span>
-    <nav>
-        <a href="#" data-tab="upload" class="active" onclick="switchTab('upload')">📄 文档上传</a>
-        <a href="#" data-tab="modules" onclick="switchTab('modules')">📁 模块管理</a>
-        <a href="#" data-tab="chat" onclick="switchTab('chat')">💬 测试生成</a>
-    </nav>
-    <span id="nav-status" style="margin-left:auto; font-size:12px; font-weight:400; opacity:.8;"></span>
+<span class="logo">🛠️ 智能测试助手</span>
+<nav>
+<a href="javascript:void(0)" data-tab="upload" class="active" onclick="switchTab('upload')">📄 文档上传</a>
+<a href="javascript:void(0)" data-tab="manage" onclick="switchTab('manage')">📁 文档管理</a>
+<a href="javascript:void(0)" data-tab="chat" onclick="switchTab('chat')">💬 测试生成</a>
+</nav>
+<span id="nav-status" style="margin-left:auto;font-size:12px;font-weight:400;opacity:.8"></span>
 </header>
-
 <div class="body">
 
-<!-- ==================== Tab 1: 文档上传 ==================== -->
+<!-- ====== Tab 1: 文档上传 ====== -->
 <div class="tab active" id="tab-upload">
-
-    <div class="card">
-        <h3>📤 上传文档</h3>
-        <div class="upload-grid">
-            <!-- 产品文档 -->
-            <label class="upload-card" id="up-product"
-                 ondragover="event.preventDefault();this.classList.add('dragover')"
-                 ondragleave="this.classList.remove('dragover')"
-                 ondrop="event.preventDefault();this.classList.remove('dragover');handleDrop(event,'product')">
-                <input type="file" accept=".pdf,.docx" onchange="uploadFile(this,'product')">
-                <div class="icon">📘</div>
-                <div class="title">产品文档</div>
-                <div class="hint">PDF / Word 格式<br>自动提取模块与术语表</div>
-            </label>
-            <!-- 接口文档 -->
-            <label class="upload-card" id="up-api"
-                 ondragover="event.preventDefault();this.classList.add('dragover')"
-                 ondragleave="this.classList.remove('dragover')"
-                 ondrop="event.preventDefault();this.classList.remove('dragover');handleDrop(event,'api')">
-                <input type="file" accept=".md" onchange="uploadFile(this,'api')">
-                <div class="icon">📝</div>
-                <div class="title">接口文档</div>
-                <div class="hint">Markdown 格式<br>自动提取接口定义</div>
-            </label>
-            <!-- Axure 原型 -->
-            <label class="upload-card" id="up-axure"
-                 ondragover="event.preventDefault();this.classList.add('dragover')"
-                 ondragleave="this.classList.remove('dragover')"
-                 ondrop="event.preventDefault();this.classList.remove('dragover');handleDrop(event,'axure')">
-                <input type="file" accept=".zip" onchange="uploadFile(this,'axure')">
-                <div class="icon">🎨</div>
-                <div class="title">Axure 原型</div>
-                <div class="hint">ZIP 压缩包<br>自动解析页面与交互</div>
-            </label>
-        </div>
+  <div class="card"><h3>📤 上传文档</h3>
+  <div class="upload-grid">
+    <label class="upload-card" ondragover="event.preventDefault();this.classList.add('dragover')" ondragleave="this.classList.remove('dragover')" ondrop="handleDrop(event,'product')">
+      <div class="icon">📄</div><div class="title">产品文档</div><div class="hint">PDF / DOCX，自动提取模块和术语</div>
+      <input type="file" accept=".pdf,.docx" onchange="uploadFile(this,'product')">
+    </label>
+    <label class="upload-card" ondragover="event.preventDefault();this.classList.add('dragover')" ondragleave="this.classList.remove('dragover')" ondrop="handleDrop(event,'api')">
+      <div class="icon">📡</div><div class="title">接口文档</div><div class="hint">Markdown，LLM 拆分后确认入库</div>
+      <input type="file" accept=".md,.txt" onchange="uploadFile(this,'api')">
+    </label>
+    <label class="upload-card" ondragover="event.preventDefault();this.classList.add('dragover')" ondragleave="this.classList.remove('dragover')" ondrop="handleDrop(event,'axure')">
+      <div class="icon">🎨</div><div class="title">Axure 原型</div><div class="hint">ZIP 压缩包，提取页面结构和交互</div>
+      <input type="file" accept=".zip" onchange="uploadFile(this,'axure')">
+    </label>
+  </div></div>
+  <div class="card hidden" id="upload-progress-card"><h3>⏳ 处理中</h3><div class="progress-bar"><div class="progress-fill" id="up-progress" style="width:0%"></div></div><div id="up-progress-text" style="font-size:12px;color:var(--text-dim);margin-top:6px"></div></div>
+  <div class="card" id="files-card">
+    <div class="files-header">
+      <h3>📋 已入库文档</h3>
+      <button class="btn btn-sm btn-outline" onclick="refreshFileList()">🔄 刷新</button>
     </div>
-
-    <!-- 上传进度 -->
-    <div class="card hidden" id="upload-progress-card">
-        <h3>⏳ 处理中</h3>
-        <div class="progress-bar"><div class="progress-fill" id="upload-fill" style="width:0%"></div></div>
-        <div style="font-size:12px;color:var(--text-dim);margin-top:6px;" id="upload-progress-text"></div>
+    <div class="filter-bar">
+      <button class="filter-btn active" data-filter="all" onclick="setFileFilter('all',this)">全部</button>
+      <button class="filter-btn" data-filter="product" onclick="setFileFilter('product',this)">📄 产品文档</button>
+      <button class="filter-btn" data-filter="api" onclick="setFileFilter('api',this)">📡 接口文档</button>
+      <button class="filter-btn" data-filter="axure" onclick="setFileFilter('axure',this)">🎨 Axure 原型</button>
+      <input type="text" class="filter-search" placeholder="🔍 搜索文件名..." oninput="filterFileList()" id="file-filter-input">
     </div>
-
-    <div class="card">
-        <h3>📂 已上传文件 <span style="font-size:12px;color:var(--text-dim);font-weight:400;">（<span id="file-count">0</span> 个文件）</span></h3>
-        <div id="file-empty" class="empty-hint">暂无已导入文件</div>
-        <table class="file-table hidden" id="file-table">
-            <thead><tr><th>文件名</th><th>类型</th><th>大小</th><th>文本块</th><th>时间</th><th>操作</th></tr></thead>
-            <tbody id="file-tbody"></tbody>
-        </table>
-    </div>
+    <div id="file-sections"></div>
+  </div>
 </div>
 
-<!-- ==================== Tab 2: 模块管理 ==================== -->
-<div class="tab" id="tab-modules">
-    <div class="module-layout">
-        <div class="card" style="padding:16px;">
-            <h3 style="margin-bottom:12px;">📁 模块树</h3>
-            <div style="display:flex;gap:6px;margin-bottom:12px;">
-                <input type="text" id="new-mod-name" placeholder="新模块名" style="flex:1;padding:6px 8px;border:1px solid var(--border);border-radius:4px;font-size:12px;">
-                <button class="btn btn-sm" onclick="createModule()">+</button>
-            </div>
-            <div style="font-size:11px;color:var(--text-dim);margin-bottom:8px;">💡 选中模块后点 + 创建子模块</div>
-            <div class="module-tree" id="module-tree"></div>
-        </div>
-        <div class="card module-detail" id="module-detail">
-            <h3>📋 模块详情</h3>
-            <p style="color:var(--text-dim);">← 选择左侧模块查看详情</p>
-            <div id="module-docs-section" class="hidden">
-                <h4 style="font-size:13px;color:var(--text-dim);margin-bottom:8px;">📄 关联文档</h4>
-                <div id="module-docs-list" style="font-size:13px;"></div>
-            </div>
-        </div>
+<!-- ====== Tab 2: 文档管理 ====== -->
+<div class="tab" id="tab-manage">
+<div class="three-col">
+  <!-- 左栏: 模块树 -->
+  <div class="col-left">
+    <div class="card" style="height:100%"><h3>📁 模块树</h3>
+      <div class="module-tree" id="module-tree"></div>
+      <div class="create-row">
+        <input type="text" id="new-module-input" placeholder="新建模块..." onkeydown="if(event.key==='Enter')createModule()">
+        <button class="btn btn-sm" onclick="createModule()">+</button>
+      </div>
     </div>
-</div>
+  </div>
+  <!-- 中栏: 文档列表 + 详情 -->
+  <div class="col-center">
+    <div class="card"><h3>📋 <span id="center-title">选择一个模块</span></h3>
+      <div class="search-box"><input type="text" id="doc-search" placeholder="🔍 搜索文档内容..." onkeydown="if(event.key==='Enter')searchDocs()"></div>
+      <div class="doc-type-tabs">
+        <button class="active" onclick="filterDocType('all')">全部</button>
+        <button onclick="filterDocType('product')">📄 产品文档</button>
+        <button onclick="filterDocType('api')">📡 接口文档</button>
+        <button onclick="filterDocType('axure')">🎨 Axure 原型</button>
+      </div>
+      <div class="doc-list" id="doc-list"></div>
+      <div class="unassociated-section hidden" id="unassociated-section">
+        <h4 style="font-size:12px;color:var(--text-dim);margin:14px 0 6px;border-top:1px solid var(--border);padding-top:10px">📎 未绑定文档（可关联到 <b id="unassociated-module-name"></b>）</h4>
+        <div id="unassociated-list"></div>
+      </div>
+      <div class="chunk-viewer hidden" id="chunk-viewer"></div>
+    </div>
+  </div>
+  <!-- 右栏: 关联 + 术语 -->
+  <div class="col-right">
+    <div class="card" id="assoc-card" style="height:100%"><h3>🔗 关联 & 术语</h3>
+      <div id="assoc-content"><span style="color:var(--text-dim);font-size:12px">选择模块或文档查看关联</span></div>
+    </div>
+  </div>
+</div></div>
 
-<!-- ==================== Tab 3: 测试生成 ==================== -->
+<!-- ====== Tab 3: 测试生成 ====== -->
 <div class="tab" id="tab-chat">
-    <div class="chat-layout">
-        <div>
-            <div class="card" style="padding:16px;">
-                <h3>💬 测试需求</h3>
-                <div class="chat-box" id="chat-box">
-                    <div class="chat-msg">
-                        <div class="body" style="color:var(--text-dim);">
-                            上传文档后，在这里输入测试需求开始生成。<br>
-                            例：「测试健身房新增、修改、删除和分页查询功能」
-                        </div>
-                    </div>
-                </div>
-                <div class="chat-input-row">
-                    <input type="text" id="chat-input" placeholder="输入测试需求，Enter 发送..."
-                           onkeydown="if(event.key==='Enter')sendChat()">
-                    <button class="btn" id="chat-btn" onclick="sendChat()">发送</button>
-                </div>
-                <div class="progress-wrap hidden" id="chat-progress">
-                    <div class="progress-bar"><div class="progress-fill" id="chat-fill" style="width:0%"></div></div>
-                    <span style="font-size:12px;color:var(--text-dim);" id="chat-progress-text">处理中...</span>
-                </div>
-            </div>
-
-            <!-- 生成结果 -->
-            <div class="card hidden" id="result-card">
-                <h3>📊 生成结果</h3>
-                <div id="result-content"></div>
-            </div>
-        </div>
-
-        <!-- 右侧文件面板 -->
-        <div class="result-panel hidden" id="file-panel">
-            <h4 style="font-size:14px; margin-bottom:12px;">📂 生成文件</h4>
-            <div id="file-list-panel"></div>
-            <div class="file-editor hidden" id="file-editor">
-                <h4 style="font-size:13px;margin-bottom:8px;color:var(--primary);" id="editor-title"></h4>
-                <textarea id="editor-area" oninput="editorChanged()"></textarea>
-                <div class="actions">
-                    <button class="btn btn-sm" onclick="saveEditor()">💾 保存</button>
-                    <button class="btn btn-sm btn-outline" onclick="openFileExternal()">🔗 外部打开</button>
-                    <button class="btn btn-sm btn-success" onclick="saveEditor(); revalidate();">✅ 保存并重新校验</button>
-                    <span style="font-size:12px;color:var(--text-dim);margin-left:8px;" id="editor-status"></span>
-                </div>
-            </div>
-        </div>
+<div class="chat-layout">
+  <div>
+    <div class="card"><h3>💬 测试生成</h3>
+      <div class="chat-box" id="chat-box"></div>
+      <div class="chat-input-row">
+        <input type="text" id="chat-input" placeholder="输入测试需求..." onkeydown="if(event.key==='Enter')sendChat()">
+        <button class="btn" onclick="sendChat()">发送</button>
+      </div>
+      <div class="progress-bar hidden" id="chat-progress-wrap" style="margin-top:8px"><div class="progress-fill" id="chat-progress" style="width:0%"></div></div>
     </div>
+    <div class="result-panel hidden" id="result-card"></div>
+  </div>
+  <div>
+    <div class="card hidden" id="file-panel"><h3>📁 生成文件</h3><div id="file-panel-files"></div></div>
+    <div class="card file-editor hidden" id="file-editor"><h3>✏️ 编辑文件</h3><textarea id="editor-textarea" oninput="editorChanged()"></textarea><div class="actions"><button class="btn btn-sm" onclick="saveEditor()">💾 保存</button><button class="btn btn-sm btn-outline" onclick="closeEditor()">关闭</button></div></div>
+  </div>
+</div></div>
+
+</div><!-- body -->
+
+<!-- 弹窗 -->
+<div class="modal-overlay hidden" id="modal-overlay" onclick="if(event.target===this)closeModal()">
+  <div class="modal" id="modal-content"></div>
 </div>
-
-</div><!-- .body -->
-
-<!-- Toast -->
 <div class="toast" id="toast"></div>
-<!-- 文件查看 Modal -->
-<div class="modal-overlay hidden" id="view-modal" onclick="if(event.target===this)closeView()">
-    <div class="modal"><div id="view-content"></div></div>
-</div>
 
 <script>
-    const INITIAL_FILES = {{ imported_files | tojson | safe }};
-    const VECTOR_READY = {{ 'true' if vector_ready else 'false' }};
-    let currentTab = 'upload';
-    let selectedModuleId = null;
-    let editorPath = null;
-    let editorDirty = false;
-    let resultFiles = [];  // 生成的文件列表 [{path, name, type}]
+// ===== 全局状态 =====
+const INITIAL_FILES = {{ imported_files | tojson | safe }};
+const VECTOR_READY = {{ vector_ready | tojson | safe }};
+let currentTab='upload', selectedModuleId=null, selectedModuleName=null;
+let selectedDocId=null, selectedDocType=null, docTypeFilter='all';
+let allDocs=[], unassociatedDocs=[], allModules=[], currentChunks=[], currentChunkIdx=0;
+let editorPath='', editorDirty=false, resultFiles=[];
 
-    // ==================== 导航 ====================
-    function switchTab(name) {
-        document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
-        document.querySelectorAll('nav a').forEach(a => a.classList.remove('active'));
-        document.getElementById('tab-' + name).classList.add('active');
-        document.querySelector('nav a[data-tab="'+name+'"]').classList.add('active');
-        currentTab = name;
-        if (name === 'modules') refreshModuleTree();
-        if (name === 'upload') refreshFileList();
-    }
+// ===== 工具 =====
+function toast(m){let t=document.getElementById('toast');t.textContent=m;t.classList.add('show');setTimeout(()=>t.classList.remove('show'),2800)}
+function esc(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;')}
+function sleep(ms){return new Promise(r=>setTimeout(r,ms))}
+function flattenModuleTree(nodes){let r=[];for(let n of nodes){r.push({id:n.id,name:n.name});if(n.children&&n.children.length)r=r.concat(flattenModuleTree(n.children))}return r}
+function showModal(html){document.getElementById('modal-content').innerHTML=html;document.getElementById('modal-overlay').classList.remove('hidden')}
+function closeModal(){document.getElementById('modal-overlay').classList.add('hidden')}
+async function pollTask(taskId,onProgress,onDone){for(let i=0;i<120;i++){try{let r=await fetch('/task/'+taskId);let d=await r.json();let t=d.task||{};if(t.status==='completed'){onDone(t.result||t);return}if(t.status==='failed'){onDone({error:t.error||t.message||'任务失败'});return}onProgress(t.progress||0,t.message||'')}catch(e){onDone({error:e.message});return}await sleep(2000)}onDone({error:'任务超时'})}
 
-    // ==================== Toast ====================
-    let _toastTimer;
-    function toast(msg) {
-        const el = document.getElementById('toast');
-        el.textContent = msg; el.classList.add('show');
-        clearTimeout(_toastTimer);
-        _toastTimer = setTimeout(() => el.classList.remove('show'), 3000);
-    }
+// ===== Tab 切换 =====
+function switchTab(name){
+  if(!name) return;
+  currentTab=name;
+  document.querySelectorAll('.tab').forEach(t=>t.classList.remove('active'));
+  var targetTab = document.getElementById('tab-'+name);
+  if(!targetTab){ console.error('Tab not found: tab-'+name); return; }
+  targetTab.classList.add('active');
+  document.querySelectorAll('nav a').forEach(a=>{a.classList.remove('active');if(a.dataset.tab===name)a.classList.add('active')});
+  if(name==='upload')refreshFileList();
+  if(name==='manage')refreshModuleTree();
+}
+function setNavStatus(ok){let s=document.getElementById('nav-status');s.textContent=ok?'✅ 已就绪':'❌ 未上传';s.style.opacity=ok?'1':'.6'}
 
-    function escapeHtml(s) { return s ? String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;') : ''; }
+// ===== 文件上传 =====
+function handleDrop(e,type){e.preventDefault();e.target.classList.remove('dragover');if(e.dataTransfer.files[0])uploadWithFile(e.dataTransfer.files[0],type)}
+function uploadFile(input,type){if(input.files[0]){uploadWithFile(input.files[0],type);input.value=''}}
+async function uploadWithFile(file,type){
+  let fd=new FormData();fd.append('file',file);fd.append('type',type);
+  let card=document.getElementById('upload-progress-card');card.classList.remove('hidden');
+  let bar=document.getElementById('up-progress');let txt=document.getElementById('up-progress-text');
+  txt.textContent='正在上传 '+file.name+' ...';
+  try{
+    let r=await fetch('/upload-file',{method:'POST',body:fd});let d=await r.json();
+    if(!d.task_id){toast(d.message||'上传失败');txt.textContent='上传失败';return}
+    await pollTask(d.task_id,(p,m)=>{bar.style.width=p+'%';txt.textContent=file.name+': '+m},async result=>{
+      bar.style.width='100%';txt.textContent=file.name+' 处理完成';
+      if(type==='api'&&result&&result.apis){showApiConfirmModal(result,file.name)}
+      else if(result&&!result.error){toast('✅ '+file.name+' 处理完成');showUploadResult(result)}
+      else if(result&&result.error){toast('❌ '+file.name+': '+result.error);txt.textContent=file.name+' 处理失败'}
+      refreshFileList();
+    })
+  }catch(e){toast('❌ 上传失败: '+e.message);txt.textContent='上传失败: '+e.message}finally{setTimeout(()=>card.classList.add('hidden'),3000)}
+}
+function showApiConfirmModal(result,fileName){
+  let apis=result.apis||[],mod=result.module_name||'';
+  let rows=apis.map((a,i)=>`<label style="display:flex;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid #eee"><input type="checkbox" checked data-idx="${i}"><b>${esc(a.method||'?')}</b> ${esc(a.url||'')} — ${esc(a.name||'')}</label>`).join('');
+  showModal(`<h3>📡 接口拆分确认</h3><p style="font-size:12px;color:var(--text-dim);margin-bottom:8px">模块: <b>${esc(mod)}</b> | 文件: ${esc(fileName)}</p><div style="max-height:400px;overflow-y:auto">${rows}</div>
+    <div class="btn-row"><button class="btn btn-outline" id="retry-api-btn">🔄 重新拆分</button><button class="btn btn-success" id="commit-api-btn">✅ 确认入库</button></div>`);
+  document.getElementById('commit-api-btn').onclick=async()=>{
+    let selected=[];let allChecked=true;
+    document.querySelectorAll('#modal-content input[type=checkbox]').forEach(cb=>{if(cb.checked)selected.push(apis[parseInt(cb.dataset.idx)]);else allChecked=false});
+    closeModal();
+    let r=await fetch('/api/upload/commit-api',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({file_path:result.file_path,module_name:mod,apis:selected,all_selected:allChecked})});
+    let d=await r.json();toast(d.success?'✅ '+selected.length+' 个接口已入库':'❌ 入库失败');
+    refreshFileList();
+  };
+  document.getElementById('retry-api-btn').onclick=async()=>{
+    closeModal();
+    let r=await fetch('/api/upload/retry-api',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({file_path:result.file_path,module_name:mod})});
+    let d=await r.json();if(d.success)showApiConfirmModal(d,fileName);else toast('❌ 重试失败');
+  };
+}
+function showUploadResult(result){let m=result.module_name||'?';let chunks=result.file?.chunks||result.chunks||0;let html=`<p>${esc(result.message||'处理完成')}</p>`;if(m!=='?')html+=`<p>识别模块: <b>${esc(m)}</b></p>`;if(chunks)html+=`<p>文本块: ${chunks}</p>`;if(result.api_count)html+=`<p>接口数: ${result.api_count}</p>`;if(result.doc_id){html+=`<p style="font-size:11px;color:var(--text-dim)">doc_id: ${esc(result.doc_id)}</p>`}showModal(`<h3>✅ 处理完成</h3>${html}<div class="btn-row"><button class="btn" onclick="closeModal()">确定</button></div>`)}
 
-    // ==================== 轮询 ====================
-    async function pollTask(taskId, onProgress, onDone) {
-        for (let i = 0; i < 120; i++) {
-            await sleep(2000);
-            try {
-                const r = await fetch('/task/' + taskId);
-                const d = await r.json();
-                if (!d.success) { onDone({error: d.message}); return; }
-                const t = d.task;
-                if (onProgress) onProgress(t);
-                if (t.status === 'completed') { onDone(t.result); return; }
-                if (t.status === 'failed') { onDone({error: t.error || '未知错误'}); return; }
-            } catch(e) { /* retry */ }
-        }
-        onDone({error: '任务超时'});
-    }
-    function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+// ===== 文件列表 =====
+async function refreshFileList(){
+  try{let r=await fetch('/uploaded-files');let d=await r.json();renderFileList(d.files);setNavStatus(d.vector_ready)}catch(e){}
+}
+let _currentFileList=[],_currentFileFilter='all';
+function setFileFilter(f,btn){
+  _currentFileFilter=f;
+  document.querySelectorAll('.filter-btn').forEach(b=>b.classList.remove('active'));
+  if(btn)btn.classList.add('active');
+  document.getElementById('file-filter-input').value='';
+  renderFileSections();
+}
+function filterFileList(){
+  renderFileSections();
+}
+function renderFileList(files){
+  _currentFileList=files||[];
+  document.getElementById('file-filter-input').value='';
+  _currentFileFilter='all';
+  document.querySelectorAll('.filter-btn').forEach(b=>b.classList.toggle('active',b.dataset.filter==='all'));
+  renderFileSections();
+}
+function renderFileSections(){
+  let files=_currentFileList;
+  let search=document.getElementById('file-filter-input').value.trim().toLowerCase();
+  // 按搜索词过滤
+  if(search)files=files.filter(f=>f.name.toLowerCase().includes(search));
+  // 按类型过滤
+  let groups={product:[],api:[],axure:[]};
+  files.forEach(f=>{let t=f.type||'';if(groups[t])groups[t].push(f);else groups.product.push(f)});
+  // 根据筛选显示/隐藏
+  let showAll=_currentFileFilter==='all';
+  let sections=[
+    {key:'product',icon:'📄',label:'产品文档',files:showAll||_currentFileFilter==='product'?groups.product:[]},
+    {key:'api',icon:'📡',label:'接口文档',files:showAll||_currentFileFilter==='api'?groups.api:[]},
+    {key:'axure',icon:'🎨',label:'Axure 原型',files:showAll||_currentFileFilter==='axure'?groups.axure:[]},
+  ];
+  if(!showAll)sections=sections.filter(s=>s.files.length||_currentFileFilter===s.key);
+  let el=document.getElementById('file-sections');
+  if(!files.length&&!search){
+    el.innerHTML='<div class="empty-hint">暂无文件，请上传文档</div>';return;
+  }
+  el.innerHTML=sections.map(s=>renderFileSection(s)).join('');
+}
+function renderFileSection(s){
+  let files=s.files;
+  if(!files.length)return `<div class="file-section"><div class="file-section-header"><span>${s.icon} ${s.label}</span><span class="count">0 个文件</span></div></div>`;
+  let rows=files.map(f=>`<tr><td><span class="name-row"><span>${esc(f.name)}</span></span></td><td>${f.size||'—'}</td><td>${f.chunks||0}</td><td>${f.time||''}</td><td style="white-space:nowrap"><button class="btn btn-sm btn-outline" onclick="viewFile('${esc(f.name)}')">查看</button> <button class="btn btn-sm btn-danger-outline" onclick="deleteFile('${esc(f.name)}')">删除</button></td></tr>`).join('');
+  return `<div class="file-section">
+    <div class="file-section-header" onclick="this.querySelector('.arrow').classList.toggle('open');this.nextElementSibling.classList.toggle('hidden')">
+      <span class="arrow open">▶</span>
+      <span>${s.icon} ${s.label}</span>
+      <span class="count">${files.length} 个文件</span>
+    </div>
+    <div class="file-section-body">
+      <table class="file-table"><thead><tr><th>文件名</th><th>大小</th><th>文本块</th><th>时间</th><th>操作</th></tr></thead><tbody>${rows}</tbody></table>
+    </div>
+  </div>`;
+}
+function viewFile(name){
+  let f=_currentFileList.find(x=>x.name===name);
+  if(!f){toast('未找到文件信息');return}
+  let extra=[];
+  if(f.doc_id)extra.push(`<p>doc_id: <code style="font-size:11px">${esc(f.doc_id)}</code></p>`);
+  if(f.status)extra.push(`<p>状态: ${esc(f.status)}</p>`);
+  showModal(`<h3>📋 ${esc(name)}</h3>
+    <p>类型: ${esc(f.type||'?')}</p><p>大小: ${esc(f.size||'—')}</p>
+    <p>文本块: ${f.chunks||0}</p><p>时间: ${esc(f.time||'—')}</p>
+    ${extra.join('')}
+    <div class="btn-row"><button class="btn" onclick="closeModal()">关闭</button></div>`)
+}
+async function deleteFile(name){if(!confirm('确定删除 "'+name+'"？'))return;let fd=new FormData();fd.append('filename',name);let r=await fetch('/delete-file',{method:'POST',body:fd});let d=await r.json();toast(d.message);refreshFileList()}
 
-    // ==================== 上传 ====================
-    function handleDrop(e, type) {
-        const files = e.dataTransfer.files;
-        if (files.length) uploadWithFile(files[0], type);
-    }
+// ===== 模块树 =====
+async function refreshModuleTree(){
+  try{let r=await fetch('/api/modules');let d=await r.json();allModules=d.tree||[];renderModuleTree(allModules)}catch(e){}
+}
+function renderModuleTree(tree){
+  let el=document.getElementById('module-tree');
+  if(!tree||!tree.length){el.innerHTML='<div class="empty-hint">暂无模块</div>';return}
+  el.innerHTML=tree.map(n=>renderTreeNode(n,0)).join('');
+}
+function renderTreeNode(node,depth){
+  let hasCh=node.children&&node.children.length>0;
+  let icon=node.name==='全部模块'?'🏠':(hasCh?'📁':'📄');
+  let sel=node.id===selectedModuleId?' selected':'';
+  let actions=node.name!=='全部模块'?`<span class="actions"><button onclick="event.stopPropagation();renameModule('${node.id}','${esc(node.name)}')" title="重命名">✏️</button><button onclick="event.stopPropagation();deleteModule('${node.id}','${esc(node.name)}')" title="删除">🗑</button></span>`:'';
+  let html=`<div class="item${sel}" style="padding-left:${12+depth*16}px" onclick="selectModule('${node.id}','${esc(node.name)}')">${icon} ${esc(node.name)}${actions}</div>`;
+  if(hasCh)html+=node.children.map(c=>renderTreeNode(c,depth+1)).join('');
+  return html;
+}
+function selectModule(id,name){
+  selectedModuleId=id;selectedModuleName=name;selectedDocId=null;selectedDocType=null;
+  document.getElementById('chunk-viewer').classList.add('hidden');
+  renderModuleTree(allModules);
+  document.getElementById('center-title').textContent=name;
+  loadModuleDocs(name);
+  loadUnassociatedDocs(name);
+  loadAssocPanel(name);
+}
+async function createModule(){
+  let inp=document.getElementById('new-module-input');let name=inp.value.trim();
+  if(!name){name=prompt('模块名称:');if(!name)return}
+  let pid=selectedModuleId||'root';
+  try{let r=await fetch('/api/modules',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name,parent_id:pid})});
+    let d=await r.json();if(d.success){inp.value='';refreshModuleTree();toast('✅ 模块已创建')}else toast('❌ '+d.message)}catch(e){toast('❌ 创建失败')}
+}
+async function renameModule(id,cur){
+  let name=prompt('新名称:',cur);if(!name)return;
+  try{let r=await fetch('/api/modules/'+encodeURIComponent(id),{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({name})});
+    let d=await r.json();if(d.success){refreshModuleTree();toast('✅ 已重命名')}else toast('❌ '+d.message)}catch(e){toast('❌ 失败')}
+}
+async function deleteModule(id,name){
+  if(!confirm('确定删除模块 "'+name+'"？\n\n该模块下绑定的文档将被解绑但不会删除。'))return;
+  try{let r=await fetch('/api/modules/'+encodeURIComponent(id),{method:'DELETE'});let d=await r.json();
+    if(d.success){selectedModuleId=null;refreshModuleTree();toast('✅ 模块已删除')}else toast('❌ '+d.message)}catch(e){toast('❌ '+d.message||'删除失败')}
+}
 
-    function uploadFile(input, type) {
-        if (input.files.length) uploadWithFile(input.files[0], type);
-        input.value = '';
-    }
+// ===== 文档列表 =====
+async function loadModuleDocs(moduleName){
+  try{let r=await fetch('/api/modules/'+encodeURIComponent(moduleName)+'/docs');let d=await r.json();
+    allDocs=d.docs||[];renderDocList()}catch(e){}
+}
+async function loadUnassociatedDocs(moduleName){
+  // 获取所有未绑定模块的文档，供用户选择关联到当前模块
+  try{
+    let r=await fetch('/api/docs/unassociated');let d=await r.json();
+    unassociatedDocs=d.docs||[];
+    document.getElementById('unassociated-module-name').textContent=moduleName;
+    renderUnassociatedDocs();
+  }catch(e){}
+}
+function renderUnassociatedDocs(){
+  let section=document.getElementById('unassociated-section');
+  let list=document.getElementById('unassociated-list');
+  if(!unassociatedDocs.length){
+    section.classList.add('hidden');return;
+  }
+  section.classList.remove('hidden');
+  let items=unassociatedDocs.map(d=>{
+    let dt=d.doc_type||d.type||'';
+    let icon=dt==='api'?'📡':(dt==='axure'?'🎨':'📄');
+    return `<div class="assoc-item" style="justify-content:space-between">
+      <span>${icon} <b>${esc(d.doc_id)}</b> <span style="color:var(--text-dim);font-size:11px">(${dt})</span></span>
+      <button class="btn btn-sm btn-outline" onclick="bindDocToModule('${esc(d.doc_id)}','${esc(dt)}')">绑定到此模块</button>
+    </div>`;
+  }).join('');
+  list.innerHTML=items;
+}
+async function bindDocToModule(docId,docType){
+  if(!selectedModuleName){toast('请先选择一个模块');return}
+  if(!docType){toast('无法确定文档类型');return}
+  try{
+    let r=await fetch('/api/bindings',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({source_type:docType,source_id:docId,target_type:'module',target_id:selectedModuleName})});
+    let d=await r.json();
+    if(d.success){
+      toast('✅ 已绑定到 '+selectedModuleName);
+      // 从未绑定列表中移除
+      unassociatedDocs=unassociatedDocs.filter(d=>d.doc_id!==docId);
+      renderUnassociatedDocs();
+      // 刷新已绑定文档列表和关联面板
+      loadModuleDocs(selectedModuleName);
+      loadAssocPanel(selectedModuleName);
+    }else{toast('❌ 绑定失败: '+(d.message||''))}
+  }catch(e){toast('❌ 绑定失败: '+e.message)}
+}
+function filterDocType(t){docTypeFilter=t;document.querySelectorAll('.doc-type-tabs button').forEach((b,i)=>{b.classList.toggle('active',(i===0&&t==='all')||(i===1&&t==='product')||(i===2&&t==='api')||(i===3&&t==='axure'))});renderDocList()}
+function renderDocList(){
+  let el=document.getElementById('doc-list');let docs=allDocs;
+  if(docTypeFilter!=='all')docs=docs.filter(d=>(d.doc_type||d.type)===docTypeFilter);
+  if(!docs.length){el.innerHTML='<div class="empty-hint">无关联文档</div>';return}
+  el.innerHTML=docs.map(d=>{
+    let dt=d.doc_type||d.type||'';let icon=dt==='api'?'📡':(dt==='axure'?'🎨':'📄');
+    let sel=d.doc_id===selectedDocId?' selected':'';
+    return `<div class="doc-item${sel}" onclick="selectDoc('${esc(d.doc_id)}','${esc(dt)}')">
+      ${icon} <b>${esc(d.doc_id)}</b>
+      <div class="meta">${d.chunks||0} 块 · ${d.api_count||0} 接口 · ${esc(d.file_name||'')}</div>
+    </div>`;
+  }).join('');
+}
+async function selectDoc(docId,docType){
+  selectedDocId=docId;selectedDocType=docType;renderDocList();
+  // 加载文本块
+  try{let r=await fetch('/api/docs/'+encodeURIComponent(docId)+'/chunks');let d=await r.json();
+    currentChunks=d.chunks||[];currentChunkIdx=0;
+    let v=document.getElementById('chunk-viewer');
+    if(currentChunks.length){v.classList.remove('hidden');showChunk(0)}else{v.classList.add('hidden')}
+  }catch(e){}
+  // 加载文档的关联 + 术语
+  loadDocAssoc(docId,docType);
+}
+function showChunk(idx){
+  currentChunkIdx=Math.max(0,Math.min(idx,currentChunks.length-1));
+  let c=currentChunks[currentChunkIdx];if(!c)return;
+  let nav=`<div class="chunk-nav"><button class="btn btn-sm btn-outline" onclick="showChunk(${currentChunkIdx-1})" ${currentChunkIdx===0?'disabled':''}>← 上一块</button><span>${currentChunkIdx+1} / ${currentChunks.length}</span><button class="btn btn-sm btn-outline" onclick="showChunk(${currentChunkIdx+1})" ${currentChunkIdx>=currentChunks.length-1?'disabled':''}>下一块 →</button></div>`;
+  document.getElementById('chunk-viewer').innerHTML=nav+'<div style="white-space:pre-wrap;line-height:1.7;margin-top:8px">'+esc(c.content)+'</div>';
+}
+function searchDocs(){
+  let q=document.getElementById('doc-search').value.trim().toLowerCase();if(!q)return renderDocList();
+  let filtered=allDocs.filter(d=>d.doc_id.toLowerCase().includes(q)||(d.file_name||'').toLowerCase().includes(q));
+  let orig=allDocs;allDocs=filtered;renderDocList();allDocs=orig;
+}
 
-    function uploadWithFile(file, type) {
-        const formData = new FormData();
-        formData.append('file', file);
+// ===== 关联面板 =====
+async function loadAssocPanel(moduleName){
+  try{
+    let r1=await fetch('/api/modules/'+encodeURIComponent(moduleName)+'/docs');
+    let docs=await r1.json();
+    let r2=await fetch('/api/modules/'+encodeURIComponent(moduleName)+'/related');
+    let relMods=await r2.json();
+    renderAssocPanel({boundDocs:docs.docs||[],relatedModules:relMods.related||[],type:'module',name:moduleName});
+  }catch(e){}
+}
+async function loadDocAssoc(docId,docType){
+  try{
+    let r=await fetch('/api/docs/'+encodeURIComponent(docId)+'/related-docs');
+    let relDocs=await r.json();
+    let r2=await fetch('/api/docs/'+encodeURIComponent(docId)+'/glossary');
+    let glossary=await r2.json();
+    renderAssocPanel({relatedDocs:relDocs.related||[],glossary:glossary.terms||[],type:'doc',name:docId,docType:docType});
+  }catch(e){}
+}
+function renderAssocPanel(data){
+  let el=document.getElementById('assoc-content');let html='';
+  if(data.type==='module'){
+    html+=`<div class="assoc-section"><h4>📋 绑定文档</h4>`;
+    if(data.boundDocs.length){data.boundDocs.forEach(d=>{let dt=d.doc_type||d.type||'';html+=`<div class="assoc-item"><span>${dt==='api'?'📡':(dt==='axure'?'🎨':'📄')} ${esc(d.doc_id)}</span><span class="remove" onclick="disassociateDoc('${esc(d.doc_id)}','${esc(data.name)}')">✕</span></div>`})}
+    else html+='<div style="color:var(--text-dim);font-size:11px">无</div>';
+    html+='</div>';
+    html+=`<div class="assoc-section"><h4>🔗 关联模块</h4>`;
+    if(data.relatedModules.length){data.relatedModules.forEach(m=>html+=`<div class="assoc-item"><span>📁 ${esc(m.name)}</span><span class="remove" onclick="unbindModule('${esc(data.name)}','${esc(m.name)}')">✕</span></div>`)}
+    else html+='<div style="color:var(--text-dim);font-size:11px">无</div>';
+    html+='</div>';
+    html+=`<button class="btn btn-sm btn-outline" onclick="showAddAssocModal('module','${esc(data.name)}')">+ 添加关联</button>`;
+  }else{
+    html+=`<div class="assoc-section"><h4>📎 关联文档</h4>`;
+    if(data.relatedDocs.length){data.relatedDocs.forEach(d=>html+=`<div class="assoc-item"><span>${esc(d.file_name||d.doc_id)}</span><span class="remove" onclick="unbindDoc('${esc(data.name)}','${esc(d.doc_id)}','${esc(d.doc_type||'')}')">✕</span></div>`)}
+    else html+='<div style="color:var(--text-dim);font-size:11px">无</div>';
+    html+='</div>';
+    html+=`<button class="btn btn-sm btn-outline" onclick="showAddAssocModal('doc','${esc(data.name)}')">+ 添加关联</button>`;
+    // 术语面板（仅产品文档）
+    html+=`<div class="glossary-section"><h4>📝 术语表</h4>`;
+    if(data.glossary&&data.glossary.length){data.glossary.forEach(t=>html+=`<div class="glossary-item"><span class="remove" onclick="deleteGlossaryTerm('${esc(data.name)}',${t.id})">✕</span><div class="term-name">${esc(t.term)}</div><div class="term-def">${esc(t.definition||'')}</div></div>`)}
+    else html+='<div style="color:var(--text-dim);font-size:11px">无术语</div>';
+    html+=`<div class="new-term-row"><input type="text" id="new-term-name" placeholder="术语名称"><input type="text" id="new-term-def" placeholder="解释"><button class="btn btn-sm" onclick="addGlossaryTerm('${esc(data.name)}')">+</button></div>`;
+    html+='</div>';
+  }
+  el.innerHTML=html;
+}
 
-        // 显示进度条
-        const progCard = document.getElementById('upload-progress-card');
-        const progFill = document.getElementById('upload-fill');
-        const progText = document.getElementById('upload-progress-text');
-        progCard.classList.remove('hidden');
-        progFill.style.width = '0%';
-        progText.textContent = '上传 ' + file.name + ' ...';
+// ===== 关联操作 =====
+async function disassociateDoc(docId,moduleName){
+  if(!confirm('解除文档关联？'))return;
+  let r=await fetch('/api/docs/disassociate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({doc_id:docId,module:moduleName})});
+  let d=await r.json();toast(d.message);if(d.success)selectModule(selectedModuleId,selectedModuleName)
+}
+async function unbindModule(mod1,mod2){
+  let r=await fetch('/api/bindings',{method:'DELETE',headers:{'Content-Type':'application/json'},body:JSON.stringify({a_type:'module',a_id:mod1,b_type:'module',b_id:mod2})});
+  let d=await r.json();toast(d.message);if(d.success)selectModule(selectedModuleId,selectedModuleName)
+}
+async function unbindDoc(doc1,doc2,doc2Type){
+  let r=await fetch('/api/bindings',{method:'DELETE',headers:{'Content-Type':'application/json'},body:JSON.stringify({a_type:selectedDocType||'product',a_id:doc1,b_type:doc2Type||'product',b_id:doc2})});
+  let d=await r.json();toast(d.message);if(d.success)selectDoc(selectedDocId,selectedDocType)
+}
+async function showAddAssocModal(etype,eid){
+  if(etype==='module'){
+    try{let r=await fetch('/api/modules');let d=await r.json();
+      // 递归扁平化模块树，避免只取根节点遗漏子模块
+      let allMods=flattenModuleTree(d.tree||[]);
+      let mods=allMods.filter(m=>m.name!==eid);
+      if(!mods.length){showModal('<h3>添加关联模块</h3><p style="color:var(--text-dim)">没有其他可关联的模块</p>');return}
+      let rows=mods.map(m=>`<label style="display:block;padding:4px 0"><input type="checkbox" value="${esc(m.name)}"> ${esc(m.name)}</label>`).join('');
+      showModal(`<h3>添加关联模块</h3>${rows}<div class="btn-row"><button class="btn" id="do-add-assoc">添加</button></div>`);
+      document.getElementById('do-add-assoc').onclick=async()=>{
+        let sel=[];document.querySelectorAll('#modal-content input[type=checkbox]:checked').forEach(cb=>sel.push(cb.value));
+        closeModal();
+        for(let m of sel){await fetch('/api/bindings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({source_type:'module',source_id:eid,target_type:'module',target_id:m})})}
+        toast('✅ 关联已添加');selectModule(selectedModuleId,selectedModuleName);
+      }}catch(e){}
+  }else{
+    if(!selectedModuleName){toast('请先在左侧选择一个模块');return}
+    // 加载当前文档已有的关联列表，用于排除
+    let relatedIds=new Set();
+    try{let rr=await fetch('/api/docs/'+encodeURIComponent(eid)+'/related-docs');let rd=await rr.json();(rd.related||[]).forEach(r=>relatedIds.add(r.doc_id))}catch(e){}
+    // 加载所有模块下文档，过滤：非同类型、非自身、非已关联
+    try{let r=await fetch('/api/modules/'+encodeURIComponent(selectedModuleName)+'/docs');
+      let d=await r.json();let docs=(d.docs||[]).filter(doc=>(doc.doc_type||doc.type)!==(selectedDocType||'')&&doc.doc_id!==eid&&!relatedIds.has(doc.doc_id));
+      if(!docs.length){showModal('<h3>添加关联文档</h3><p style="color:var(--text-dim)">无可关联的异类文档（不同类型且未关联过的）</p>');return}
+      let rows=docs.map(doc=>`<label style="display:block;padding:4px 0"><input type="checkbox" value="${esc(doc.doc_id)}" data-doc-type="${esc(doc.doc_type||doc.type||'')}"> ${esc(doc.doc_id)} <span style="color:var(--text-dim);font-size:11px">(${esc(doc.doc_type||doc.type||'')})</span></label>`).join('');
+      showModal(`<h3>添加关联文档</h3>${rows}<div class="btn-row"><button class="btn" id="do-add-doc-assoc">添加</button></div>`);
+      document.getElementById('do-add-doc-assoc').onclick=async()=>{
+        let sel=[];document.querySelectorAll('#modal-content input[type=checkbox]:checked').forEach(cb=>sel.push({id:cb.value,doc_type:cb.dataset.docType}));
+        closeModal();let srcType=selectedDocType||'product';
+        for(let d of sel){await fetch('/api/bindings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({source_type:srcType,source_id:eid,target_type:d.doc_type,target_id:d.id})})}
+        toast('✅ 关联已添加');selectDoc(selectedDocId,selectedDocType);
+      }}catch(e){toast('加载失败')}
+  }
+}
 
-        fetch('/upload-file', { method: 'POST', body: formData })
-        .then(r => r.json())
-        .then(data => {
-            if (data.success && data.task_id) {
-                const tid = data.task_id;
-                progText.textContent = '文件已接收，处理中...';
-                pollTask(tid,
-                    t => {
-                        progFill.style.width = (t.progress || 0) + '%';
-                        progText.textContent = t.message || '处理中...';
-                    },
-                    result => {
-                        if (result && !result.error) {
-                            progFill.style.width = '100%';
-                            progText.textContent = '✅ ' + (result.message || '完成');
-                            toast('✅ ' + (result.message || '完成'));
-                            refreshFileList();
-                            if (result.module_name) showView(result);
-                        } else {
-                            progText.textContent = '❌ ' + (result ? result.error : '失败');
-                            toast('❌ ' + (result ? result.error : '失败'));
-                        }
-                        setTimeout(() => progCard.classList.add('hidden'), 3000);
-                    }
-                );
-            } else {
-                progText.textContent = '❌ ' + (data.message || '上传失败');
-                toast('❌ ' + (data.message || '上传失败'));
-                setTimeout(() => progCard.classList.add('hidden'), 3000);
-            }
-        })
-        .catch(e => {
-            progText.textContent = '❌ ' + e.message;
-            toast('❌ ' + e.message);
-            setTimeout(() => progCard.classList.add('hidden'), 3000);
-        });
-    }
+// ===== 术语操作 =====
+async function addGlossaryTerm(docId){
+  let n=document.getElementById('new-term-name').value.trim();
+  let d=document.getElementById('new-term-def').value.trim();
+  if(!n)return;
+  let r=await fetch('/api/docs/'+encodeURIComponent(docId)+'/glossary',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({term:n,definition:d})});
+  let resp=await r.json();toast(resp.message);selectDoc(docId,selectedDocType)
+}
+async function deleteGlossaryTerm(docId,termId){
+  let r=await fetch('/api/docs/'+encodeURIComponent(docId)+'/glossary/'+termId,{method:'DELETE'});
+  let d=await r.json();toast(d.message);selectDoc(docId,selectedDocType)
+}
 
-    // ==================== 文件列表 ====================
-    async function refreshFileList() {
-        try {
-            const r = await fetch('/uploaded-files');
-            const d = await r.json();
-            renderFileList(d.files);
-            document.getElementById('nav-status').textContent = d.vector_ready ? '✅ 已就绪' : '❌ 未上传';
-        } catch(e) { console.error(e); }
-    }
+// ===== Chat (Tab 3) =====
+async function sendChat(){
+  let inp=document.getElementById('chat-input');let msg=inp.value.trim();if(!msg)return;
+  inp.value='';let box=document.getElementById('chat-box');
+  box.innerHTML+=`<div class="chat-msg"><div class="who user">👤 用户</div><div class="body">${esc(msg)}</div></div>`;
+  box.scrollTop=box.scrollHeight;
+  let pw=document.getElementById('chat-progress-wrap');pw.classList.remove('hidden');
+  let bar=document.getElementById('chat-progress');bar.style.width='0%';
+  try{
+    let fd=new FormData();fd.append('user_input',msg);
+    let r=await fetch('/chat',{method:'POST',body:fd});let d=await r.json();
+    if(!d.task_id){showChatError(d.message||'请求失败');return}
+    await pollTask(d.task_id,(p,m)=>{bar.style.width=p+'%'},result=>{
+      bar.style.width='100%';pw.classList.add('hidden');
+      if(result&&!result.error)showChatResult(result);else showChatError(result?result.error:'未知错误');
+    })
+  }catch(e){showChatError(e.message);pw.classList.add('hidden')}
+}
+function showChatResult(result){
+  let box=document.getElementById('chat-box');
+  let html=`<div class="chat-msg"><div class="who ai">🤖 AI</div><div class="body">${esc(result.answer||result.summary||JSON.stringify(result))}</div></div>`;
+  if(result.excel_path){html+=`<div class="result-panel"><h4>📊 测试计划</h4><p>Excel: ${esc(result.excel_path)}</p><button class="btn btn-sm btn-success" onclick="confirmPlan('${esc(result.excel_path)}')">确认并生成 PY+YAML</button></div>`}
+  box.innerHTML+=html;box.scrollTop=box.scrollHeight;
+}
+function showChatError(msg){let box=document.getElementById('chat-box');box.innerHTML+=`<div class="chat-msg"><div class="who ai" style="color:var(--danger)">❌ 错误</div><div class="body">${esc(msg)}</div></div>`}
+async function confirmPlan(path){toast('生成中...');let r=await fetch('/confirm-plan',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({excel_path:path})});let d=await r.json();if(d.task_id){await pollTask(d.task_id,()=>{},result=>{if(result&&!result.error)toast('✅ 测试文件已生成')})}}
+function editorChanged(){editorDirty=true}
+async function editFile(path,name){editorPath=path;document.getElementById('file-editor').classList.remove('hidden');try{let r=await fetch('/api/file-content?path='+encodeURIComponent(path));let d=await r.json();document.getElementById('editor-textarea').value=d.content||''}catch(e){}}
+function closeEditor(){document.getElementById('file-editor').classList.add('hidden');editorPath=''}
+async function saveEditor(){if(!editorPath)return;let r=await fetch('/api/file-save',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:editorPath,content:document.getElementById('editor-textarea').value})});let d=await r.json();toast(d.success?'已保存':'保存失败');editorDirty=false}
 
-    function renderFileList(files) {
-        const empty = document.getElementById('file-empty');
-        const table = document.getElementById('file-table');
-        const tbody = document.getElementById('file-tbody');
-        document.getElementById('file-count').textContent = files.length;
-        if (!files.length) { empty.classList.remove('hidden'); table.classList.add('hidden'); return; }
-        empty.classList.add('hidden'); table.classList.remove('hidden');
-        tbody.innerHTML = files.map(f => {
-            const typeLabel = {axure:'🎨 Axure', pdf:'📄 PDF', md:'📝 MD', docx:'📘 Word'}[f.type] || f.type || '?';
-            return `<tr>
-                <td class="name">${escapeHtml(f.name)}</td>
-                <td>${typeLabel}</td>
-                <td>${escapeHtml(f.size)}</td>
-                <td>${f.chunks}</td>
-                <td>${escapeHtml(f.time)}</td>
-                <td>
-                    <button class="btn btn-sm btn-outline" onclick="viewFile('${escapeHtml(f.name)}')">🔍 查看</button>
-                    <button class="btn btn-sm btn-danger-outline" style="margin-left:4px;" onclick="deleteFile('${escapeHtml(f.name)}')">🗑</button>
-                </td>
-            </tr>`;
-        }).join('');
-    }
-
-    function viewFile(filename) {
-        // 从最新文件列表中查找
-        fetch('/uploaded-files').then(r=>r.json()).then(data => {
-            const f = (data.files||[]).find(x => x.name === filename) || {};
-            let html = `<h3>📋 ${escapeHtml(filename)}</h3>`;
-            html += `<table style="width:100%;font-size:13px;">`;
-            html += `<tr><td style="padding:8px;color:var(--text-dim);">类型</td><td>${escapeHtml(f.type||'?')}</td></tr>`;
-            html += `<tr><td style="padding:8px;color:var(--text-dim);">大小</td><td>${escapeHtml(f.size||'?')}</td></tr>`;
-            html += `<tr><td style="padding:8px;color:var(--text-dim);">文本块</td><td>${f.chunks||'?'}</td></tr>`;
-            html += `<tr><td style="padding:8px;color:var(--text-dim);">时间</td><td>${escapeHtml(f.time||'?')}</td></tr>`;
-            html += `</table>`;
-            html += `<div class="btn-row"><button class="btn" onclick="closeView()">关闭</button></div>`;
-            showModal(html);
-        });
-    }
-
-    function showView(data) {
-        let html = `<h3>📋 文档信息</h3>`;
-        if (data.file) {
-            html += `<p><strong>文件:</strong> ${escapeHtml(data.file.name)}</p>`;
-        }
-        if (data.module_name) html += `<p><strong>模块:</strong> ${escapeHtml(data.module_name)}</p>`;
-        if (data.related_modules && data.related_modules.length) {
-            html += `<p><strong>关联模块:</strong> ${data.related_modules.map(escapeHtml).join(', ')}</p>`;
-        }
-        html += `<div class="btn-row"><button class="btn" onclick="closeView()">关闭</button></div>`;
-        showModal(html);
-    }
-
-    function showModal(html) {
-        document.getElementById('view-content').innerHTML = html;
-        document.getElementById('view-modal').classList.remove('hidden');
-    }
-
-    function closeView() {
-        document.getElementById('view-modal').classList.add('hidden');
-    }
-
-    async function deleteFile(filename) {
-        if (!confirm('确认删除 "' + filename + '" ？\n向量库数据也将一并删除。')) return;
-        try {
-            const fd = new FormData(); fd.append('filename', filename);
-            const r = await fetch('/delete-file', { method: 'POST', body: fd });
-            const d = await r.json();
-            toast(d.success ? '✅ 已删除' : '❌ ' + d.message);
-            if (d.success) refreshFileList();
-        } catch(e) { toast('❌ ' + e.message); }
-    }
-
-    // ==================== 模块管理 ====================
-    async function refreshModuleTree() {
-        try {
-            const r = await fetch('/api/modules');
-            const d = await r.json();
-            if (d.success) renderModuleTree(d.tree);
-        } catch(e) { console.error(e); }
-    }
-
-    function renderModuleTree(tree) {
-        const container = document.getElementById('module-tree');
-        if (!tree || !tree.length) {
-            container.innerHTML = '<div style="color:#aaa;padding:12px;">暂无模块</div>';
-            return;
-        }
-        container.innerHTML = tree.map(n => renderTreeNode(n, 0)).join('');
-    }
-
-    function renderTreeNode(node, depth) {
-        const indent = depth * 16;
-        const hasChildren = node.children && node.children.length;
-        const icon = depth === 0 ? '🏠' : (hasChildren ? '📂' : '📄');
-        const selClass = node.id === selectedModuleId ? ' selected' : '';
-        let html = `<div class="item${selClass}" style="padding-left:${indent+8}px;" onclick="selectModule('${node.id}','${escapeHtml(node.name)}')">
-            <span>${icon}</span><span>${escapeHtml(node.name)}</span>
-            ${node.id !== 'root' ? `<span style="margin-left:auto;display:inline-flex;gap:2px;">
-                <button class="btn btn-sm btn-outline" style="padding:1px 6px;font-size:10px;" onclick="event.stopPropagation();renameModule('${node.id}','${escapeHtml(node.name)}')">✏️</button>
-                <button class="btn btn-sm btn-danger-outline" style="padding:1px 6px;font-size:10px;" onclick="event.stopPropagation();deleteModule('${node.id}','${escapeHtml(node.name)}')">🗑</button>
-            </span>` : ''}
-        </div>`;
-        if (hasChildren) {
-            html += node.children.map(c => renderTreeNode(c, depth + 1)).join('');
-        }
-        return html;
-    }
-
-    function selectModule(id, name) {
-        selectedModuleId = id;
-        refreshModuleTree();
-        const detail = document.getElementById('module-detail');
-        detail.innerHTML = `<h3>📋 ${escapeHtml(name)}</h3>
-            <div class="section"><h4>模块 ID</h4><code style="font-size:12px;">${escapeHtml(id)}</code></div>
-            <div class="section">
-                <h4>操作</h4>
-                <button class="btn btn-sm" onclick="renameModule('${id}','${escapeHtml(name)}')">✏️ 重命名</button>
-                <button class="btn btn-sm btn-outline" onclick="mergeModule('${id}','${escapeHtml(name)}')" style="margin-left:4px;">🔗 合并</button>
-            </div>
-            <div class="section">
-                <h4>📖 业务术语表</h4>
-                <div style="display:flex;gap:4px;margin-bottom:6px;">
-                    <input type="text" id="new-term-name" placeholder="术语" style="width:80px;padding:4px 6px;border:1px solid var(--border);border-radius:4px;font-size:11px;">
-                    <input type="text" id="new-term-def" placeholder="解释" style="flex:1;padding:4px 6px;border:1px solid var(--border);border-radius:4px;font-size:11px;">
-                    <input type="text" id="new-term-notes" placeholder="备注（可选）" style="flex:1;padding:4px 6px;border:1px solid var(--border);border-radius:4px;font-size:11px;">
-                    <button class="btn btn-sm" style="padding:2px 10px;font-size:11px;" onclick="addGlossaryTerm('${escapeHtml(name)}')">+</button>
-                </div>
-                <div id="glossary-list" style="font-size:12px;color:var(--text-dim);">⏳ 加载中...</div>
-            </div>
-            <div class="section">
-                <h4>📄 关联文档 & 接口</h4>
-                <div id="module-docs-list" style="font-size:13px;color:var(--text-dim);">⏳ 加载中...</div>
-            </div>`;
-        loadGlossary(name);
-        loadModuleDocs(name);
-    }
-
-    async function loadGlossary(moduleName) {
-        const list = document.getElementById('glossary-list');
-        try {
-            const r = await fetch('/api/modules/' + encodeURIComponent(moduleName) + '/glossary');
-            const d = await r.json();
-            if (!d.success || !d.terms || !d.terms.length) {
-                list.innerHTML = '<span style="color:#aaa;font-size:11px;">暂无术语（上传产品文档后自动提取）</span>';
-                return;
-            }
-            list.innerHTML = d.terms.map(t => {
-                const notes = t.notes ? `<span style="color:var(--text-dim);font-size:10px;"> — ${escapeHtml(t.notes)}</span>` : '';
-                const src = t.source_doc ? `<span style="color:#aaa;font-size:9px;margin-left:4px;">[${escapeHtml(t.source_doc.split('_').slice(1,-1).join('_') || t.source_doc)}]</span>` : '';
-                return `<div style="display:flex;align-items:flex-start;justify-content:space-between;padding:4px 0;border-bottom:1px solid #f5f5f5;">
-                    <span style="flex:1;"><strong>${escapeHtml(t.term)}</strong>: ${escapeHtml(t.definition)}${notes}${src}</span>
-                    <button class="btn btn-sm btn-danger-outline" style="padding:1px 5px;font-size:10px;flex-shrink:0;"
-                        onclick="deleteGlossaryTerm('${escapeHtml(moduleName)}','${escapeHtml(t.term)}')">✕</button>
-                </div>`;
-            }).join('');
-        } catch(e) {
-            list.innerHTML = '<span style="color:var(--danger);">加载失败</span>';
-        }
-    }
-
-    async function addGlossaryTerm(moduleName) {
-        const term = document.getElementById('new-term-name').value.trim();
-        const def = document.getElementById('new-term-def').value.trim();
-        const notes = document.getElementById('new-term-notes').value.trim();
-        if (!term) return;
-        try {
-            const r = await fetch('/api/modules/' + encodeURIComponent(moduleName) + '/glossary', {
-                method:'POST', headers:{'Content-Type':'application/json'},
-                body: JSON.stringify({term, definition: def, notes}),
-            });
-            const d = await r.json();
-            if (d.success) {
-                document.getElementById('new-term-name').value = '';
-                document.getElementById('new-term-def').value = '';
-                document.getElementById('new-term-notes').value = '';
-                loadGlossary(moduleName);
-                toast('✅ 术语已保存');
-            } else { toast('❌ ' + d.message); }
-        } catch(e) { toast('❌ ' + e.message); }
-    }
-
-    async function deleteGlossaryTerm(moduleName, term) {
-        try {
-            const r = await fetch('/api/modules/' + encodeURIComponent(moduleName) + '/glossary/' + encodeURIComponent(term), { method:'DELETE' });
-            const d = await r.json();
-            if (d.success) { loadGlossary(moduleName); toast('✅ 已删除'); }
-            else { toast('❌ ' + d.message); }
-        } catch(e) { toast('❌ ' + e.message); }
-    }
-
-    async function loadModuleDocs(moduleName) {
-        const list = document.getElementById('module-docs-list');
-        try {
-            const r = await fetch('/api/modules/' + encodeURIComponent(moduleName) + '/docs');
-            const d = await r.json();
-            if (!d.success || !d.docs || !d.docs.length) {
-                list.innerHTML = '<span style="color:#aaa;">暂无关联文档</span>';
-                return;
-            }
-            let html = '';
-            d.docs.forEach(doc => {
-                const icon = doc.type === 'api_def' ? '🔌' : '📄';
-                const label = doc.type === 'api_def'
-                    ? `接口文档 (${doc.api_count || doc.chunks} 个接口)`
-                    : `产品文档 (${doc.chunks} 个文本块)`;
-                html += `<div style="display:flex;align-items:center;justify-content:space-between;padding:4px 0;border-bottom:1px solid #f5f5f5;">
-                    <span>${icon} <span title="${escapeHtml(doc.doc_id)}">${label}</span></span>
-                    <span style="display:flex;gap:4px;flex-shrink:0;">
-                        <button class="btn btn-sm btn-outline" style="font-size:10px;padding:2px 6px;"
-                            onclick="changeDocModule('${escapeHtml(doc.doc_id)}','${escapeHtml(moduleName)}')">迁移</button>
-                        <button class="btn btn-sm btn-danger-outline" style="font-size:10px;padding:2px 6px;"
-                            onclick="disassociateDoc('${escapeHtml(doc.doc_id)}','${escapeHtml(moduleName)}')">解除关联</button>
-                    </span>
-                </div>`;
-                // 接口文档展示详细接口列表
-                if (doc.type === 'api_def' && doc.api_names && doc.api_names.length) {
-                    html += '<div style="font-size:11px;color:var(--text-dim);padding-left:20px;">';
-                    doc.api_names.slice(0, 10).forEach(n => html += `<span style="margin-right:8px;">• ${escapeHtml(n)}</span>`);
-                    if (doc.api_names.length > 10) html += ` ...共${doc.api_names.length}个`;
-                    html += '</div>';
-                }
-            });
-            // 添加文档按钮
-            html += `<div style="margin-top:12px;text-align:center;">
-                <button class="btn btn-sm btn-outline" onclick="showAddDocDialog('${escapeHtml(moduleName)}')">＋ 添加未关联文档</button>
-            </div>`;
-            list.innerHTML = html;
-        } catch(e) {
-            list.innerHTML = '<span style="color:var(--danger);">加载失败</span>';
-        }
-    }
-
-    async function disassociateDoc(docId, moduleName) {
-        if (!confirm('确认解除该文档与 "' + moduleName + '" 的关联？')) return;
-        try {
-            const r = await fetch('/api/docs/disassociate', {
-                method:'POST', headers:{'Content-Type':'application/json'},
-                body: JSON.stringify({doc_id: docId}),
-            });
-            const d = await r.json();
-            if (d.success) {
-                toast('✅ 已解除关联');
-                loadModuleDocs(moduleName);
-            } else {
-                toast('❌ ' + d.message);
-            }
-        } catch(e) { toast('❌ ' + e.message); }
-    }
-
-    async function showAddDocDialog(moduleName) {
-        try {
-            const r = await fetch('/api/docs/unassociated');
-            const d = await r.json();
-            if (!d.success) { toast('❌ ' + d.message); return; }
-            if (!d.docs || !d.docs.length) {
-                toast('⚠️ 没有未关联的文档');
-                return;
-            }
-            let html = `<h3>📄 选择要添加到「${escapeHtml(moduleName)}」的文档</h3>
-                <div style="font-size:12px;color:var(--text-dim);margin-bottom:12px;">以下文档尚未关联到任何模块：</div>
-                <div id="unassociated-list" style="max-height:300px;overflow-y:auto;">`;
-            d.docs.forEach(doc => {
-                const icon = doc.type === 'api_def' ? '🔌' : '📄';
-                html += `<label style="display:flex;align-items:center;gap:8px;padding:8px;border-bottom:1px solid #f0f0f0;cursor:pointer;">
-                    <input type="checkbox" class="unassociated-checkbox" value="${escapeHtml(doc.doc_id)}">
-                    <span>${icon} ${escapeHtml(doc.doc_id)}（${doc.chunks} 块）</span>
-                </label>`;
-            });
-            html += `</div>
-                <div class="btn-row" style="margin-top:12px;">
-                    <button class="btn" onclick="addSelectedDocs('${escapeHtml(moduleName)}')">✅ 添加到模块</button>
-                    <button class="btn btn-outline" onclick="closeView()">取消</button>
-                </div>`;
-            showModal(html);
-        } catch(e) { toast('❌ ' + e.message); }
-    }
-
-    async function addSelectedDocs(moduleName) {
-        const checkboxes = document.querySelectorAll('.unassociated-checkbox:checked');
-        if (!checkboxes.length) { toast('⚠️ 请选择至少一个文档'); return; }
-        const docIds = Array.from(checkboxes).map(cb => cb.value);
-        let success = 0, fail = 0;
-        for (const docId of docIds) {
-            try {
-                const r = await fetch('/api/docs/change-module', {
-                    method:'POST', headers:{'Content-Type':'application/json'},
-                    body: JSON.stringify({doc_id: docId, module: moduleName}),
-                });
-                const d = await r.json();
-                if (d.success) success++; else fail++;
-            } catch(e) { fail++; }
-        }
-        closeView();
-        toast(`✅ 已添加 ${success} 个文档${fail ? `，${fail} 个失败` : ''}`);
-        loadModuleDocs(moduleName);
-    }
-
-    async function changeDocModule(docId, oldModule) {
-        const newMod = prompt('迁移到哪个模块？', oldModule);
-        if (!newMod || newMod === oldModule) return;
-        try {
-            const r = await fetch('/api/docs/change-module', {
-                method:'POST', headers:{'Content-Type':'application/json'},
-                body: JSON.stringify({doc_id: docId, module: newMod}),
-            });
-            const d = await r.json();
-            if (d.success) {
-                toast('✅ ' + d.message);
-                loadModuleDocs(oldModule);
-            } else {
-                toast('❌ ' + d.message);
-            }
-        } catch(e) { toast('❌ ' + e.message); }
-    }
-
-    async function createModule() {
-        const input = document.getElementById('new-mod-name');
-        let name = input.value.trim();
-        if (!name) {
-            name = prompt('输入新模块名称:', '');
-            if (!name) return;
-        }
-        try {
-            const r = await fetch('/api/modules', {
-                method:'POST', headers:{'Content-Type':'application/json'},
-                body: JSON.stringify({name, parent_id: selectedModuleId || 'root'}),
-            });
-            const d = await r.json();
-            if (d.success) {
-                input.value = '';
-                refreshModuleTree();
-                toast('✅ 已创建');
-                // 延迟弹窗询问是否添加未关联文档
-                setTimeout(() => {
-                    if (confirm(`模块「${name}」已创建。是否添加未关联的文档？`)) {
-                        showAddDocDialog(name);
-                    }
-                }, 500);
-            }
-            else toast('❌ ' + d.message);
-        } catch(e) { toast('❌ ' + e.message); }
-    }
-
-    async function renameModule(id, cur) {
-        const name = prompt('新名称:', cur);
-        if (!name || name === cur) return;
-        try {
-            const r = await fetch('/api/modules/' + id, {
-                method:'PUT', headers:{'Content-Type':'application/json'},
-                body: JSON.stringify({name}),
-            });
-            const d = await r.json();
-            if (d.success) { refreshModuleTree(); toast('✅ ' + d.message); }
-            else toast('❌ ' + d.message);
-        } catch(e) { toast('❌ ' + e.message); }
-    }
-
-    async function deleteModule(id, name) {
-        if (!confirm('确定删除 "' + name + '" ？')) return;
-        try {
-            const r = await fetch('/api/modules/' + id, { method:'DELETE' });
-            const d = await r.json();
-            if (d.success) { if (selectedModuleId === id) selectedModuleId = null; refreshModuleTree(); toast('✅ 已删除'); }
-            else toast('❌ ' + d.message);
-        } catch(e) { toast('❌ ' + e.message); }
-    }
-
-    function mergeModule(id, name) {
-        const target = prompt('合并到哪个模块？（输入目标模块名）:');
-        if (!target) return;
-        fetch('/api/modules/merge', {
-            method:'POST', headers:{'Content-Type':'application/json'},
-            body: JSON.stringify({source_id: id, target_id: target}),
-        }).then(r => r.json()).then(d => {
-            if (d.success) { refreshModuleTree(); toast('✅ 已合并'); }
-            else toast('❌ ' + d.message);
-        });
-    }
-
-    // ==================== 聊天 ====================
-    async function sendChat() {
-        const input = document.getElementById('chat-input');
-        const box = document.getElementById('chat-box');
-        const text = input.value.trim();
-        if (!text) return;
-
-        box.innerHTML += `<div class="chat-msg"><div class="who user">🧑 你</div><div class="body">${escapeHtml(text)}</div></div>`;
-        input.value = ''; box.scrollTop = box.scrollHeight;
-
-        document.getElementById('chat-btn').disabled = true;
-        const progress = document.getElementById('chat-progress');
-        const fill = document.getElementById('chat-fill');
-        const ptxt = document.getElementById('chat-progress-text');
-        progress.classList.remove('hidden'); fill.style.width = '0%'; ptxt.textContent = '提交中...';
-
-        try {
-            const fd = new FormData(); fd.append('user_input', text);
-            const r = await fetch('/chat', { method: 'POST', body: fd });
-            const d = await r.json();
-            if (d.success && d.task_id) {
-                pollTask(d.task_id,
-                    t => { fill.style.width = (t.progress||0)+'%'; ptxt.textContent = t.message || '处理中...'; },
-                    result => {
-                        progress.classList.add('hidden');
-                        document.getElementById('chat-btn').disabled = false;
-                        if (result && !result.error) showChatResult(result);
-                        else showChatError(result ? result.error : '未知错误');
-                    }
-                );
-            } else {
-                progress.classList.add('hidden');
-                document.getElementById('chat-btn').disabled = false;
-                showChatError(d.message || '请求失败');
-            }
-        } catch(e) {
-            progress.classList.add('hidden');
-            document.getElementById('chat-btn').disabled = false;
-            showChatError(e.message);
-        }
-    }
-
-    function showChatResult(result) {
-        const box = document.getElementById('chat-box');
-        let html = `<div class="chat-msg"><div class="who ai">🤖 AI</div><div class="body">`;
-        if (result.requires_review) {
-            html += `<div style="background:var(--danger-bg);border:1px solid var(--danger);border-radius:4px;padding:8px 12px;margin-bottom:8px;">
-                <strong>⚠️ 需人工审查</strong><br>`;
-            (result.error_info||[]).slice(0,6).forEach(e => html += '• ' + escapeHtml(e) + '<br>');
-            html += `</div>`;
-        }
-        if (result.thinking) {
-            html += `<details><summary>思考过程</summary>${escapeHtml(Array.isArray(result.thinking)?result.thinking.join('<br>'):result.thinking)}</details>`;
-        }
-        html += escapeHtml(result.reply || '') + `</div></div>`;
-        box.innerHTML += html; box.scrollTop = box.scrollHeight;
-
-        if (result.excel_path) {
-            resultFiles = [];
-            addResultFile(result.excel_path, '📊 测试计划');
-            if (result.output_dir) loadOutputFiles(result.output_dir);
-            document.getElementById('result-card').classList.remove('hidden');
-            document.getElementById('file-panel').classList.remove('hidden');
-            showPlanCard(result);
-        }
-    }
-
-    function showChatError(msg) {
-        const box = document.getElementById('chat-box');
-        box.innerHTML += `<div class="chat-msg"><div class="who ai" style="color:var(--danger);">❌ 错误</div><div class="body">${escapeHtml(msg)}</div></div>`;
-        box.scrollTop = box.scrollHeight;
-    }
-
-    function showPlanCard(result) {
-        const content = document.getElementById('result-content');
-        content.innerHTML = `
-            <div style="background:var(--primary-bg);padding:12px;border-radius:6px;margin-bottom:12px;">
-                <strong>📄 ${escapeHtml(result.excel_name || 'test_plan.xlsx')}</strong>
-                <div style="font-size:12px;color:var(--text-dim);margin-top:4px;">${escapeHtml(result.excel_path)}</div>
-            </div>
-            <button class="btn btn-success" onclick="confirmPlan('${escapeHtml(result.excel_path||'')}')">✅ 确认并生成 PY + YAML</button>`;
-    }
-
-    function addResultFile(path, label) {
-        if (!path || resultFiles.find(f => f.path === path)) return;
-        const ext = (path||'').split('.').pop().toLowerCase();
-        resultFiles.push({path, name: label || path.split(/[\\/]/).pop(), type: ext});
-        renderFilePanel();
-    }
-
-    async function loadOutputFiles(dir) {
-        // 简单列出 testcase_out 下的已知文件
-        const known = ['test_plan.xlsx'];
-        for (const name of known) {
-            const p = dir.replace(/\\/g,'/') + '/' + name;
-            if (resultFiles.find(f => f.path === p)) continue;
-            resultFiles.push({path: p, name, type: 'xlsx'});
-        }
-        renderFilePanel();
-    }
-
-    function renderFilePanel() {
-        const panel = document.getElementById('file-list-panel');
-        if (!resultFiles.length) { panel.innerHTML = '<div style="color:var(--text-dim);">暂无文件</div>'; return; }
-        panel.innerHTML = resultFiles.map(f => `
-            <div class="file-row">
-                <span>${f.name}</span>
-                <div>
-                    <button class="btn btn-sm btn-outline" onclick="editFile('${escapeHtml(f.path)}','${escapeHtml(f.name)}')">✏️ 编辑</button>
-                    <button class="btn btn-sm btn-outline" onclick="openFileExternal('${escapeHtml(f.path)}')">🔗 打开</button>
-                </div>
-            </div>`).join('');
-    }
-
-    async function editFile(path, name) {
-        document.getElementById('file-editor').classList.remove('hidden');
-        document.getElementById('editor-title').textContent = '✏️ ' + name;
-        document.getElementById('editor-status').textContent = '⏳ 加载中...';
-        document.getElementById('editor-area').value = '';
-        editorPath = path;
-        editorDirty = false;
-
-        try {
-            const r = await fetch('/api/file-content?path=' + encodeURIComponent(path));
-            const d = await r.json();
-            if (d.success) {
-                if (d.binary) {
-                    document.getElementById('editor-area').value = '# 二进制文件，无法直接编辑。请使用"外部打开"。';
-                    document.getElementById('editor-status').textContent = '⚠️ 二进制文件';
-                } else {
-                    document.getElementById('editor-area').value = d.content;
-                    document.getElementById('editor-status').textContent = '✅ 已加载 | ' + (d.content||'').length + ' 字符';
-                }
-            } else {
-                document.getElementById('editor-status').textContent = '❌ ' + d.message;
-            }
-        } catch(e) {
-            document.getElementById('editor-status').textContent = '❌ ' + e.message;
-        }
-    }
-
-    function editorChanged() { editorDirty = true; }
-
-    async function saveEditor() {
-        if (!editorPath) return;
-        const content = document.getElementById('editor-area').value;
-        try {
-            const r = await fetch('/api/file-save', {
-                method:'POST', headers:{'Content-Type':'application/json'},
-                body: JSON.stringify({path: editorPath, content}),
-            });
-            const d = await r.json();
-            if (d.success) {
-                editorDirty = false;
-                toast('✅ 已保存');
-                document.getElementById('editor-status').textContent = '✅ 已保存';
-            } else {
-                toast('❌ ' + d.message);
-            }
-        } catch(e) { toast('❌ ' + e.message); }
-    }
-
-    async function revalidate() {
-        if (!resultFiles.length) return;
-        const excelFile = resultFiles.find(f => f.type === 'xlsx');
-        if (!excelFile) { toast('⚠️ 未找到 Excel 文件'); return; }
-        toast('⏳ 重新校验中...');
-        try {
-            const fd = new FormData(); fd.append('excel_path', excelFile.path);
-            const r = await fetch('/confirm-plan', { method:'POST', body: fd });
-            const d = await r.json();
-            if (d.success && d.task_id) {
-                pollTask(d.task_id,
-                    null,
-                    result => {
-                        if (result && !result.error) {
-                            toast('✅ 校验通过，文件已重新生成');
-                            // 添加生成的文件
-                            if (result.py_file) addResultFile(excelFile.path.replace('test_plan.xlsx', '') + result.py_file, '🐍 ' + result.py_file);
-                            document.getElementById('editor-status').textContent = '✅ 校验通过';
-                        } else {
-                            toast('❌ 校验失败: ' + (result ? (result.error || '') : ''));
-                            document.getElementById('editor-status').textContent = '❌ 校验失败，请修改后重试';
-                        }
-                    }
-                );
-            } else {
-                toast('❌ ' + d.message);
-            }
-        } catch(e) { toast('❌ ' + e.message); }
-    }
-
-    function openFileExternal(path) {
-        const p = path || editorPath;
-        if (!p) return;
-        const fd = new FormData(); fd.append('file_path', p);
-        fetch('/open-file', { method:'POST', body: fd }).catch(() => {});
-    }
-
-    async function confirmPlan(excelPath) {
-        toast('⏳ 正在生成测试文件...');
-        try {
-            const fd = new FormData();
-            if (excelPath) fd.append('excel_path', excelPath);
-            const r = await fetch('/confirm-plan', { method:'POST', body: fd });
-            const d = await r.json();
-            if (d.success && d.task_id) {
-                pollTask(d.task_id,
-                    t => toast(t.message || '生成中...'),
-                    result => {
-                        if (result && !result.error) {
-                            toast('✅ ' + (result.message || '完成'));
-                            if (result.py_file) addResultFile(result.py_file, '🐍 ' + result.py_file);
-                            document.getElementById('result-content').innerHTML +=
-                                '<div style="color:var(--success);margin-top:8px;">✅ ' + escapeHtml(result.message||'') + '</div>';
-                        } else {
-                            toast('❌ ' + (result ? (result.error || '失败') : '失败'));
-                        }
-                    }
-                );
-            } else if (!d.success) {
-                toast('❌ ' + d.message);
-            }
-        } catch(e) { toast('❌ ' + e.message); }
-    }
-
-    // ==================== 初始化 ====================
-    window.addEventListener('load', () => {
-        if (INITIAL_FILES && INITIAL_FILES.length) renderFileList(INITIAL_FILES);
-        else refreshFileList();
-        document.getElementById('nav-status').textContent = VECTOR_READY ? '✅ 已就绪' : '❌ 未上传';
-    });
+// ===== 初始化 =====
+window.addEventListener('load',()=>{
+  // 始终从服务端拉取完整列表（SQLite 为准），INITIAL_FILES 仅含物理文件会遗漏接口文档
+  setNavStatus(VECTOR_READY);
+  refreshFileList();
+  refreshModuleTree();
+})
 </script>
 </body>
 </html>

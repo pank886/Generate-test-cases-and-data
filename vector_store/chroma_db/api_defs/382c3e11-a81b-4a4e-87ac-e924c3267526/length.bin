@@ -1,1 +1,0 @@
-invalid type: string "{\"name\": \"检查是否可以开门\", \"url\": \"/feign/checkOpenDoor\", \"method\": \"GET\", \"description\": \"二维码门禁签到，检查是否可以开门\", \"parameters\": {\"personCode\": \"string\", \"deviceCode\": \"string\"}, \"returns\": {\"_value\": \"boolean\"}}", expected i64\", \"facName\": \"string\", \"createTime\": \"string\", \"status\": \"integer\"}}

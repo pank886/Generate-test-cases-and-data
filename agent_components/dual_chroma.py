@@ -111,6 +111,25 @@ class DualChromaDB:
         self.product_store.delete(where={"doc_id": doc_id})
         self.api_store.delete(where={"doc_id": doc_id})
 
+    def get_doc_chunks(self, doc_id: str) -> list[dict]:
+        """获取文档的所有文本块（供前端查看原文内容）。"""
+        # 从两个集合中查找
+        for store in (self.product_store, self.api_store):
+            results = store.get(where={"doc_id": doc_id})
+            if results and results.get("ids"):
+                chunks = []
+                for i, mid in enumerate(results["ids"]):
+                    meta = results["metadatas"][i] if results.get("metadatas") else {}
+                    chunks.append({
+                        "chunk_id": mid,
+                        "chunk_index": meta.get("chunk_index", i),
+                        "content": results["documents"][i] if results.get("documents") else "",
+                        "type": meta.get("type", ""),
+                        "api_name": meta.get("api_name", ""),
+                    })
+                return sorted(chunks, key=lambda c: c["chunk_index"])
+        return []
+
     def search_context(self, query: str, k: int = 50) -> str:
         """全库检索（两集合合并，用于 LLM 上下文构建）。"""
         pd = self.product_store.similarity_search(query, k=k)
@@ -176,3 +195,15 @@ class DualChromaDB:
             {"doc_id": d.id, "module": "", "type": d.doc_type, "chunks": d.chunk_count}
             for d in docs
         ]
+
+
+# 模块级单例（避免每次请求都重新连接 Ollama）
+_chroma_instance = None
+
+
+def get_chroma_db() -> DualChromaDB:
+    """获取全局 DualChromaDB 单例（惰性初始化，首次调用时连接 Ollama）。"""
+    global _chroma_instance
+    if _chroma_instance is None:
+        _chroma_instance = DualChromaDB()
+    return _chroma_instance

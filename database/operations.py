@@ -92,53 +92,15 @@ class DocOps:
 
     @staticmethod
     def get_unassociated_docs(session: Session) -> list[Document]:
-        """获取未绑定任何模块的文档。
-
-        判定条件: 在 bindings 表中没有关联到 module 类型的记录。
-        """
-        associated_ids = (
-            session.query(Binding.left_id)
-            .filter(
-                Binding.left_type == "module",
-                Binding.right_type.in_(["product", "api", "axure"]),
-            )
-            .union(
-                session.query(Binding.right_id)
-                .filter(
-                    Binding.right_type == "module",
-                    Binding.left_type.in_(["product", "api", "axure"]),
-                )
-            )
-            .all()
-        )
-        associated_ids = {r[0] for r in associated_ids}
-        # 注意 left_id/right_id 存的是 doc_id，但和 module 绑定时
-        # 另一侧是 module 类型。我们需要找出所有 Document 中
-        # id 不在上述集合中的。
-        # 但对于 product/api/axure 文档, binding 另一侧可能是 module 也可能是其他文档。
-        # 更准确的查询:
-
-        # 文档类型集合
+        """获取未绑定任何模块的文档。"""
         doc_types = ("product", "api", "axure")
-
-        # 找出所有文档 ID
-        all_docs = session.query(Document.id).filter(
-            Document.doc_type.in_(doc_types)
-        ).all()
-        all_ids = {r[0] for r in all_docs}
-
-        # 找出所有已关联模块的文档 ID（不论在 left 还是 right）
-        bound_ids_q = session.query(Binding.left_id).filter(
-            Binding.left_type.in_(doc_types),
-            Binding.right_type == "module",
-        ).union(
-            session.query(Binding.right_id).filter(
-                Binding.right_type.in_(doc_types),
-                Binding.left_type == "module",
-            )
-        ).all()
-        bound_ids = {r[0] for r in bound_ids_q}
-
+        all_ids = {r[0] for r in session.query(Document.id).filter(
+            Document.doc_type.in_(doc_types)).all()}
+        bound_ids = {r[0] for r in session.query(Binding.left_id).filter(
+            Binding.left_type.in_(doc_types), Binding.right_type == "module",
+        ).union(session.query(Binding.right_id).filter(
+            Binding.right_type.in_(doc_types), Binding.left_type == "module",
+        )).all()}
         unassociated_ids = all_ids - bound_ids
         if not unassociated_ids:
             return []
@@ -313,16 +275,18 @@ class ModuleOps:
 
     @staticmethod
     def _refresh_paths(session: Session):
-        """刷新所有模块路径。"""
-        all_mods = session.query(Module).all()
-        # 先刷新顶层
-        for m in all_mods:
-            if not m.parent_id:
-                m.path = ModuleOps._calc_path(session, m)
-        # 再刷新子节点（需要父节点 path 已更新）
-        for m in all_mods:
-            if m.parent_id:
-                m.path = ModuleOps._calc_path(session, m)
+        """刷新所有模块路径。_calc_path 沿 parent 链递归，单轮遍历即可。"""
+        for m in session.query(Module).all():
+            m.path = ModuleOps._calc_path(session, m)
+
+    @staticmethod
+    def get_descendants(session: Session, module_id: str) -> list[str]:
+        """递归获取某模块的所有子孙节点 ID（含自身）。"""
+        result = [module_id]
+        children = session.query(Module).filter(Module.parent_id == module_id).all()
+        for c in children:
+            result.extend(ModuleOps.get_descendants(session, c.id))
+        return result
 
 
 # ========================================================================
@@ -458,6 +422,19 @@ class BindingOps:
         ).delete()
 
     @staticmethod
+    def delete_bindings_between_docs(session: Session, doc_ids: list[str]):
+        """删除指定文档之间的所有 doc↔doc 绑定（SQL 直接过滤，避免全表扫描）。"""
+        if len(doc_ids) < 2:
+            return
+        doc_types = ("product", "api", "axure")
+        session.query(Binding).filter(
+            Binding.left_type.in_(doc_types),
+            Binding.right_type.in_(doc_types),
+            Binding.left_id.in_(doc_ids),
+            Binding.right_id.in_(doc_ids),
+        ).delete(synchronize_session=False)
+
+    @staticmethod
     def get_bound_docs(
         session: Session, module_name: str
     ) -> list[Document]:
@@ -577,3 +554,16 @@ class GlossaryOps:
                 notes=t.get("notes", ""),
                 source_doc=source_doc or t.get("source_doc", ""),
             ))
+
+    @staticmethod
+    def get_terms_for_module(session: Session, module_name: str) -> list[GlossaryTerm]:
+        """获取模块下所有绑定文档的术语（聚合视图）。"""
+        doc_ids = [d.id for d in BindingOps.get_bound_docs(session, module_name)]
+        if not doc_ids:
+            return []
+        return (
+            session.query(GlossaryTerm)
+            .filter(GlossaryTerm.doc_id.in_(doc_ids))
+            .order_by(GlossaryTerm.created_at)
+            .all()
+        )

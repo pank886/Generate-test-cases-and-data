@@ -5,6 +5,7 @@ import json
 import os
 import sys
 import uuid
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 # 强制 UTF-8 编码，防止 Windows 终端打印 emoji 时报 GBK 错误
@@ -14,10 +15,16 @@ import uvicorn
 from fastapi import FastAPI, UploadFile, File, Form, Request, BackgroundTasks
 from fastapi.responses import HTMLResponse, JSONResponse
 from jinja2 import Environment, FileSystemLoader, select_autoescape
+from starlette.types import ASGIApp, Receive, Scope, Send
 
 import config
-from observability import get_logger, init_logging, set_trace_id, generate_trace_id
+from database import init_db, get_session
+from database.models import Document, Binding, Module
+from database.operations import BindingOps, DocOps, GlossaryOps, ModuleOps
+from agent_components.dual_chroma import get_chroma_db
 from agent_components.chromadb_file import ensure_directory, ReadersChromadb
+from observability import get_logger, init_logging, set_trace_id, generate_trace_id
+
 from agent_components.graph_builder import build_and_run_agent
 from datetime import datetime
 
@@ -30,58 +37,45 @@ logger = get_logger(__name__)
 # ----------------------------------------------------------------
 # 应用初始化
 # ----------------------------------------------------------------
-app = FastAPI(title="智能测试助手", version="0.2")
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """应用生命周期：启动时一次性初始化所有重资源，关闭时清理。"""
+    global _chroma_db, _chat_func, _components, _vector_ready, _imported_files
 
-# Jinja2 模板
-_TEMPLATE_DIR = Path(__file__).parent / "templates"
-_TEMPLATE_DIR.mkdir(exist_ok=True)
-_env = Environment(
-    loader=FileSystemLoader(str(_TEMPLATE_DIR)),
-    autoescape=select_autoescape(["html", "xml"]),
-)
+    # --- startup ---
+    # 1. SQLite 初始化
+    try:
+        init_db()
+        print("[startup] SQLite 表已就绪")
+    except Exception as e:
+        print(f"[startup] WARNING: init_db failed: {e}")
 
-# 全局状态（单用户模式）
-_chat_func = None
-_components = None  # ChatTestAgentGraph 实例，用于后续生成
-_vector_ready = False
-_imported_files = []  # 已导入文件列表：[{"name", "size", "chunks", "time"}]
-_last_api_defs = None  # 最后一次聊天中的 API 定义
-_last_user_input = None  # 最后一次用户输入
+    # 2. Ollama + ChromaDB（带重试）
+    for attempt in (1, 2, 3):
+        try:
+            _chroma_db = get_chroma_db()
+            print("[startup] DualChromaDB + Ollama 连接已就绪")
+            break
+        except Exception as e:
+            print(f"[startup] Ollama 连接失败 (第{attempt}次): {e}")
+            if attempt < 3:
+                print(f"[startup] 等待 3 秒后重试...")
+                await asyncio.sleep(3)
+            else:
+                print("=" * 60)
+                print("❌ Ollama 连接失败，请检查：")
+                print("   1. Ollama 服务是否已启动（运行 ollama serve）")
+                print("   2. Embedding 模型是否已拉取（ollama pull <model>）")
+                print(f"   3. 连接地址是否正确（当前: {config.EMBEDDING_URL or 'http://localhost:11434'}）")
+                print("=" * 60)
+                raise RuntimeError("Ollama 连接失败，请检查 Ollama 服务状态后重启应用") from e
 
-# 并发保护锁
-_state_lock = asyncio.Lock()
-
-# 后台任务状态追踪 {task_id: {status, progress, message, result, error}}
-_task_store: dict = {}
-_task_store_lock = asyncio.Lock()
-
-TASK_TTL_SECONDS = 3600  # 任务状态保留 1 小时
-
-
-# ----------------------------------------------------------------
-# trace_id 中间件
-# ----------------------------------------------------------------
-@app.middleware("http")
-async def trace_middleware(request: Request, call_next):
-    """为每个 HTTP 请求生成 trace_id，注入到日志上下文。"""
-    tid = request.headers.get("X-Trace-Id", generate_trace_id())
-    set_trace_id(tid)
-    response = await call_next(request)
-    response.headers["X-Trace-Id"] = tid
-    return response
-
-
-# ----------------------------------------------------------------
-# 生命周期
-# ----------------------------------------------------------------
-@app.on_event("startup")
-async def startup():
-    global _chat_func, _components, _vector_ready, _imported_files
+    # 3. Agent 初始化
     logger.info(">>> 启动智能测试助手 Web 服务 ...")
     _chat_func = build_and_run_agent()
     _components = _chat_func.components  # 保存实例用于后续生成
 
-    # 扫描 uploads/ 下各类型子目录，恢复已导入文件列表
+    # 4. 扫描 uploads/ 下各类型子目录，恢复已导入文件列表
     ext_to_type = {".pdf": "pdf", ".md": "md", ".docx": "docx", ".zip": "axure"}
     scan_dirs = [
         ("uploads/pdf", ".pdf"),
@@ -108,9 +102,8 @@ async def startup():
                 meta_path = str(f) + ".meta.json"
                 if os.path.exists(meta_path):
                     try:
-                        import json as _json
                         with open(meta_path, "r", encoding="utf-8") as _mf:
-                            _meta = _json.load(_mf)
+                            _meta = json.load(_mf)
                         chunks = _meta.get("chunks", "—")
                         mtime = _meta.get("time", mtime)
                     except Exception:
@@ -124,13 +117,89 @@ async def startup():
                     "type": file_type,
                 })
 
-    # 判断向量库是否已就绪
+    # 5. 判断向量库是否已就绪
     chroma_path = Path(config.CHROMA_DB_DIR)
     if chroma_path.exists() and any(chroma_path.iterdir()):
         _vector_ready = True
         logger.info("   ✅ 向量库已就绪 (%d 个文件)", len(_imported_files))
     else:
         logger.info("   ℹ️ 向量库为空，请上传 API 文档")
+
+    yield  # 应用运行期间
+
+    # --- shutdown ---
+    # （暂无需要清理的资源）
+
+
+app = FastAPI(title="智能测试助手", version="0.2", lifespan=lifespan)
+
+
+# Jinja2 模板
+_TEMPLATE_DIR = Path(__file__).parent / "templates"
+_TEMPLATE_DIR.mkdir(exist_ok=True)
+_env = Environment(
+    loader=FileSystemLoader(str(_TEMPLATE_DIR)),
+    autoescape=select_autoescape(["html", "xml"]),
+)
+
+# 全局状态（单用户模式）
+_chat_func = None
+_components = None  # ChatTestAgentGraph 实例，用于后续生成
+_vector_ready = False
+_imported_files = []  # 已导入文件列表：[{"name", "size", "chunks", "time"}]
+_last_api_defs = None  # 最后一次聊天中的 API 定义
+_last_user_input = None  # 最后一次用户输入
+_chroma_db = None  # DualChromaDB 全局实例，startup 时初始化
+
+# 并发保护锁
+_state_lock = asyncio.Lock()
+
+# 后台任务状态追踪 {task_id: {status, progress, message, result, error}}
+_task_store: dict = {}
+_task_store_lock = asyncio.Lock()
+
+TASK_TTL_SECONDS = 3600  # 任务状态保留 1 小时
+
+
+# ----------------------------------------------------------------
+# trace_id 中间件（纯 ASGI，绕过 BaseHTTPMiddleware 的流式响应 bug）
+# ----------------------------------------------------------------
+class TraceMiddleware:
+    """纯 ASGI 中间件，不经过 BaseHTTPMiddleware 的流式包装。
+
+    在 ASGI 层面直接注入 X-Trace-Id 响应头，避免 Starlette 0.40+
+    BaseHTTPMiddleware 在流式重发 HTMLResponse 时因多字节 UTF-8 字符
+    导致的 Content-Length 不匹配 RuntimeError。
+    """
+    def __init__(self, app: ASGIApp):
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send):
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        # 从请求头读取或生成 trace_id
+        tid = None
+        for key, value in scope.get("headers", []):
+            if key == b"x-trace-id":
+                tid = value.decode()
+                break
+        if not tid:
+            tid = generate_trace_id()
+        set_trace_id(tid)
+
+        async def send_with_trace(message):
+            if message["type"] == "http.response.start":
+                headers = list(message.get("headers", []))
+                headers.append((b"x-trace-id", tid.encode()))
+                message["headers"] = headers
+            await send(message)
+
+        await self.app(scope, receive, send_with_trace)
+
+
+app.add_middleware(TraceMiddleware)
 
 
 # ----------------------------------------------------------------
@@ -156,6 +225,17 @@ async def _update_task(task_id: str, **kwargs):
     async with _task_store_lock:
         if task_id in _task_store:
             _task_store[task_id].update(kwargs)
+
+
+def _cleanup_doc_to_doc_bindings(session, doc_id: str):
+    """删除指定文档的所有 doc↔doc 级联绑定。换模块/解绑前调用。"""
+    from database.models import Binding
+    doc_types = ("product", "api", "axure")
+    session.query(Binding).filter(
+        Binding.left_type.in_(doc_types),
+        Binding.right_type.in_(doc_types),
+        ((Binding.left_id == doc_id) | (Binding.right_id == doc_id)),
+    ).delete(synchronize_session=False)
 
 
 # ----------------------------------------------------------------
@@ -187,11 +267,30 @@ async def _process_file_bg(task_id: str, file_path: str, ext: str, file_size: in
             count = result.get("chunks", 0)
             source = "Axure 原型"
         elif ext == ".md":
-            from ingest_v2 import process_api_doc
+            from ingest_v2 import process_api_doc_extract
             _progress(10, "读取 Markdown，提取接口定义...")
-            result = process_api_doc(file_path, progress_cb=lambda p, m: _progress(10 + int(p * 0.8), m))
-            count = result.get("api_count", 0)
+            result = process_api_doc_extract(file_path, progress_cb=lambda p, m: _progress(10 + int(p * 0.8), m))
+            apis = result.get("apis", [])
+            count = len(apis)
             source = "API 文档"
+            module_name = result.get("module_name")
+
+            if count == 0:
+                await _update_task(task_id, status="failed", error="未提取到接口定义，请检查文档格式。")
+                return
+
+            # API 文档不走直接入库，返回接口列表等待用户确认
+            resp = {
+                "success": True,
+                "message": f"已提取 {count} 个接口定义，请确认后入库",
+                "apis": apis,
+                "file_path": file_path,
+                "module_name": module_name or "Unknown",
+            }
+            await _update_task(task_id, status="completed", progress=100,
+                               message="提取完成，等待确认", result=resp)
+            return
+
         else:
             from ingest_v2 import process_product_doc
             _progress(10, "读取文档，提取模块信息...")
@@ -354,7 +453,10 @@ async def _confirm_plan_bg(task_id: str, excel_path: str | None):
 # ----------------------------------------------------------------
 @app.get("/.well-known/appspecific/com.chrome.devtools.json")
 async def chrome_devtools_probe():
-    return JSONResponse(content={}, status_code=204)
+    # 204 不允许携带 Body，用 Response 而非 JSONResponse 避免
+    # "Response content longer than Content-Length" 错误
+    from fastapi.responses import Response
+    return Response(status_code=204)
 
 
 # ----------------------------------------------------------------
@@ -395,6 +497,21 @@ async def upload_file(file: UploadFile = File(...), background_tasks: Background
     # 2. 保存到类型专属子目录
     type_dir = ensure_directory(f"./uploads/{file_type}")
     file_path = os.path.join(type_dir, filename)
+    # 同名文件覆盖：先清理旧数据的 ChromaDB + SQLite 记录
+    if os.path.exists(file_path):
+        try:
+            old_session = get_session()
+            try:
+                old_doc = old_session.query(Document).filter(Document.file_name == filename).first()
+                if old_doc:
+                    BindingOps.delete_bindings_for_doc(old_session, old_doc.id)
+                    DocOps.delete_document(old_session, old_doc.id)
+                    old_session.commit()
+                    _chroma_db.delete_by_doc_id(old_doc.id)
+            finally:
+                old_session.close()
+        except Exception:
+            pass
     content = await file.read()
     with open(file_path, "wb") as f:
         f.write(content)
@@ -411,10 +528,10 @@ async def upload_file(file: UploadFile = File(...), background_tasks: Background
 
 @app.post("/delete-file")
 async def delete_file(filename: str = Form(...)):
-    """删除已上传的文件及其向量库数据"""
+    """删除文件：先解绑 doc↔doc + doc↔module，再删向量+文档，产品文档级联删术语。"""
     global _vector_ready, _imported_files
 
-    # 1. 在所有上传目录中查找文件
+    # 1. 查找文件路径
     file_path = None
     for scan_dir in ["uploads/pdf", "uploads/md", "uploads/docx", "uploads/axure", "uploads"]:
         candidate = os.path.join(scan_dir, filename)
@@ -423,54 +540,111 @@ async def delete_file(filename: str = Form(...)):
             break
 
     if not file_path:
-        return JSONResponse(
-            status_code=404,
-            content={"success": False, "message": f"文件 '{filename}' 不存在"},
-        )
+        return JSONResponse(status_code=404,
+                            content={"success": False, "message": f"文件 '{filename}' 不存在"})
 
     try:
-        # 2. 从 ChromaDB 中删除
-        db_client = ReadersChromadb(
-            persist_directory=config.CHROMA_DB_DIR,
-            collection_name=config.CHROMA_COLLECTION,
-        )
-        source_path = os.path.normpath(file_path)
-        deleted_count = db_client.vector_store.delete(where={"source": source_path})
-        logger.info("🗑️ 从向量库删除了 %s 个文本块 (source=%s)", deleted_count or 0, source_path)
+        # 2. 查 SQLite 获取 doc_id 和 doc_type
+        from database import get_session
+        from database.models import Document
+        from database.operations import BindingOps, DocOps
+        session = get_session()
+        try:
+            doc = session.query(Document).filter(Document.file_name == filename).first()
+        finally:
+            session.close()
 
-        # 3. 删除物理文件及元数据
+        if not doc:
+            # 文件存在但无 DB 记录，直接删除物理文件
+            os.remove(file_path)
+            return {"success": True, "message": f"已删除 '{filename}'（无数据库记录）"}
+
+        doc_id = doc.id
+        doc_type = doc.doc_type
+
+        # 3. 解除该文档所有 doc↔doc 绑定 + doc↔module 绑定
+        sql_ok = True
+        session = get_session()
+        try:
+            _cleanup_doc_to_doc_bindings(session, doc_id)
+            BindingOps.delete_bindings_for_doc(session, doc_id)
+
+            # 5. 删除文档（产品文档自动级联删除术语 via FK）
+            DocOps.delete_document(session, doc_id)
+            session.commit()
+        except Exception as e:
+            session.rollback()
+            logger.error("SQLite 清理失败: %s", e)
+            sql_ok = False
+        finally:
+            session.close()
+
+        if not sql_ok:
+            return JSONResponse(status_code=500,
+                content={"success": False, "message": "数据库清理失败，文件未删除"})
+
+        # 6. ChromaDB 删向量
+        _chroma_db.delete_by_doc_id(doc_id)
+
+        # 7. 删除物理文件
         os.remove(file_path)
         meta_path = file_path + ".meta.json"
         if os.path.exists(meta_path):
             os.remove(meta_path)
-        logger.info("🗑️ 已删除文件: %s", file_path)
+        logger.info("已删除文件: %s (doc_id=%s)", file_path, doc_id)
 
-        # 3b. 同步删除关联术语
-        try:
-            from agent_components.module_tree import delete_glossary_by_doc
-            delete_glossary_by_doc(filename)
-        except Exception:
-            pass
-
-        # 4. 更新内存状态
+        # 8. 更新内存状态
         async with _state_lock:
             _imported_files = [f for f in _imported_files if f["name"] != filename]
             if not _imported_files:
                 _vector_ready = False
 
-        return {"success": True, "message": f"已删除 '{filename}' 及对应的向量数据"}
+        return {"success": True, "message": f"已删除 '{filename}'"}
     except Exception as e:
-        logger.error("❌ 删除失败: %s", e)
-        return JSONResponse(
-            status_code=500,
-            content={"success": False, "message": f"删除失败: {str(e)}"},
-        )
+        logger.error("删除失败: %s", e)
+        return JSONResponse(status_code=500, content={"success": False, "message": str(e)})
 
 
 @app.get("/uploaded-files")
 async def uploaded_files():
-    """获取已导入文件列表"""
-    return {"files": _imported_files, "vector_ready": _vector_ready}
+    """获取已导入文件列表（以 SQLite 为准，合并内存中的文件大小）。"""
+    from database import get_session  # noqa: F811
+    from database.operations import DocOps
+
+    # 1. 从 SQLite 查询所有文档
+    db_files = []
+    try:
+        session = get_session()
+        try:
+            for d in DocOps.get_all_documents(session):
+                db_files.append({
+                    "name": d.file_name,
+                    "type": d.doc_type,
+                    "chunks": d.chunk_count,
+                    "time": d.upload_time.strftime("%Y-%m-%d %H:%M:%S") if d.upload_time else "",
+                    "doc_id": d.id,
+                    "status": d.status or "",
+                })
+        finally:
+            session.close()
+    except Exception:
+        logger.warning("无法查询 SQLite 文档列表", exc_info=True)
+
+    # 2. 内存中补充文件大小（只有物理文件存在时才有）
+    mem_by_name = {f["name"]: f for f in _imported_files}
+    merged = []
+    seen = set()
+    for d in db_files:
+        mem = mem_by_name.get(d["name"], {})
+        d["size"] = mem.get("size", "—")
+        merged.append(d)
+        seen.add(d["name"])
+    # 补充内存中有但 DB 中没有的（刚上传尚未入库完成的）
+    for f in _imported_files:
+        if f["name"] not in seen:
+            merged.append({**f, "doc_id": "", "status": ""})
+
+    return {"files": merged, "vector_ready": _vector_ready}
 
 
 @app.post("/chat")
@@ -501,34 +675,37 @@ async def get_task_status(task_id: str):
 @app.post("/update-module")
 async def audit_module(data: dict):
     """审核确认/修改模块关联关系（已迁移到 SQLite）。"""
-    from database import get_session
-    from database.operations import BindingOps, DocOps
+    from database import get_session  # noqa: F811 (already imported at top)
     doc_id = data.get("doc_id")
     module_name = data.get("module_name")
     related_modules = data.get("related_modules", [])
     if not doc_id:
         return JSONResponse(status_code=400, content={"success": False, "message": "缺少 doc_id"})
+    session = get_session()
     try:
-        session = get_session()
-        # 更新主模块绑定
         doc = DocOps.get_document(session, doc_id)
         doc_type = doc.doc_type if doc else "product"
-        for b in BindingOps.get_bindings(session):
-            if b.left_id == doc_id and b.right_type == "module":
+        # 清理旧的 doc↔doc 级联 + doc↔module 绑定
+        _cleanup_doc_to_doc_bindings(session, doc_id)
+        for b in BindingOps.get_bindings(session, doc_type, doc_id):
+            if b.left_type == "module" or b.right_type == "module":
                 BindingOps.unbind(session, b.id)
-            elif b.right_id == doc_id and b.left_type == "module":
-                BindingOps.unbind(session, b.id)
+        # 绑定新模块 + 重建级联
+        from ingest_v2 import _cascade_bind_to_module_docs
         if module_name:
             BindingOps.bind(session, doc_type, doc_id, "module", module_name)
+            _cascade_bind_to_module_docs(session, doc_type, doc_id, module_name)
         for rmod in related_modules:
             if rmod != module_name:
                 BindingOps.bind(session, doc_type, doc_id, "module", rmod)
+                _cascade_bind_to_module_docs(session, doc_type, doc_id, rmod)
         session.commit()
-        session.close()
-        logger.info("   [Audit] doc_id=%s 更新为 module=%s, related=%s", doc_id, module_name, related_modules)
         return {"success": True, "message": f"模块信息已更新: {module_name}"}
     except Exception as e:
+        session.rollback()
         return JSONResponse(status_code=500, content={"success": False, "message": str(e)})
+    finally:
+        session.close()
 
 
 # ==================== 模块目录树 API ====================
@@ -557,10 +734,11 @@ async def update_module(module_id: str, data: dict):
     """更新模块（重命名 / 移动）。"""
     from agent_components.module_tree import rename, get_by_id
     if "name" in data:
-        result = rename(module_id, data["name"])
-        if result:
-            return {"success": True, "message": f'{result["old_name"]} → {result["new_name"]}'}
-    return JSONResponse(status_code=404, content={"success": False, "message": "模块不存在"})
+        ok, msg = rename(module_id, data["name"])
+        if ok:
+            return {"success": True, "message": msg}
+        return JSONResponse(status_code=400, content={"success": False, "message": msg})
+    return JSONResponse(status_code=400, content={"success": False, "message": "缺少 name 参数"})
 
 
 @app.delete("/api/modules/{module_id}")
@@ -581,8 +759,10 @@ async def merge_modules(data: dict):
     source = data.get("source_id")
     target = data.get("target_id")
     try:
-        merge(source, target)
-        return {"success": True, "message": "合并完成"}
+        ok, msg = merge(source, target)
+        if ok:
+            return {"success": True, "message": msg}
+        return JSONResponse(status_code=400, content={"success": False, "message": msg})
     except ValueError as e:
         return JSONResponse(status_code=400, content={"success": False, "message": str(e)})
 
@@ -590,42 +770,35 @@ async def merge_modules(data: dict):
 @app.get("/api/modules/{module_name}/docs")
 async def get_module_docs(module_name: str):
     """获取模块关联的所有文档和接口。"""
-    from database import get_session
-    from database.operations import BindingOps, DocOps
-    from agent_components.dual_chroma import DualChromaDB
+    from database import get_session  # noqa: F811 (already imported at top)
+    session = get_session()
     try:
-        session = get_session()
         docs = BindingOps.get_bound_docs(session, module_name)
-
-        # 为 API 文档补充接口名称列表（从 ChromaDB）
-        chroma = DualChromaDB()
+        chroma = _chroma_db
         result = []
         for d in docs:
             item = {
-                "doc_id": d.id,
-                "module": module_name,
-                "type": "api_def" if d.doc_type == "api" else "product_doc",
-                "chunks": d.chunk_count,
+                "doc_id": d.id, "module": module_name,
+                "doc_type": d.doc_type, "type": d.doc_type,
+                "chunks": d.chunk_count, "file_name": d.file_name,
             }
             if d.doc_type == "api":
-                # 从 ChromaDB 取 api_names（纯展示用）
                 apis = chroma.get_doc_apis(d.id)
                 item["api_count"] = len(apis)
                 item["api_names"] = [a["api_name"] for a in apis if a.get("api_name")]
             result.append(item)
-
-        session.close()
         return {"success": True, "docs": result}
     except Exception as e:
         return JSONResponse(status_code=500, content={"success": False, "message": str(e)})
+    finally:
+        session.close()
 
 
 @app.get("/api/docs/{doc_id}/apis")
 async def get_doc_apis(doc_id: str):
     """获取文档下的所有接口定义。"""
-    from agent_components.dual_chroma import DualChromaDB
     try:
-        db = DualChromaDB()
+        db = _chroma_db
         apis = db.get_doc_apis(doc_id)
         return {"success": True, "apis": apis}
     except Exception as e:
@@ -635,30 +808,31 @@ async def get_doc_apis(doc_id: str):
 @app.post("/api/docs/change-module")
 async def change_doc_module(data: dict):
     """将文档迁移到另一个模块（改写 SQLite bindings）。"""
-    from database import get_session
-    from database.operations import BindingOps, DocOps
+    from database import get_session  # noqa: F811 (already imported at top)
     doc_id = data.get("doc_id", "")
     new_module = data.get("module", "")
     if not doc_id or not new_module:
         return JSONResponse(status_code=400, content={"success": False, "message": "缺少 doc_id 或 module"})
+    session = get_session()
     try:
-        session = get_session()
-        # 确定文档类型
         doc = DocOps.get_document(session, doc_id)
         doc_type = doc.doc_type if doc else "product"
-        # 删除该文档所有旧模块绑定
-        for b in BindingOps.get_bindings(session):
-            if b.left_id == doc_id and b.right_type == "module":
+        # 删除旧的模块绑定（过滤查询）
+        _cleanup_doc_to_doc_bindings(session, doc_id)
+        for b in BindingOps.get_bindings(session, doc_type, doc_id):
+            if b.left_type == "module" or b.right_type == "module":
                 BindingOps.unbind(session, b.id)
-            elif b.right_id == doc_id and b.left_type == "module":
-                BindingOps.unbind(session, b.id)
-        # 绑定到新模块
+        # 绑定到新模块 + 重建级联
         BindingOps.bind(session, doc_type, doc_id, "module", new_module)
+        from ingest_v2 import _cascade_bind_to_module_docs
+        _cascade_bind_to_module_docs(session, doc_type, doc_id, new_module)
         session.commit()
-        session.close()
         return {"success": True, "message": f"已迁移到 {new_module}"}
     except Exception as e:
+        session.rollback()
         return JSONResponse(status_code=500, content={"success": False, "message": str(e)})
+    finally:
+        session.close()
 
 
 @app.get("/api/docs/unassociated")
@@ -666,17 +840,17 @@ async def get_unassociated_docs():
     """获取所有未关联模块的文档。"""
     from database import get_session
     from database.operations import DocOps
+    session = get_session()
     try:
-        session = get_session()
         docs = DocOps.get_unassociated_docs(session)
-        result = [
-            {"doc_id": d.id, "module": "", "type": d.doc_type, "chunks": d.chunk_count}
+        return {"success": True, "docs": [
+            {"doc_id": d.id, "module": "", "type": d.doc_type, "chunks": d.chunk_count, "file_name": d.file_name}
             for d in docs
-        ]
-        session.close()
-        return {"success": True, "docs": result}
+        ]}
     except Exception as e:
         return JSONResponse(status_code=500, content={"success": False, "message": str(e)})
+    finally:
+        session.close()
 
 
 @app.post("/api/docs/disassociate")
@@ -687,19 +861,23 @@ async def disassociate_doc(data: dict):
     doc_id = data.get("doc_id", "")
     if not doc_id:
         return JSONResponse(status_code=400, content={"success": False, "message": "缺少 doc_id"})
+    session = get_session()
     try:
-        session = get_session()
-        # 删除该文档与所有模块的绑定
-        for b in BindingOps.get_bindings(session):
-            left_match = b.left_id == doc_id and b.right_type == "module"
-            right_match = b.right_id == doc_id and b.left_type == "module"
-            if left_match or right_match:
+        from database.models import Binding  # noqa: F811, Document
+        doc = session.get(Document, doc_id)
+        doc_type = doc.doc_type if doc else "product"
+        # 清理旧 doc↔doc 级联 + doc↔module 绑定
+        _cleanup_doc_to_doc_bindings(session, doc_id)
+        for b in BindingOps.get_bindings(session, doc_type, doc_id):
+            if b.left_type == "module" or b.right_type == "module":
                 BindingOps.unbind(session, b.id)
         session.commit()
-        session.close()
         return {"success": True, "message": "已解除关联"}
     except Exception as e:
+        session.rollback()
         return JSONResponse(status_code=500, content={"success": False, "message": str(e)})
+    finally:
+        session.close()
 
 
 # ==================== 术语表 API ====================
@@ -746,6 +924,259 @@ async def open_file(file_path: str = Form(...)):
         return {"success": True}
     except Exception as e:
         return JSONResponse(status_code=500, content={"success": False, "message": str(e)})
+
+
+# ========================================================================
+# 新增: 接口文档拆分 + 关联管理 + 文档内容
+# ========================================================================
+
+@app.post("/api/upload/extract-api")
+async def extract_api_doc(file: UploadFile = File(...), module: str = Form("")):
+    """上传接口 MD → LLM 提取接口列表 → 返回（不入库）"""
+    from ingest_v2 import process_api_doc_extract
+    file_path = os.path.join("uploads", "md", file.filename)
+    os.makedirs(os.path.dirname(file_path), exist_ok=True)
+    with open(file_path, "wb") as f:
+        f.write(await file.read())
+    try:
+        result = process_api_doc_extract(file_path, default_module=module or None)
+        # 保存原文件路径，后续 commit/retry 时需要
+        result["file_path"] = file_path
+        return {"success": True, **result}
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"success": False, "message": str(e)})
+
+
+@app.post("/api/upload/commit-api")
+async def commit_api_docs(data: dict):
+    """用户确认后，每个接口独立入库。仅当全部接口选中时才废弃原文件。"""
+    from ingest_v2 import commit_api_docs
+    file_path = data.get("file_path", "")
+    module_name = data.get("module_name", "")
+    apis = data.get("apis", [])
+    all_selected = data.get("all_selected", False)
+    if not file_path or not apis:
+        return JSONResponse(status_code=400,
+                            content={"success": False, "message": "缺少必要参数"})
+    # 路径安全校验：必须在 uploads/ 目录下
+    abs_path = os.path.abspath(file_path)
+    uploads_root = os.path.abspath("uploads")
+    if not abs_path.startswith(uploads_root):
+        return JSONResponse(status_code=403,
+                            content={"success": False, "message": "非法路径"})
+    try:
+        result = commit_api_docs(file_path, module_name, apis, delete_original=all_selected)
+        # 更新内存状态：接口入库后刷新 _imported_files 和 _vector_ready
+        global _vector_ready, _imported_files
+        async with _state_lock:
+            _vector_ready = True
+            now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            for api in apis:
+                _imported_files.insert(0, {
+                    "name": f"{api.get('method', '?')} {api.get('url', '')}",
+                    "size": "—",
+                    "chunks": 1,
+                    "time": now_str,
+                    "type": "api",
+                })
+        return {"success": True, **result}
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"success": False, "message": str(e)})
+
+
+@app.post("/api/upload/retry-api")
+async def retry_api_extract(data: dict):
+    """用户拒绝拆分结果 → 重新 LLM 提取"""
+    from ingest_v2 import process_api_doc_extract
+    file_path = data.get("file_path", "")
+    module = data.get("module_name", "")
+    if not file_path:
+        return JSONResponse(status_code=400,
+                            content={"success": False, "message": "缺少 file_path"})
+    try:
+        result = process_api_doc_extract(file_path, default_module=module or None)
+        result["file_path"] = file_path
+        return {"success": True, **result}
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"success": False, "message": str(e)})
+
+
+@app.post("/api/bindings")
+async def create_binding(data: dict):
+    """创建绑定（含级联：文档绑模块时自动关联同模块异类文档）"""
+    from database import get_session
+    from database.operations import BindingOps
+    from ingest_v2 import _cascade_bind_to_module_docs
+    st, si = data.get("source_type"), data.get("source_id")
+    tt, ti = data.get("target_type"), data.get("target_id")
+    if not all([st, si, tt, ti]):
+        return JSONResponse(status_code=400,
+                            content={"success": False, "message": "缺少参数"})
+    session = get_session()
+    try:
+        ok, msg = BindingOps.bind(session, st, si, tt, ti)
+        if not ok:
+            return {"success": False, "message": msg}
+        # 级联：如果是文档↔模块，自动关联同模块异类文档
+        doc_types = ("product", "api", "axure")
+        if st in doc_types and tt == "module":
+            _cascade_bind_to_module_docs(session, st, si, ti)
+        elif tt in doc_types and st == "module":
+            _cascade_bind_to_module_docs(session, tt, ti, si)
+        session.commit()
+        return {"success": True, "message": "绑定成功"}
+    except Exception as e:
+        session.rollback()
+        return JSONResponse(status_code=500, content={"success": False, "message": str(e)})
+    finally:
+        session.close()
+
+
+@app.delete("/api/bindings")
+async def delete_binding(data: dict):
+    """解除绑定"""
+    from database import get_session
+    from database.operations import BindingOps
+    a_type, a_id = data.get("a_type"), data.get("a_id")
+    b_type, b_id = data.get("b_type"), data.get("b_id")
+    if not all([a_type, a_id, b_type, b_id]):
+        return JSONResponse(status_code=400,
+                            content={"success": False, "message": "缺少参数"})
+    session = get_session()
+    try:
+        ok = BindingOps.unbind_by_pair(session, a_type, a_id, b_type, b_id)
+        session.commit()
+        return {"success": ok, "message": "已解除" if ok else "绑定不存在"}
+    except Exception as e:
+        session.rollback()
+        return JSONResponse(status_code=500, content={"success": False, "message": str(e)})
+    finally:
+        session.close()
+
+
+@app.get("/api/bindings")
+async def get_bindings(entity_type: str = "", entity_id: str = ""):
+    """查询实体的所有关联"""
+    from database import get_session
+    from database.operations import BindingOps
+    session = get_session()
+    try:
+        bindings = BindingOps.get_bindings(
+            session,
+            entity_type=entity_type or None,
+            entity_id=entity_id or None,
+        )
+        result = []
+        for b in bindings:
+            result.append({
+                "left_type": b.left_type, "left_id": b.left_id,
+                "right_type": b.right_type, "right_id": b.right_id,
+            })
+        return {"success": True, "bindings": result}
+    finally:
+        session.close()
+
+
+@app.get("/api/docs/{doc_id}/chunks")
+async def get_doc_chunks(doc_id: str):
+    """获取文档的文本块内容（向量化前原文）"""
+    try:
+        db = _chroma_db
+        chunks = db.get_doc_chunks(doc_id)
+        return {"success": True, "chunks": chunks}
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"success": False, "message": str(e)})
+
+
+@app.get("/api/docs/{doc_id}/glossary")
+async def get_doc_glossary(doc_id: str):
+    """获取文档的术语表"""
+    from agent_components.module_tree import get_glossary_by_doc
+    terms = get_glossary_by_doc(doc_id)
+    return {"success": True, "terms": terms}
+
+
+@app.post("/api/docs/{doc_id}/glossary")
+async def add_doc_glossary(doc_id: str, data: dict):
+    """添加文档术语"""
+    from database import get_session
+    from database.operations import GlossaryOps
+    term = data.get("term", "").strip()
+    definition = data.get("definition", "").strip()
+    if not term:
+        return JSONResponse(status_code=400,
+                            content={"success": False, "message": "术语名不能为空"})
+    session = get_session()
+    try:
+        # 幂等：先删同名再插入
+        for t in GlossaryOps.get_terms(session, doc_id):
+            if t.term == term:
+                GlossaryOps.delete_term(session, t.id)
+        GlossaryOps.add_term(session, doc_id, term, definition)
+        session.commit()
+        return {"success": True, "message": f"已保存: {term}"}
+    except Exception as e:
+        session.rollback()
+        return JSONResponse(status_code=500, content={"success": False, "message": str(e)})
+    finally:
+        session.close()
+
+
+@app.delete("/api/docs/{doc_id}/glossary/{term_id}")
+async def delete_doc_glossary(doc_id: str, term_id: str):
+    """删除文档术语"""
+    from database import get_session
+    from database.operations import GlossaryOps
+    session = get_session()
+    try:
+        ok = GlossaryOps.delete_term(session, int(term_id))
+        session.commit()
+        return {"success": ok, "message": "已删除" if ok else "术语不存在"}
+    except Exception as e:
+        session.rollback()
+        return JSONResponse(status_code=500, content={"success": False, "message": str(e)})
+    finally:
+        session.close()
+
+
+@app.get("/api/modules/{module_name}/related")
+async def get_module_related(module_name: str):
+    """获取模块的关联模块（module↔module）"""
+    from database import get_session
+    from database.operations import BindingOps
+    session = get_session()
+    try:
+        partners = BindingOps.get_partners(session, "module", module_name, "module")
+        return {"success": True, "related": [{"name": p[1]} for p in partners]}
+    finally:
+        session.close()
+
+
+@app.get("/api/docs/{doc_id}/related-docs")
+async def get_doc_related_docs(doc_id: str):
+    """获取文档的关联文档（doc↔doc）"""
+    from database import get_session
+    from database.operations import BindingOps
+    session = get_session()
+    try:
+        from database.models import Document as DocModel
+        doc = session.get(DocModel, doc_id)
+        if not doc:
+            return {"success": True, "related": []}
+        doc_types = ("product", "api", "axure")
+        partners = BindingOps.get_partners(session, doc.doc_type, doc_id)
+        related = []
+        for pt, pi in partners:
+            if pt in doc_types:
+                related_doc = session.get(DocModel, pi)
+                related.append({
+                    "doc_id": pi,
+                    "doc_type": pt,
+                    "file_name": related_doc.file_name if related_doc else pi,
+                })
+        return {"success": True, "related": related}
+    finally:
+        session.close()
 
 
 @app.get("/api/file-content")
