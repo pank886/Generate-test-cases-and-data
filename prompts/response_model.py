@@ -1,5 +1,5 @@
 from typing import Dict, Any, List, Optional
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 class ProperResponse(BaseModel):
     """
@@ -16,6 +16,13 @@ class ApiDefinition(BaseModel):
     description: str = Field(description="接口功能描述")
     parameters: Dict[str, Any] = Field(description="请求参数结构示例")
     returns: Dict[str, Any] = Field(description="返回数据结构示例，包含所有响应字段的名称和类型")
+
+    @field_validator("returns", mode="before")
+    @classmethod
+    def normalize_returns(cls, v):
+        if isinstance(v, list):
+            return {"data": v}
+        return v
 
 class TestData(BaseModel):
     """测试数据 — 结构化 JSON，保存时自动转为 YAML"""
@@ -121,6 +128,14 @@ class ApiDefItem(BaseModel):
     description: str = Field(description="接口功能描述")
     parameters: Dict[str, Any] = Field(description="请求参数结构")
     returns: Dict[str, Any] = Field(description="返回数据结构")
+
+    @field_validator("returns", mode="before")
+    @classmethod
+    def normalize_returns(cls, v):
+        """LLM 有时会把纯数组返回值输出为 list，自动包装成 {"data": [...]}。"""
+        if isinstance(v, list):
+            return {"data": v}
+        return v
 
 
 class ApiDefExtract(BaseModel):

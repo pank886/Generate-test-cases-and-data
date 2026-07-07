@@ -78,7 +78,9 @@ def api_def_extract_prompt() -> ChatPromptTemplate:
          "3. module_name 根据接口的用途判断所属模块。\n\n"
          "### 输出格式\n"
          '输出 JSON 对象：{{"apis": [{{"name": "...", "description": "...", "method": "...", "url": "...", "parameters": {{...}}, "returns": {{...}}}}], "module_name": "..."}}\n'
-         "每个接口必须包含 name、description、method、url、parameters、returns 六个字段。不包含 Markdown。"),
+         "每个接口必须包含 name、description、method、url、parameters、returns 六个字段。\n"
+         "⚠️ returns 必须是 JSON 对象（dict），即使响应是数组也要用 {{\"data\": [...]}} 包装，绝对不能直接输出数组。\n"
+         "不包含 Markdown。"),
         ("human", "### 接口文档内容\n{doc_text}\n\n请提取所有接口定义：")
     ])
 

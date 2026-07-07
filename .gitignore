@@ -32,6 +32,7 @@ uploads/
 *.meta.json
 data/
 testcase_out/
+vector_store/
 
 # 忽略构建产物
 *.egg-info/

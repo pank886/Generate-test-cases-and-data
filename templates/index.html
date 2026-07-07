@@ -67,12 +67,6 @@ nav a:hover,nav a.active{color:#fff;border-bottom-color:#fff}
 .chunk-nav{display:flex;gap:8px;align-items:center;margin-bottom:8px;font-size:12px}
 
 /* 关联面板 */
-.assoc-section{margin-bottom:14px}.assoc-section h4{font-size:12px;color:var(--text-dim);margin-bottom:6px;text-transform:uppercase}
-.assoc-item{display:flex;align-items:center;justify-content:space-between;padding:5px 8px;margin:2px 0;border-radius:4px;background:#fafbfc;font-size:12px}
-.assoc-item:hover{background:var(--primary-bg)}
-.assoc-item .remove{color:var(--danger);cursor:pointer;font-size:14px;font-weight:700}
-.assoc-item .remove:hover{opacity:.7}
-.glossary-section{margin-top:16px;border-top:1px solid var(--border);padding-top:12px}
 .glossary-item{padding:6px 0;border-bottom:1px solid #f0f0f0;font-size:12px}
 .glossary-item .term-name{font-weight:600;color:var(--primary)}
 .glossary-item .term-def{color:var(--text-dim);margin-top:2px}
@@ -80,6 +74,19 @@ nav a:hover,nav a.active{color:#fff;border-bottom-color:#fff}
 .new-term-row{display:flex;gap:4px;margin-top:8px}
 .new-term-row input{flex:1;padding:5px 8px;border:1px solid var(--border);border-radius:4px;font-size:11px}
 .search-box input{width:100%;padding:7px 10px;border:1px solid var(--border);border-radius:4px;font-size:12px;margin-bottom:10px}
+.scroll-list{scrollbar-width:thin;scrollbar-color:var(--border) transparent}
+.scroll-list::-webkit-scrollbar{width:5px}.scroll-list::-webkit-scrollbar-thumb{background:var(--border);border-radius:3px}
+.assoc-group{border:1px solid var(--border);border-radius:4px;margin-bottom:6px;overflow:hidden}
+.assoc-group-header{display:flex;align-items:center;gap:6px;padding:7px 10px;background:#fafbfc;cursor:pointer;font-size:12px;font-weight:600;user-select:none}
+.assoc-group-header:hover{background:var(--primary-bg)}
+.assoc-group-header .arrow{font-size:10px;color:var(--text-dim);transition:.2s;margin-left:auto}
+.assoc-group-header .arrow.open{transform:rotate(90deg)}
+.assoc-group-body{padding:0}
+.assoc-group-body.collapsed{display:none}
+.doc-assoc-item{display:flex;align-items:center;justify-content:space-between;padding:6px 10px;border-bottom:1px solid #f0f0f0;font-size:12px}
+.doc-assoc-item:last-child{border-bottom:none}
+.doc-assoc-item .name{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.doc-assoc-item .actions{display:flex;gap:4px;flex-shrink:0}
 
 /* 弹窗 */
 .progress-wrap{margin-top:12px}.progress-bar{width:100%;height:6px;background:#eee;border-radius:3px;overflow:hidden}.progress-fill{height:100%;background:var(--primary);border-radius:3px;transition:width .3s}
@@ -180,28 +187,40 @@ nav a:hover,nav a.active{color:#fff;border-bottom-color:#fff}
       </div>
     </div>
   </div>
-  <!-- 中栏: 文档列表 + 详情 -->
+  <!-- 中栏: 已绑定文件列表 + 详情 -->
   <div class="col-center">
     <div class="card"><h3>📋 <span id="center-title">选择一个模块</span></h3>
-      <div class="search-box"><input type="text" id="doc-search" placeholder="🔍 搜索文档内容..." onkeydown="if(event.key==='Enter')searchDocs()"></div>
-      <div class="doc-type-tabs">
-        <button class="active" onclick="filterDocType('all')">全部</button>
-        <button onclick="filterDocType('product')">📄 产品文档</button>
-        <button onclick="filterDocType('api')">📡 接口文档</button>
-        <button onclick="filterDocType('axure')">🎨 Axure 原型</button>
-      </div>
-      <div class="doc-list" id="doc-list"></div>
-      <div class="unassociated-section hidden" id="unassociated-section">
-        <h4 style="font-size:12px;color:var(--text-dim);margin:14px 0 6px;border-top:1px solid var(--border);padding-top:10px">📎 未绑定文档（可关联到 <b id="unassociated-module-name"></b>）</h4>
-        <div id="unassociated-list"></div>
-      </div>
+      <div class="scroll-list" id="bound-docs-list" style="max-height:320px;overflow-y:auto"></div>
       <div class="chunk-viewer hidden" id="chunk-viewer"></div>
     </div>
   </div>
-  <!-- 右栏: 关联 + 术语 -->
+  <!-- 右栏: 可关联文件 / 术语表（互斥） -->
   <div class="col-right">
-    <div class="card" id="assoc-card" style="height:100%"><h3>🔗 关联 & 术语</h3>
-      <div id="assoc-content"><span style="color:var(--text-dim);font-size:12px">选择模块或文档查看关联</span></div>
+    <div class="card" style="height:100%"><h3>📎 可关联文件</h3>
+      <div id="unassociated-by-type">
+        <div class="assoc-group" data-type="product">
+          <div class="assoc-group-header" onclick="toggleAssocGroup(this)">📄 产品文档 <span class="count" id="count-product">(0)</span> <span class="arrow">▶</span></div>
+          <div class="assoc-group-body">
+            <div class="scroll-list" id="unassoc-product" style="max-height:240px;overflow-y:auto"></div>
+          </div>
+        </div>
+        <div class="assoc-group" data-type="api">
+          <div class="assoc-group-header" onclick="toggleAssocGroup(this)">📡 接口文档 <span class="count" id="count-api">(0)</span> <span class="arrow">▶</span></div>
+          <div class="assoc-group-body">
+            <div class="scroll-list" id="unassoc-api" style="max-height:240px;overflow-y:auto"></div>
+          </div>
+        </div>
+        <div class="assoc-group" data-type="axure">
+          <div class="assoc-group-header" onclick="toggleAssocGroup(this)">🎨 Axure 原型 <span class="count" id="count-axure">(0)</span> <span class="arrow">▶</span></div>
+          <div class="assoc-group-body">
+            <div class="scroll-list" id="unassoc-axure" style="max-height:240px;overflow-y:auto"></div>
+          </div>
+        </div>
+      </div>
+      <div id="glossary-content" class="hidden">
+        <h4 style="font-size:12px;color:var(--text-dim);margin-bottom:8px">📝 术语表</h4>
+        <div class="scroll-list" id="glossary-list" style="max-height:400px;overflow-y:auto"></div>
+      </div>
     </div>
   </div>
 </div></div>
@@ -239,15 +258,14 @@ nav a:hover,nav a.active{color:#fff;border-bottom-color:#fff}
 const INITIAL_FILES = {{ imported_files | tojson | safe }};
 const VECTOR_READY = {{ vector_ready | tojson | safe }};
 let currentTab='upload', selectedModuleId=null, selectedModuleName=null;
-let selectedDocId=null, selectedDocType=null, docTypeFilter='all';
-let allDocs=[], unassociatedDocs=[], allModules=[], currentChunks=[], currentChunkIdx=0;
+let selectedDocId=null, selectedDocType=null;
+let allModules=[], currentChunks=[], currentChunkIdx=0;
 let editorPath='', editorDirty=false, resultFiles=[];
 
 // ===== 工具 =====
 function toast(m){let t=document.getElementById('toast');t.textContent=m;t.classList.add('show');setTimeout(()=>t.classList.remove('show'),2800)}
 function esc(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;')}
 function sleep(ms){return new Promise(r=>setTimeout(r,ms))}
-function flattenModuleTree(nodes){let r=[];for(let n of nodes){r.push({id:n.id,name:n.name});if(n.children&&n.children.length)r=r.concat(flattenModuleTree(n.children))}return r}
 function showModal(html){document.getElementById('modal-content').innerHTML=html;document.getElementById('modal-overlay').classList.remove('hidden')}
 function closeModal(){document.getElementById('modal-overlay').classList.add('hidden')}
 async function pollTask(taskId,onProgress,onDone){for(let i=0;i<120;i++){try{let r=await fetch('/task/'+taskId);let d=await r.json();let t=d.task||{};if(t.status==='completed'){onDone(t.result||t);return}if(t.status==='failed'){onDone({error:t.error||t.message||'任务失败'});return}onProgress(t.progress||0,t.message||'')}catch(e){onDone({error:e.message});return}await sleep(2000)}onDone({error:'任务超时'})}
@@ -403,9 +421,17 @@ function selectModule(id,name){
   document.getElementById('chunk-viewer').classList.add('hidden');
   renderModuleTree(allModules);
   document.getElementById('center-title').textContent=name;
-  loadModuleDocs(name);
-  loadUnassociatedDocs(name);
-  loadAssocPanel(name);
+  showUnassociatedPanel();
+  loadBoundDocs(name);
+  loadUnassociatedDocs();
+}
+function showUnassociatedPanel(){
+  document.getElementById('unassociated-by-type').classList.remove('hidden');
+  document.getElementById('glossary-content').classList.add('hidden');
+}
+function showGlossaryPanel(){
+  document.getElementById('unassociated-by-type').classList.add('hidden');
+  document.getElementById('glossary-content').classList.remove('hidden');
 }
 async function createModule(){
   let inp=document.getElementById('new-module-input');let name=inp.value.trim();
@@ -425,36 +451,45 @@ async function deleteModule(id,name){
     if(d.success){selectedModuleId=null;refreshModuleTree();toast('✅ 模块已删除')}else toast('❌ '+d.message)}catch(e){toast('❌ '+d.message||'删除失败')}
 }
 
-// ===== 文档列表 =====
-async function loadModuleDocs(moduleName){
+// ===== 中栏: 已绑定文件列表 =====
+async function loadBoundDocs(moduleName){
   try{let r=await fetch('/api/modules/'+encodeURIComponent(moduleName)+'/docs');let d=await r.json();
-    allDocs=d.docs||[];renderDocList()}catch(e){}
+    renderBoundDocs(d.docs||[])}catch(e){}
 }
-async function loadUnassociatedDocs(moduleName){
-  // 获取所有未绑定模块的文档，供用户选择关联到当前模块
-  try{
-    let r=await fetch('/api/docs/unassociated');let d=await r.json();
-    unassociatedDocs=d.docs||[];
-    document.getElementById('unassociated-module-name').textContent=moduleName;
-    renderUnassociatedDocs();
-  }catch(e){}
-}
-function renderUnassociatedDocs(){
-  let section=document.getElementById('unassociated-section');
-  let list=document.getElementById('unassociated-list');
-  if(!unassociatedDocs.length){
-    section.classList.add('hidden');return;
-  }
-  section.classList.remove('hidden');
-  let items=unassociatedDocs.map(d=>{
-    let dt=d.doc_type||d.type||'';
-    let icon=dt==='api'?'📡':(dt==='axure'?'🎨':'📄');
-    return `<div class="assoc-item" style="justify-content:space-between">
-      <span>${icon} <b>${esc(d.doc_id)}</b> <span style="color:var(--text-dim);font-size:11px">(${dt})</span></span>
-      <button class="btn btn-sm btn-outline" onclick="bindDocToModule('${esc(d.doc_id)}','${esc(dt)}')">绑定到此模块</button>
-    </div>`;
+function renderBoundDocs(docs){
+  let el=document.getElementById('bound-docs-list');
+  if(!docs.length){el.innerHTML='<div class="empty-hint">暂无绑定文档</div>';return}
+  el.innerHTML=docs.map(d=>{
+    let dt=d.doc_type||d.type||'';let icon=dt==='api'?'📡':(dt==='axure'?'🎨':'📄');
+    return '<div class="doc-assoc-item"><span class="name">'+icon+' '+esc(d.doc_id||'')+' <span style="color:var(--text-dim);font-size:11px">'+esc(d.file_name||'')+'</span></span>'+
+      '<span class="actions"><button class="btn btn-sm btn-outline" onclick="showDocDetail(\''+esc(d.doc_id)+'\',\''+esc(dt)+'\')">详情</button>'+
+      '<button class="btn btn-sm btn-danger-outline" onclick="unbindDocFromModule(\''+esc(d.doc_id)+'\',\''+esc(dt)+'\')">解绑</button></span></div>'
   }).join('');
-  list.innerHTML=items;
+}
+// ===== 右栏: 未绑定文件列表（按类型分组）=====
+async function loadUnassociatedDocs(){
+  try{let r=await fetch('/api/docs/unassociated');let d=await r.json();
+    renderUnassociatedByType(d.docs||[])}catch(e){}
+}
+function renderUnassociatedByType(docs){
+  let groups={product:[],api:[],axure:[]};
+  docs.forEach(d=>{let t=d.doc_type||d.type||'';if(groups[t])groups[t].push(d);else groups.product.push(d)});
+  ['product','api','axure'].forEach(t=>{
+    let list=document.getElementById('unassoc-'+t);
+    let count=document.getElementById('count-'+t);
+    let items=groups[t];
+    count.textContent='('+items.length+')';
+    if(!items.length){list.innerHTML='<div class="empty-hint" style="padding:6px 10px;font-size:11px">无</div>';return}
+    list.innerHTML=items.map(d=>{
+      let dt=d.doc_type||d.type||'';
+      return '<div class="doc-assoc-item"><span class="name">'+esc(d.file_name||d.doc_id||'')+'</span>'+
+        '<span class="actions"><button class="btn btn-sm btn-outline" onclick="bindDocToModule(\''+esc(d.doc_id)+'\',\''+esc(dt)+'\')">关联</button></span></div>';
+    }).join('');
+  });
+}
+function toggleAssocGroup(header){
+  header.querySelector('.arrow').classList.toggle('open');
+  header.nextElementSibling.classList.toggle('collapsed');
 }
 async function bindDocToModule(docId,docType){
   if(!selectedModuleName){toast('请先选择一个模块');return}
@@ -465,159 +500,51 @@ async function bindDocToModule(docId,docType){
     let d=await r.json();
     if(d.success){
       toast('✅ 已绑定到 '+selectedModuleName);
-      // 从未绑定列表中移除
-      unassociatedDocs=unassociatedDocs.filter(d=>d.doc_id!==docId);
-      renderUnassociatedDocs();
-      // 刷新已绑定文档列表和关联面板
-      loadModuleDocs(selectedModuleName);
-      loadAssocPanel(selectedModuleName);
+      loadBoundDocs(selectedModuleName);
+      loadUnassociatedDocs();
     }else{toast('❌ 绑定失败: '+(d.message||''))}
   }catch(e){toast('❌ 绑定失败: '+e.message)}
 }
-function filterDocType(t){docTypeFilter=t;document.querySelectorAll('.doc-type-tabs button').forEach((b,i)=>{b.classList.toggle('active',(i===0&&t==='all')||(i===1&&t==='product')||(i===2&&t==='api')||(i===3&&t==='axure'))});renderDocList()}
-function renderDocList(){
-  let el=document.getElementById('doc-list');let docs=allDocs;
-  if(docTypeFilter!=='all')docs=docs.filter(d=>(d.doc_type||d.type)===docTypeFilter);
-  if(!docs.length){el.innerHTML='<div class="empty-hint">无关联文档</div>';return}
-  el.innerHTML=docs.map(d=>{
-    let dt=d.doc_type||d.type||'';let icon=dt==='api'?'📡':(dt==='axure'?'🎨':'📄');
-    let sel=d.doc_id===selectedDocId?' selected':'';
-    return `<div class="doc-item${sel}" onclick="selectDoc('${esc(d.doc_id)}','${esc(dt)}')">
-      ${icon} <b>${esc(d.doc_id)}</b>
-      <div class="meta">${d.chunks||0} 块 · ${d.api_count||0} 接口 · ${esc(d.file_name||'')}</div>
-    </div>`;
-  }).join('');
+async function unbindDocFromModule(docId,docType){
+  if(!confirm('解除该文档与 "'+selectedModuleName+'" 的关联？'))return;
+  try{
+    let r=await fetch('/api/docs/disassociate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({doc_id:docId})});
+    let d=await r.json();
+    if(d.success){
+      toast('✅ 已解除关联');
+      if(selectedDocId===docId){
+        document.getElementById('chunk-viewer').classList.add('hidden');
+        selectedDocId=null;selectedDocType=null;
+        showUnassociatedPanel();
+      }
+      loadBoundDocs(selectedModuleName);
+      loadUnassociatedDocs();
+    }else{toast('❌ 解绑失败: '+(d.message||''))}
+  }catch(e){toast('❌ 解绑失败: '+e.message)}
 }
-async function selectDoc(docId,docType){
-  selectedDocId=docId;selectedDocType=docType;renderDocList();
-  // 加载文本块
+// ===== 文档详情 =====
+async function showDocDetail(docId,docType){
+  selectedDocId=docId;selectedDocType=docType;
   try{let r=await fetch('/api/docs/'+encodeURIComponent(docId)+'/chunks');let d=await r.json();
     currentChunks=d.chunks||[];currentChunkIdx=0;
     let v=document.getElementById('chunk-viewer');
     if(currentChunks.length){v.classList.remove('hidden');showChunk(0)}else{v.classList.add('hidden')}
   }catch(e){}
-  // 加载文档的关联 + 术语
-  loadDocAssoc(docId,docType);
+  if(docType==='product'){
+    try{let r=await fetch('/api/docs/'+encodeURIComponent(docId)+'/glossary');let d=await r.json();
+      renderGlossary(d.terms||[]);showGlossaryPanel()}catch(e){}
+  }else{showUnassociatedPanel()}
+}
+function renderGlossary(terms){
+  let el=document.getElementById('glossary-list');
+  if(!terms.length){el.innerHTML='<div class="empty-hint">暂无术语</div>';return}
+  el.innerHTML=terms.map(t=>'<div class="glossary-item"><div class="term-name">'+esc(t.term)+'</div><div class="term-def">'+esc(t.definition||'')+'</div></div>').join('');
 }
 function showChunk(idx){
   currentChunkIdx=Math.max(0,Math.min(idx,currentChunks.length-1));
   let c=currentChunks[currentChunkIdx];if(!c)return;
   let nav=`<div class="chunk-nav"><button class="btn btn-sm btn-outline" onclick="showChunk(${currentChunkIdx-1})" ${currentChunkIdx===0?'disabled':''}>← 上一块</button><span>${currentChunkIdx+1} / ${currentChunks.length}</span><button class="btn btn-sm btn-outline" onclick="showChunk(${currentChunkIdx+1})" ${currentChunkIdx>=currentChunks.length-1?'disabled':''}>下一块 →</button></div>`;
   document.getElementById('chunk-viewer').innerHTML=nav+'<div style="white-space:pre-wrap;line-height:1.7;margin-top:8px">'+esc(c.content)+'</div>';
-}
-function searchDocs(){
-  let q=document.getElementById('doc-search').value.trim().toLowerCase();if(!q)return renderDocList();
-  let filtered=allDocs.filter(d=>d.doc_id.toLowerCase().includes(q)||(d.file_name||'').toLowerCase().includes(q));
-  let orig=allDocs;allDocs=filtered;renderDocList();allDocs=orig;
-}
-
-// ===== 关联面板 =====
-async function loadAssocPanel(moduleName){
-  try{
-    let r1=await fetch('/api/modules/'+encodeURIComponent(moduleName)+'/docs');
-    let docs=await r1.json();
-    let r2=await fetch('/api/modules/'+encodeURIComponent(moduleName)+'/related');
-    let relMods=await r2.json();
-    renderAssocPanel({boundDocs:docs.docs||[],relatedModules:relMods.related||[],type:'module',name:moduleName});
-  }catch(e){}
-}
-async function loadDocAssoc(docId,docType){
-  try{
-    let r=await fetch('/api/docs/'+encodeURIComponent(docId)+'/related-docs');
-    let relDocs=await r.json();
-    let r2=await fetch('/api/docs/'+encodeURIComponent(docId)+'/glossary');
-    let glossary=await r2.json();
-    renderAssocPanel({relatedDocs:relDocs.related||[],glossary:glossary.terms||[],type:'doc',name:docId,docType:docType});
-  }catch(e){}
-}
-function renderAssocPanel(data){
-  let el=document.getElementById('assoc-content');let html='';
-  if(data.type==='module'){
-    html+=`<div class="assoc-section"><h4>📋 绑定文档</h4>`;
-    if(data.boundDocs.length){data.boundDocs.forEach(d=>{let dt=d.doc_type||d.type||'';html+=`<div class="assoc-item"><span>${dt==='api'?'📡':(dt==='axure'?'🎨':'📄')} ${esc(d.doc_id)}</span><span class="remove" onclick="disassociateDoc('${esc(d.doc_id)}','${esc(data.name)}')">✕</span></div>`})}
-    else html+='<div style="color:var(--text-dim);font-size:11px">无</div>';
-    html+='</div>';
-    html+=`<div class="assoc-section"><h4>🔗 关联模块</h4>`;
-    if(data.relatedModules.length){data.relatedModules.forEach(m=>html+=`<div class="assoc-item"><span>📁 ${esc(m.name)}</span><span class="remove" onclick="unbindModule('${esc(data.name)}','${esc(m.name)}')">✕</span></div>`)}
-    else html+='<div style="color:var(--text-dim);font-size:11px">无</div>';
-    html+='</div>';
-    html+=`<button class="btn btn-sm btn-outline" onclick="showAddAssocModal('module','${esc(data.name)}')">+ 添加关联</button>`;
-  }else{
-    html+=`<div class="assoc-section"><h4>📎 关联文档</h4>`;
-    if(data.relatedDocs.length){data.relatedDocs.forEach(d=>html+=`<div class="assoc-item"><span>${esc(d.file_name||d.doc_id)}</span><span class="remove" onclick="unbindDoc('${esc(data.name)}','${esc(d.doc_id)}','${esc(d.doc_type||'')}')">✕</span></div>`)}
-    else html+='<div style="color:var(--text-dim);font-size:11px">无</div>';
-    html+='</div>';
-    html+=`<button class="btn btn-sm btn-outline" onclick="showAddAssocModal('doc','${esc(data.name)}')">+ 添加关联</button>`;
-    // 术语面板（仅产品文档）
-    html+=`<div class="glossary-section"><h4>📝 术语表</h4>`;
-    if(data.glossary&&data.glossary.length){data.glossary.forEach(t=>html+=`<div class="glossary-item"><span class="remove" onclick="deleteGlossaryTerm('${esc(data.name)}',${t.id})">✕</span><div class="term-name">${esc(t.term)}</div><div class="term-def">${esc(t.definition||'')}</div></div>`)}
-    else html+='<div style="color:var(--text-dim);font-size:11px">无术语</div>';
-    html+=`<div class="new-term-row"><input type="text" id="new-term-name" placeholder="术语名称"><input type="text" id="new-term-def" placeholder="解释"><button class="btn btn-sm" onclick="addGlossaryTerm('${esc(data.name)}')">+</button></div>`;
-    html+='</div>';
-  }
-  el.innerHTML=html;
-}
-
-// ===== 关联操作 =====
-async function disassociateDoc(docId,moduleName){
-  if(!confirm('解除文档关联？'))return;
-  let r=await fetch('/api/docs/disassociate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({doc_id:docId,module:moduleName})});
-  let d=await r.json();toast(d.message);if(d.success)selectModule(selectedModuleId,selectedModuleName)
-}
-async function unbindModule(mod1,mod2){
-  let r=await fetch('/api/bindings',{method:'DELETE',headers:{'Content-Type':'application/json'},body:JSON.stringify({a_type:'module',a_id:mod1,b_type:'module',b_id:mod2})});
-  let d=await r.json();toast(d.message);if(d.success)selectModule(selectedModuleId,selectedModuleName)
-}
-async function unbindDoc(doc1,doc2,doc2Type){
-  let r=await fetch('/api/bindings',{method:'DELETE',headers:{'Content-Type':'application/json'},body:JSON.stringify({a_type:selectedDocType||'product',a_id:doc1,b_type:doc2Type||'product',b_id:doc2})});
-  let d=await r.json();toast(d.message);if(d.success)selectDoc(selectedDocId,selectedDocType)
-}
-async function showAddAssocModal(etype,eid){
-  if(etype==='module'){
-    try{let r=await fetch('/api/modules');let d=await r.json();
-      // 递归扁平化模块树，避免只取根节点遗漏子模块
-      let allMods=flattenModuleTree(d.tree||[]);
-      let mods=allMods.filter(m=>m.name!==eid);
-      if(!mods.length){showModal('<h3>添加关联模块</h3><p style="color:var(--text-dim)">没有其他可关联的模块</p>');return}
-      let rows=mods.map(m=>`<label style="display:block;padding:4px 0"><input type="checkbox" value="${esc(m.name)}"> ${esc(m.name)}</label>`).join('');
-      showModal(`<h3>添加关联模块</h3>${rows}<div class="btn-row"><button class="btn" id="do-add-assoc">添加</button></div>`);
-      document.getElementById('do-add-assoc').onclick=async()=>{
-        let sel=[];document.querySelectorAll('#modal-content input[type=checkbox]:checked').forEach(cb=>sel.push(cb.value));
-        closeModal();
-        for(let m of sel){await fetch('/api/bindings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({source_type:'module',source_id:eid,target_type:'module',target_id:m})})}
-        toast('✅ 关联已添加');selectModule(selectedModuleId,selectedModuleName);
-      }}catch(e){}
-  }else{
-    if(!selectedModuleName){toast('请先在左侧选择一个模块');return}
-    // 加载当前文档已有的关联列表，用于排除
-    let relatedIds=new Set();
-    try{let rr=await fetch('/api/docs/'+encodeURIComponent(eid)+'/related-docs');let rd=await rr.json();(rd.related||[]).forEach(r=>relatedIds.add(r.doc_id))}catch(e){}
-    // 加载所有模块下文档，过滤：非同类型、非自身、非已关联
-    try{let r=await fetch('/api/modules/'+encodeURIComponent(selectedModuleName)+'/docs');
-      let d=await r.json();let docs=(d.docs||[]).filter(doc=>(doc.doc_type||doc.type)!==(selectedDocType||'')&&doc.doc_id!==eid&&!relatedIds.has(doc.doc_id));
-      if(!docs.length){showModal('<h3>添加关联文档</h3><p style="color:var(--text-dim)">无可关联的异类文档（不同类型且未关联过的）</p>');return}
-      let rows=docs.map(doc=>`<label style="display:block;padding:4px 0"><input type="checkbox" value="${esc(doc.doc_id)}" data-doc-type="${esc(doc.doc_type||doc.type||'')}"> ${esc(doc.doc_id)} <span style="color:var(--text-dim);font-size:11px">(${esc(doc.doc_type||doc.type||'')})</span></label>`).join('');
-      showModal(`<h3>添加关联文档</h3>${rows}<div class="btn-row"><button class="btn" id="do-add-doc-assoc">添加</button></div>`);
-      document.getElementById('do-add-doc-assoc').onclick=async()=>{
-        let sel=[];document.querySelectorAll('#modal-content input[type=checkbox]:checked').forEach(cb=>sel.push({id:cb.value,doc_type:cb.dataset.docType}));
-        closeModal();let srcType=selectedDocType||'product';
-        for(let d of sel){await fetch('/api/bindings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({source_type:srcType,source_id:eid,target_type:d.doc_type,target_id:d.id})})}
-        toast('✅ 关联已添加');selectDoc(selectedDocId,selectedDocType);
-      }}catch(e){toast('加载失败')}
-  }
-}
-
-// ===== 术语操作 =====
-async function addGlossaryTerm(docId){
-  let n=document.getElementById('new-term-name').value.trim();
-  let d=document.getElementById('new-term-def').value.trim();
-  if(!n)return;
-  let r=await fetch('/api/docs/'+encodeURIComponent(docId)+'/glossary',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({term:n,definition:d})});
-  let resp=await r.json();toast(resp.message);selectDoc(docId,selectedDocType)
-}
-async function deleteGlossaryTerm(docId,termId){
-  let r=await fetch('/api/docs/'+encodeURIComponent(docId)+'/glossary/'+termId,{method:'DELETE'});
-  let d=await r.json();toast(d.message);selectDoc(docId,selectedDocType)
 }
 
 // ===== Chat (Tab 3) =====

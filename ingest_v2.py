@@ -138,21 +138,8 @@ def _save_to_sqlite(doc_id: str, file_name: str, file_type: str, doc_type: str,
                 source_doc=file_name,
             )
 
-        # 3. 绑定关系到模块（含级联：自动关联同模块下异类文档）
-        if module_name:
-            ok, msg = BindingOps.bind(session, doc_type, doc_id, "module", module_name)
-            if ok:
-                _cascade_bind_to_module_docs(session, doc_type, doc_id, module_name)
-            else:
-                logger.warning("   [SQLite] 绑定模块失败: %s → %s, reason=%s", doc_id, module_name, msg)
-
-        for rel_mod in (related_modules or []):
-            if rel_mod and rel_mod != module_name:
-                ok, msg = BindingOps.bind(session, doc_type, doc_id, "module", rel_mod)
-                if ok:
-                    _cascade_bind_to_module_docs(session, doc_type, doc_id, rel_mod)
-                else:
-                    logger.warning("   [SQLite] 绑定关联模块失败: %s → %s, reason=%s", doc_id, rel_mod, msg)
+        # 3. 绑定关系到模块（不自动绑定，由用户手动关联）
+        # module_name 和 related_modules 仅用于日志记录，不做自动 bind
 
         session.commit()
     except Exception as e:

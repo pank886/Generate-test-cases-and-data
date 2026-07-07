@@ -19,6 +19,7 @@ class PromptFactory:
          "     错误示例: `http://localhost:8000/api/login`、`https://dev.damaiiot.com:40443/api/login`\n"
          "   - `parameters` 提取关键的请求参数结构，如果文档未提及可留空或填 {{}}。\n"
          "   - **`returns` 提取接口响应的返回字段结构**，包括字段名、类型、说明。\n"
+         "     ⚠️ returns 必须是 JSON 对象（dict），即使响应是纯数组也要用 {{\"data\": [...]}} 包装，绝不能直接输出数组。\n"
          "     例如响应为 {{\"success\": true, \"code\": 0, \"data\": {{...}}}} 则 returns = {{\"success\": \"boolean\", \"code\": \"integer\", \"data\": \"object\"}}\n"
          "4. **数据清洗（重要）**：提取 `description` 时，**必须去除所有的换行符**，将其合并为一行文本，使用空格或标点分隔。\n"
          "5. **输出格式**：必须输出一个 JSON **对象**，对象中包含 `apis` 键，值为接口列表。\n"

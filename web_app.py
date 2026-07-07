@@ -76,13 +76,16 @@ async def lifespan(app: FastAPI):
     _components = _chat_func.components  # 保存实例用于后续生成
 
     # 4. 扫描 uploads/ 下各类型子目录，恢复已导入文件列表
-    ext_to_type = {".pdf": "pdf", ".md": "md", ".docx": "docx", ".zip": "axure"}
+    #    类型值与前端的分组 key 一致：product / api / axure
+    #    注意：md 是中间文件，处理完即删除，不参与启动扫描
+    ext_to_type = {".pdf": "product", ".docx": "product", ".zip": "axure"}
     scan_dirs = [
-        ("uploads/pdf", ".pdf"),
-        ("uploads/md", ".md"),
-        ("uploads/docx", ".docx"),
+        ("uploads/pdf", ".pdf"),      # 旧版兼容
+        ("uploads/docx", ".docx"),    # 旧版兼容
+        ("uploads/product", ".pdf"),  # 新版
+        ("uploads/product", ".docx"), # 新版
         ("uploads/axure", ".zip"),
-        ("uploads", ".pdf"),  # 兼容旧版根目录的 PDF
+        ("uploads", ".pdf"),          # 旧版根目录兼容
     ]
     seen_names = set()
     for scan_dir, ext in scan_dirs:
@@ -276,6 +279,11 @@ async def _process_file_bg(task_id: str, file_path: str, ext: str, file_size: in
             module_name = result.get("module_name")
 
             if count == 0:
+                # md 是中间文件，提取失败也兜底删除
+                try:
+                    os.remove(file_path)
+                except Exception:
+                    pass
                 await _update_task(task_id, status="failed", error="未提取到接口定义，请检查文档格式。")
                 return
 
@@ -348,6 +356,12 @@ async def _process_file_bg(task_id: str, file_path: str, ext: str, file_size: in
     except Exception as e:
         logger.error("❌ 文件处理失败: %s", e)
         await _update_task(task_id, status="failed", error=str(e))
+        # md 是中间文件，处理失败时兜底删除
+        if ext == ".md":
+            try:
+                os.remove(file_path)
+            except Exception:
+                pass
 
 
 async def _run_chat_bg(task_id: str, user_input: str):
@@ -477,13 +491,13 @@ async def index():
 @app.post("/upload-file")
 async def upload_file(file: UploadFile = File(...), background_tasks: BackgroundTasks = None):
     """上传文件 -> 立即返回 task_id，后台异步处理。"""
-    # 1. 识别文件类型
+    # 1. 识别文件类型（类型值与前端分组 key 一致）
     filename = file.filename
     ext = os.path.splitext(filename)[1].lower()
     type_map = {
-        ".pdf": "pdf",
-        ".md": "md",
-        ".docx": "docx",
+        ".pdf": "product",
+        ".md": "api",
+        ".docx": "product",
         ".zip": "axure",
     }
     file_type = type_map.get(ext)
@@ -494,7 +508,7 @@ async def upload_file(file: UploadFile = File(...), background_tasks: Background
             content={"success": False, "message": f"不支持的文件类型: {ext}。当前支持: {supported}"},
         )
 
-    # 2. 保存到类型专属子目录
+    # 2. 保存到类型专属子目录（子目录名与 type 一致）
     type_dir = ensure_directory(f"./uploads/{file_type}")
     file_path = os.path.join(type_dir, filename)
     # 同名文件覆盖：先清理旧数据的 ChromaDB + SQLite 记录
@@ -533,7 +547,8 @@ async def delete_file(filename: str = Form(...)):
 
     # 1. 查找文件路径
     file_path = None
-    for scan_dir in ["uploads/pdf", "uploads/md", "uploads/docx", "uploads/axure", "uploads"]:
+    for scan_dir in ["uploads/product", "uploads/axure",
+                      "uploads/pdf", "uploads/docx", "uploads"]:
         candidate = os.path.join(scan_dir, filename)
         if os.path.exists(candidate):
             file_path = os.path.abspath(candidate)
@@ -605,9 +620,19 @@ async def delete_file(filename: str = Form(...)):
         return JSONResponse(status_code=500, content={"success": False, "message": str(e)})
 
 
+def _file_exists_in_uploads(filename: str) -> bool:
+    """检查文件是否存在于 uploads/ 的任意子目录中（含新旧目录名）。"""
+    for scan_dir in ["uploads/product", "uploads/axure",
+                      "uploads/pdf", "uploads/docx", "uploads"]:
+        if os.path.exists(os.path.join(scan_dir, filename)):
+            return True
+    return False
+
+
 @app.get("/uploaded-files")
 async def uploaded_files():
     """获取已导入文件列表（以 SQLite 为准，合并内存中的文件大小）。"""
+    global _imported_files, _vector_ready
     from database import get_session  # noqa: F811
     from database.operations import DocOps
 
@@ -630,19 +655,27 @@ async def uploaded_files():
     except Exception:
         logger.warning("无法查询 SQLite 文档列表", exc_info=True)
 
-    # 2. 内存中补充文件大小（只有物理文件存在时才有）
-    mem_by_name = {f["name"]: f for f in _imported_files}
-    merged = []
-    seen = set()
-    for d in db_files:
-        mem = mem_by_name.get(d["name"], {})
-        d["size"] = mem.get("size", "—")
-        merged.append(d)
-        seen.add(d["name"])
-    # 补充内存中有但 DB 中没有的（刚上传尚未入库完成的）
-    for f in _imported_files:
-        if f["name"] not in seen:
-            merged.append({**f, "doc_id": "", "status": ""})
+    # 2. 在锁内完成内存列表的合并、物理文件校验、脏数据清理
+    async with _state_lock:
+        mem_by_name = {f["name"]: f for f in _imported_files}
+        merged = []
+        seen = set()
+        for d in db_files:
+            mem = mem_by_name.get(d["name"], {})
+            d["size"] = mem.get("size", "—")
+            merged.append(d)
+            seen.add(d["name"])
+
+        # 找出脏数据（内存中有但 DB 中没有且物理文件已不存在）
+        stale = [f["name"] for f in _imported_files
+                 if f["name"] not in seen and not _file_exists_in_uploads(f["name"])]
+        if stale:
+            _imported_files = [f for f in _imported_files if f["name"] not in stale]
+
+        # 补充内存中有但 DB 中没有的（刚上传尚未入库完成的）
+        for f in _imported_files:
+            if f["name"] not in seen:
+                merged.append({**f, "doc_id": "", "status": ""})
 
     return {"files": merged, "vector_ready": _vector_ready}
 
@@ -944,6 +977,11 @@ async def extract_api_doc(file: UploadFile = File(...), module: str = Form("")):
         result["file_path"] = file_path
         return {"success": True, **result}
     except Exception as e:
+        # md 是中间文件，处理失败时兜底删除
+        try:
+            os.remove(file_path)
+        except Exception:
+            pass
         return JSONResponse(status_code=500, content={"success": False, "message": str(e)})
 
 
