@@ -66,9 +66,9 @@ class Settings(BaseSettings):
     # 影响范围: nodes.py → ChromaDB.similarity_search()
     # ================================================================
 
-    # -- Embedding 模型（必填，服务启动时校验） --
+    # -- Embedding 模型（必填，服务启动时校验，为空时 lifespan 给出友好提示） --
     embedding_model: str = Field(
-        default=...,
+        default="",
         description="Ollama Embedding 模型名。必填，如 bge-m3 / nomic-embed-text",
     )
     embedding_url: str = Field(

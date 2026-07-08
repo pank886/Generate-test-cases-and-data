@@ -402,6 +402,37 @@ class BindingOps:
         return partners
 
     @staticmethod
+    def get_partners_batch(
+        session: Session,
+        entity_type: str,
+        entity_ids: list[str],
+        partner_type: Optional[str] = None,
+    ) -> dict[str, list[tuple[str, str]]]:
+        """批量获取多个实体的绑定对方（一次 SQL 查询）。
+
+        Returns: {entity_id: [(partner_type, partner_id), ...], ...}
+        """
+        if not entity_ids:
+            return {}
+        bindings = session.query(Binding).filter(
+            or_(
+                and_(Binding.left_type == entity_type, Binding.left_id.in_(entity_ids)),
+                and_(Binding.right_type == entity_type, Binding.right_id.in_(entity_ids)),
+            )
+        ).all()
+        result: dict[str, list[tuple[str, str]]] = {eid: [] for eid in entity_ids}
+        for b in bindings:
+            if b.left_type == entity_type and b.left_id in result:
+                p = (b.right_type, b.right_id)
+                if not partner_type or p[0] == partner_type:
+                    result[b.left_id].append(p)
+            if b.right_type == entity_type and b.right_id in result:
+                p = (b.left_type, b.left_id)
+                if not partner_type or p[0] == partner_type:
+                    result[b.right_id].append(p)
+        return result
+
+    @staticmethod
     def delete_bindings_for_doc(session: Session, doc_id: str):
         """删除所有与某文档相关的绑定。"""
         session.query(Binding).filter(

@@ -215,6 +215,29 @@ class PromptFactory:
         )
     ])
 
+    def confirm_user_intent(self) -> ChatPromptTemplate:
+        """Phase C 节点1：根据用户输入匹配候选模块名。"""
+        return ChatPromptTemplate.from_messages([
+        ("system",
+         "你是一个智能模块匹配助手。根据用户的自然语言描述，从模块列表中找出最相关的模块。\n\n"
+         "### 匹配规则\n"
+         "1. **语义匹配优先**：用户可能用不同措辞描述同一个功能，你需要理解语义。\n"
+         "   例如用户说「下单功能」→ 可能对应「销售订单管理」「购物车服务」等。\n"
+         "2. **最多 3 个**：返回你认为最可能的前 1-3 个模块，按相关性从高到低排列。\n"
+         "3. **宁缺毋滥**：如果都不匹配，返回空列表 []，confidence 设为 low。\n"
+         "4. **confidence 标准**：\n"
+         "   - high：用户描述与某个模块高度吻合，无需怀疑\n"
+         "   - medium：有候选但存在不确定性\n"
+         "   - low：无法确定匹配，建议用户重新描述\n"
+         "5. **只输出 JSON**：禁止任何解释文字、禁止 Markdown。"
+        ),
+        ("human",
+         "用户输入: {user_input}\n\n"
+         "可用模块列表:\n{module_list}\n\n"
+         "请匹配最相关的模块："
+        )
+    ])
+
     def generate_py_class_node(self) -> ChatPromptTemplate:
         """
         生成单个 Python 测试类（供外层循环组装）

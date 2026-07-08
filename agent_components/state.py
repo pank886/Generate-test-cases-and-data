@@ -30,6 +30,12 @@ class State(TypedDict):
     api_definitions: Optional[List[dict]]    # Hop 2b: 接口定义检索结果
     test_points: Optional[list]              # 分析后的测试点列表
 
+    # --- Phase C 多轮对话 ---
+    candidate_modules: Optional[List[str]]    # 节点1 LLM 匹配的候选模块名
+    confirmation_question: Optional[str]      # 给用户看的确认提示文本
+    workflow_status: str                      # "PENDING" → "WAITING" → "CONFIRMED"
+    confirmed_module: Optional[str]           # 用户最终选择的模块名
+
 
 class ApiDefinitionList(BaseModel):
     """包装类：用于让 LLM 输出接口列表"""

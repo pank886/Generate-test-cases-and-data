@@ -12,12 +12,6 @@
 
 import os
 import re
-import sys
-
-from database import init_db
-
-# 启动时一次性建表
-init_db()
 
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
@@ -112,22 +106,24 @@ def _cascade_bind_to_module_docs(session, doc_type: str, doc_id: str, module_nam
 
 def _save_to_sqlite(doc_id: str, file_name: str, file_type: str, doc_type: str,
                     chunk_count: int, module_name: str = "",
-                    related_modules: list = None,
                     glossary_terms: list = None):
-    """写入 SQLite：文档记录 + 绑定关系 + 术语。
+    """写入 SQLite：文档记录 + 术语。
 
     在 ChromaDB 写入后调用，保证双库数据一致。
+    module_name 仅用于日志，不做自动绑定（由用户在前端手动关联）。
     """
     from database import get_session
-    from database.operations import DocOps, GlossaryOps, BindingOps
+    from database.operations import DocOps, GlossaryOps
 
     session = get_session()
     try:
-        # 1. 文档记录（session.merge() 实现原子 upsert）
+        # 1. 文档记录（session.merge() 不触发 column default，显式设置 upload_time）
         from database.models import Document
+        from datetime import datetime, timezone
         doc = Document(
             id=doc_id, file_name=file_name, file_type=file_type,
             doc_type=doc_type, chunk_count=chunk_count, status="pending",
+            upload_time=datetime.now(timezone.utc),
         )
         session.merge(doc)
 
@@ -138,13 +134,14 @@ def _save_to_sqlite(doc_id: str, file_name: str, file_type: str, doc_type: str,
                 source_doc=file_name,
             )
 
-        # 3. 绑定关系到模块（不自动绑定，由用户手动关联）
-        # module_name 和 related_modules 仅用于日志记录，不做自动 bind
+        if module_name:
+            logger.debug(f"   [SQLite] 文档 {doc_id} 关联模块: {module_name}")
 
         session.commit()
-    except Exception as e:
+    except Exception:
         session.rollback()
-        logger.warning(f"   [SQLite] 写入失败: {e}")
+        logger.error("   [SQLite] 写入失败", exc_info=True)
+        raise
     finally:
         session.close()
 
@@ -171,39 +168,8 @@ def process_product_doc(file_path: str, progress_cb=None) -> dict:
         raise ValueError("文档内容为空")
     logger.info(f"   => 提取文本 {len(full_text)} 字符")
 
-    # 2. LLM 提取模块信息
-    cb(20, "AI 分析模块信息...")
-    prompt = product_doc_extract_prompt()
-    logger.info("   => LLM 提取模块信息...")
-    result = graph._invoke_structured(
-        prompt, DocModuleExtract,
-        method="json_mode",
-        doc_text=full_text[:4000],
-    )
-    module_name = result.module_name
-    related = result.related_modules or []
-    logger.info(f"   => 模块: {module_name}, 关联: {related}")
-
-    # 2b. LLM 提取业务术语表
-    cb(50, "AI 提取术语表...")
-    from prompts.response_model import GlossaryExtract
-    from prompts.extraction_prompts import glossary_extract_prompt
-    terms = []
-    try:
-        glossary_prompt = glossary_extract_prompt()
-        glossary_result = graph._invoke_structured(
-            glossary_prompt, GlossaryExtract,
-            method="json_mode",
-            doc_text=full_text[:4000],
-        )
-        terms = glossary_result.terms if hasattr(glossary_result, "terms") else []
-        if terms:
-            logger.info(f"   => 术语表: {len(terms)} 条")
-    except Exception as e:
-        logger.info(f"   => 术语表提取跳过: {e}")
-
-    # 3. 切分
-    cb(70, "文本切分中...")
+    # 2. 切块（前置，后续 LLM 提取和 ChromaDB 入库共用同一批块）
+    cb(15, "文本切分中...")
     splitter = RecursiveCharacterTextSplitter(
         chunk_size=config.CHUNK_SIZE,
         chunk_overlap=config.CHUNK_OVERLAP,
@@ -212,14 +178,94 @@ def process_product_doc(file_path: str, progress_cb=None) -> dict:
     chunks = splitter.split_text(full_text)
     logger.info(f"   => 切分为 {len(chunks)} 个文本块")
 
-    # 4. 写入 ChromaDB（纯向量，不含 module/related_modules）
+    # 将块打包为不超过 MAX_INGEST_CHARS_PER_BATCH 的批次
+    def _chunk_batches(chunks: list[str], max_chars: int) -> list[str]:
+        """将 chunks 拼接为每批不超过 max_chars 的文本段。"""
+        out = []
+        buf_parts = []
+        buf_len = 0
+        sep_len = len("\n\n")
+        for c in chunks:
+            c_len = len(c)
+            if buf_len + c_len + (sep_len if buf_parts else 0) > max_chars and buf_parts:
+                out.append("\n\n".join(buf_parts))
+                buf_parts = [c]
+                buf_len = c_len
+            else:
+                buf_parts.append(c)
+                buf_len += c_len + (sep_len if len(buf_parts) > 1 else 0)
+        if buf_parts:
+            out.append("\n\n".join(buf_parts))
+        return out
+
+    batch_limit = config.MAX_INGEST_CHARS_PER_BATCH
+    text_batches = _chunk_batches(chunks, batch_limit) if len(full_text) > batch_limit else [full_text]
+    logger.info(f"   => 打包为 {len(text_batches)} 批（每批 ≤ {batch_limit} 字符）")
+
+    # 3. LLM 提取模块信息（分批处理，合并 related_modules / tags）
+    cb(30, "AI 分析模块信息...")
+    prompt = product_doc_extract_prompt()
+    logger.info("   => LLM 提取模块信息...")
+    module_name = ""
+    related: set[str] = set()
+    business_summary = ""
+    tags: set[str] = set()
+    for bi, batch_text in enumerate(text_batches, 1):
+        result = graph._invoke_structured(
+            prompt, DocModuleExtract,
+            method="json_mode",
+            doc_text=batch_text,
+        )
+        if not module_name and result.module_name:
+            module_name = result.module_name
+        if result.related_modules:
+            related.update(result.related_modules)
+        if not business_summary and result.business_summary:
+            business_summary = result.business_summary
+        if result.tags:
+            tags.update(result.tags)
+        if len(text_batches) > 1:
+            logger.info(f"   [{bi}/{len(text_batches)}] 模块: {result.module_name or '?'}, "
+                        f"+{len(result.related_modules or [])} 关联")
+    module_name = module_name or "Unknown"
+    related_list = sorted(related)
+    logger.info(f"   => 模块: {module_name}, 关联: {related_list}, 标签: {sorted(tags)}")
+
+    # 4. LLM 提取业务术语表（分批处理，合并去重）
+    cb(50, "AI 提取术语表...")
+    from prompts.response_model import GlossaryExtract
+    from prompts.extraction_prompts import glossary_extract_prompt
+    terms = []
+    try:
+        glossary_prompt = glossary_extract_prompt()
+        seen_terms: set[str] = set()
+        for bi, batch_text in enumerate(text_batches, 1):
+            glossary_result = graph._invoke_structured(
+                glossary_prompt, GlossaryExtract,
+                method="json_mode",
+                doc_text=batch_text,
+            )
+            batch_terms = glossary_result.terms if hasattr(glossary_result, "terms") else []
+            for t in batch_terms:
+                key = (t.get("term", t.get("name", "")).strip())
+                if key and key not in seen_terms:
+                    seen_terms.add(key)
+                    terms.append(t)
+            if len(text_batches) > 1:
+                logger.info(f"   [{bi}/{len(text_batches)}] 术语: +{len(batch_terms)} 条（合并后 {len(terms)} 条）")
+        if terms:
+            logger.info(f"   => 术语表: {len(terms)} 条")
+    except Exception as e:
+        logger.info(f"   => 术语表提取跳过: {e}")
+
+    # 5. 写入 ChromaDB（纯向量，不含 module/related_modules）
     cb(85, "向量化入库中...")
     doc_id = _safe_doc_id("prod", file_name, module_name)
     db.delete_by_doc_id(doc_id)
     db.add_product_doc_chunks(doc_id, chunks)
     logger.info(f"   [ChromaDB] 入库完成 (doc_id={doc_id})")
 
-    # 5. 写入 SQLite（文档元数据 + 绑定关系 + 术语）
+    # 6. 写入 SQLite（文档元数据 + 绑定关系 + 术语）
     cb(90, "写入业务数据...")
     _save_to_sqlite(
         doc_id=doc_id,
@@ -228,7 +274,6 @@ def process_product_doc(file_path: str, progress_cb=None) -> dict:
         doc_type="product",
         chunk_count=len(chunks),
         module_name=module_name,
-        related_modules=related,
         glossary_terms=terms,
     )
     logger.info(f"   [SQLite] 入库完成")
@@ -237,7 +282,7 @@ def process_product_doc(file_path: str, progress_cb=None) -> dict:
     return {
         "doc_id": doc_id,
         "module_name": module_name,
-        "related_modules": related,
+        "related_modules": related_list,
         "chunks": len(chunks),
     }
 
@@ -485,14 +530,29 @@ def process_axure_zip(file_path: str, module_name: str = None, progress_cb=None)
             logger.warning(f"   ⚠️ Axure 解析后无内容（0 个页面），跳过入库")
             return {"doc_id": "", "module_name": module, "chunks": 0}
 
-        # 估计关联模块（从页面内容的关键词简单判断）
-        cb(70, "分析关联模块...")
+        # LLM 提取关联模块（复用 product_doc_extract_prompt 的语义分析能力）
+        cb(70, "AI 分析关联模块...")
+        graph = ChatTestAgentGraph(db_path=None)
         related = set()
-        for url, detail in page_details.items():
-            text = (detail.get("ui_text", "") or "") + str(detail.get("interactions", []))
-            for mod_keyword in ["管理", "模块", "系统设置", "报表"]:
-                if mod_keyword in text:
-                    related.add(mod_keyword)
+        try:
+            from prompts.extraction_prompts import product_doc_extract_prompt
+            from prompts.response_model import DocModuleExtract
+            prompt = product_doc_extract_prompt()
+            # 取页面详情文本拼接，控制在单批上限内
+            detail_text = "\n".join(
+                f"[{url}] {detail.get('ui_text', '')}"
+                for url, detail in list(page_details.items())[:50]
+            )
+            batch_limit = config.MAX_INGEST_CHARS_PER_BATCH
+            result = graph._invoke_structured(
+                prompt, DocModuleExtract,
+                method="json_mode",
+                doc_text=detail_text[:batch_limit],
+            )
+            related = set(result.related_modules or [])
+            logger.info(f"   => LLM 识别关联模块: {related}")
+        except Exception as e:
+            logger.warning(f"   => 关联模块分析跳过: {e}")
         related.discard(module)
 
         # 写入 ChromaDB（纯向量，不含 module/related_modules）
@@ -511,7 +571,6 @@ def process_axure_zip(file_path: str, module_name: str = None, progress_cb=None)
             doc_type="axure",
             chunk_count=len(chunks),
             module_name=module,
-            related_modules=list(related),
         )
         logger.info(f"   [SQLite] 入库完成")
 
@@ -522,25 +581,19 @@ def process_axure_zip(file_path: str, module_name: str = None, progress_cb=None)
 
 
 if __name__ == "__main__":
-    if len(sys.argv) < 2:
-        logger.info("用法: python ingest_v2.py <文件路径> [--type product|api|axure] [--module 模块名]")
-        sys.exit(1)
+    import argparse
+    parser = argparse.ArgumentParser(description="文档入库工具（CLI）")
+    parser.add_argument("path", help="文档路径")
+    parser.add_argument("--type", choices=["product", "api", "axure"], default="product",
+                        help="文档类型（默认 product）")
+    parser.add_argument("--module", default=None, help="所属模块名（可选）")
+    args = parser.parse_args()
 
-    path = sys.argv[1]
-    doc_type = "product"
-    module = None
-
-    for i, arg in enumerate(sys.argv):
-        if arg == "--type" and i + 1 < len(sys.argv):
-            doc_type = sys.argv[i + 1]
-        if arg == "--module" and i + 1 < len(sys.argv):
-            module = sys.argv[i + 1]
-
-    if doc_type == "api":
-        result = process_api_doc(path, default_module=module)
-    elif doc_type == "axure":
-        result = process_axure_zip(path, module_name=module)
+    if args.type == "api":
+        result = process_api_doc(args.path, default_module=args.module)
+    elif args.type == "axure":
+        result = process_axure_zip(args.path, module_name=args.module)
     else:
-        result = process_product_doc(path)
+        result = process_product_doc(args.path)
 
     logger.info(f"\n结果: {result}")

@@ -1,8 +1,7 @@
-"""Phase C 硬编码模拟数据（A 阶段上线后替换为真实检索结果）。
+"""Phase C Fallback 数据（ChromaDB 无结果时兜底）。
 
-数据结构：
-  MOCK_PRODUCT_DOCS: {模块名: [{module, content, related_modules}]}
-  MOCK_API_DEFS:      {模块名: [{name, url, method, params, returns}]}
+当 DualChromaDB 检索无结果时（如向量库为空），以下数据作为最后的 fallback，
+确保工作流不会因数据缺失而崩溃。正常流程优先使用真实检索结果。
 """
 
 MOCK_PRODUCT_DOCS = {

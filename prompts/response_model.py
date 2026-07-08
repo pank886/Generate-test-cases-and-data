@@ -105,6 +105,14 @@ class TestPointList(BaseModel):
     risk_areas: List[str] = Field(default=[], description="风险点/需重点关注区域名称列表")
 
 
+# --- Phase C 意图确认 ---
+
+class IntentConfirmation(BaseModel):
+    """LLM 模块匹配结果（节点1 意图识别）"""
+    matched_modules: List[str] = Field(description="匹配到的模块名列表，最多3个，按相关性降序")
+    confidence: str = Field(description="置信度: high / medium / low")
+
+
 # --- Phase A 文档提取 ---
 
 class GlossaryExtract(BaseModel):

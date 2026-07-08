@@ -30,9 +30,19 @@ logs/
 # 忽略运行时数据
 uploads/
 *.meta.json
+*.tmp
+*.log
 data/
 testcase_out/
 vector_store/
+
+# 忽略操作系统文件
+.DS_Store
+Thumbs.db
+
+# 忽略 SQLite 运行时文件
+*.db-journal
+*.db-wal
 
 # 忽略构建产物
 *.egg-info/

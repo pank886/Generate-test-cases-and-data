@@ -113,7 +113,7 @@ def validate_py_file(py_path: str) -> ValidationResult:
     # 3. 检查 YAML 路径引用
     for node in ast.walk(tree):
         if isinstance(node, ast.Call):
-            for kw in node.keywords if hasattr(node, 'keywords') else []:
+            for kw in node.keywords:
                 if kw.arg == 'arg' and isinstance(kw.value, ast.Constant):
                     if '.yaml' in str(kw.value.value):
                         path = kw.value.value
