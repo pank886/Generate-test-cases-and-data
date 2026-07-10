@@ -93,8 +93,11 @@ async def get_doc_apis(doc_id: str):
 @router.get("/{doc_id}/glossary")
 async def get_doc_glossary(doc_id: str):
     """获取文档的术语表。"""
+    from database import get_session_ctx
     from agent_components.module_tree import get_glossary_by_doc
-    terms = get_glossary_by_doc(doc_id)
+
+    with get_session_ctx() as session:
+        terms = get_glossary_by_doc(doc_id, session)
     return {"success": True, "terms": terms}
 
 

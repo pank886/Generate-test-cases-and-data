@@ -1,7 +1,6 @@
 """LangGraph 各个节点方法"""
 import json
 import os
-import re
 import threading
 from datetime import datetime
 from typing import Optional, Type
@@ -492,7 +491,7 @@ class ChatTestAgentGraph(RetrievalMixin, GenerationMixin):
         with _factory_methods_lock:
             if _factory_methods_cache is not None:
                 return _factory_methods_cache
-            factory_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data_factory", "methods.yaml")
+            factory_path = os.path.join(config.BASE_DIR, "data_factory", "methods.yaml")
             if not os.path.exists(factory_path):
                 _factory_methods_cache = "（无可用数据工厂方法）"
                 return _factory_methods_cache

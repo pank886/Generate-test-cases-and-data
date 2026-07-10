@@ -7,6 +7,10 @@ from datetime import datetime
 from fastapi import APIRouter, UploadFile, File, Form
 from fastapi.responses import JSONResponse
 
+from observability import get_logger
+
+logger = get_logger(__name__)
+
 router = APIRouter(prefix="/api/upload", tags=["api-extract"])
 
 

@@ -12,11 +12,11 @@ from prompts.response_model import TestPointList, IntentConfirmation, ApiDefinit
 logger = get_logger(__name__)
 
 
-def _mod_exists_in_tree(module_name: str) -> bool:
+def _mod_exists_in_tree(module_name: str, session) -> bool:
     """检查模块名是否在模块树中真实存在。"""
     import agent_components.module_tree as mt
     try:
-        all_modules = mt.get_all()
+        all_modules = mt.get_all(session)
         return any(m.get("name") == module_name for m in all_modules)
     except Exception:
         logger.debug("查询模块树失败，假定模块 [%s] 不存在", module_name, exc_info=True)
@@ -100,7 +100,9 @@ class RetrievalMixin:
 
         # 获取所有模块名
         import agent_components.module_tree as mt
-        all_modules = mt.get_all()
+        from database import get_session_ctx
+        with get_session_ctx() as session:
+            all_modules = mt.get_all(session)
         module_names = [m["name"] for m in all_modules if m.get("name")]
 
         if not module_names:
@@ -258,7 +260,7 @@ class RetrievalMixin:
             _base_mod = config.COMMON_SERVICE_MODULE
             if _base_mod in search_modules:
                 pass  # 已在列表中
-            elif _mod_exists_in_tree(_base_mod):
+            elif _mod_exists_in_tree(_base_mod, session):
                 search_modules.append(_base_mod)
             else:
                 logger.debug("模块 [%s] 不存在，跳过", _base_mod)

@@ -271,10 +271,11 @@ class GenerationMixin:
         total = len(rows)
         logger.info(f"   📋 共需生成 {total} 个 YAML 文件（按 module 分目录），并发 5 个线程")
 
-        from concurrent.futures import ThreadPoolExecutor, as_completed
+        from web.tasks import _BoundedThreadPoolExecutor
+        from concurrent.futures import as_completed
         success = 0
         failed = 0
-        with ThreadPoolExecutor(max_workers=config.YAML_CONCURRENCY) as executor:
+        with _BoundedThreadPoolExecutor(max_workers=config.YAML_CONCURRENCY, max_queue=config.YAML_CONCURRENCY * 2) as executor:
             future_map = {
                 executor.submit(
                     self._generate_one_yaml, row, api_defs_json, user_ctx, row["output_path"]

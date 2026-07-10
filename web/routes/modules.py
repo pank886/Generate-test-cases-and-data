@@ -11,8 +11,11 @@ router = APIRouter(prefix="/api/modules", tags=["modules"])
 @router.get("")
 async def get_modules():
     """获取模块树。"""
+    from database import get_session_ctx
     from agent_components.module_tree import get_tree
-    return {"success": True, "tree": get_tree()}
+
+    with get_session_ctx() as session:
+        return {"success": True, "tree": get_tree(session)}
 
 
 @router.get("/{module_name}/docs")
@@ -64,22 +67,28 @@ async def get_module_related(module_name: str):
 @router.post("")
 async def create_module(data: dict):
     """创建模块。"""
+    from database import get_session_ctx
     from agent_components.module_tree import create
+
     name = data.get("name", "").strip()
     parent_id = data.get("parent_id", "root")
     if not name:
         return JSONResponse(status_code=400,
                             content={"success": False, "message": "模块名不能为空"})
-    module = create(name, parent_id)
+    with get_session_ctx() as session:
+        module = create(name, session, parent_id)
     return {"success": True, "module": module}
 
 
 @router.put("/{module_id}")
 async def update_module(module_id: str, data: dict):
     """更新模块（重命名）。"""
+    from database import get_session_ctx
     from agent_components.module_tree import rename
+
     if "name" in data:
-        ok, msg = rename(module_id, data["name"])
+        with get_session_ctx() as session:
+            ok, msg = rename(module_id, data["name"], session)
         if ok:
             return {"success": True, "message": msg}
         return JSONResponse(status_code=400,
@@ -91,9 +100,12 @@ async def update_module(module_id: str, data: dict):
 @router.delete("/{module_id}")
 async def delete_module(module_id: str):
     """删除模块。"""
+    from database import get_session_ctx
     from agent_components.module_tree import delete
+
     try:
-        delete(module_id)
+        with get_session_ctx() as session:
+            delete(module_id, session)
         return {"success": True, "message": "已删除"}
     except ValueError as e:
         return JSONResponse(status_code=400,
@@ -103,11 +115,14 @@ async def delete_module(module_id: str):
 @router.post("/merge")
 async def merge_modules(data: dict):
     """合并模块。"""
+    from database import get_session_ctx
     from agent_components.module_tree import merge
+
     source = data.get("source_id")
     target = data.get("target_id")
     try:
-        ok, msg = merge(source, target)
+        with get_session_ctx() as session:
+            ok, msg = merge(source, target, session)
         if ok:
             return {"success": True, "message": msg}
         return JSONResponse(status_code=400,
@@ -122,21 +137,27 @@ async def merge_modules(data: dict):
 @router.get("/{module_name}/glossary")
 async def get_glossary(module_name: str):
     """获取模块术语表。"""
+    from database import get_session_ctx
     from agent_components.module_tree import get_glossary
-    return {"success": True, "terms": get_glossary(module_name)}
+
+    with get_session_ctx() as session:
+        return {"success": True, "terms": get_glossary(module_name, session)}
 
 
 @router.post("/{module_name}/glossary")
 async def add_glossary_term(module_name: str, data: dict):
     """添加/更新模块术语。"""
+    from database import get_session_ctx
     from agent_components.module_tree import add_glossary_term
+
     term = data.get("term", "").strip()
     definition = data.get("definition", "").strip()
     notes = data.get("notes", "").strip()
     if not term:
         return JSONResponse(status_code=400,
                             content={"success": False, "message": "术语名不能为空"})
-    ok = add_glossary_term(module_name, term, definition, notes)
+    with get_session_ctx() as session:
+        ok = add_glossary_term(module_name, term, definition, session, notes=notes)
     if ok:
         return {"success": True, "message": f"已保存: {term}"}
     return JSONResponse(status_code=404,
@@ -146,9 +167,12 @@ async def add_glossary_term(module_name: str, data: dict):
 @router.delete("/{module_name}/glossary/{term}")
 async def delete_glossary_term(module_name: str, term: str):
     """删除模块术语。"""
+    from database import get_session_ctx
     from agent_components.module_tree import delete_glossary_term
     from urllib.parse import unquote
-    ok = delete_glossary_term(module_name, unquote(term))
+
+    with get_session_ctx() as session:
+        ok = delete_glossary_term(module_name, unquote(term), session)
     if ok:
         return {"success": True, "message": f"已删除: {term}"}
     return JSONResponse(status_code=404,

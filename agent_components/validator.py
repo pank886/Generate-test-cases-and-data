@@ -9,7 +9,6 @@
 
 import ast
 import os
-import re
 from typing import List, Tuple
 
 
@@ -20,7 +19,6 @@ ValidationResult = Tuple[bool, List[str]]
 # ==================== Excel 校验 ====================
 
 VALID_ENABLED = {"Y", "N"}
-VALID_FIXTURE_PATTERN = re.compile(r'^[a-zA-Z一-鿿]+(?:[,\s][a-zA-Z一-鿿]+)*$')
 EXPECTED_HEADERS = [
     "项目名称", "Allure Epic", "模块名称", "Allure Feature",
     "Allure Story", "fixture等级",
