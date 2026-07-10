@@ -48,7 +48,7 @@ class Module(Base):
     """模块树节点。支持 parent_id 邻接表实现层级。"""
     __tablename__ = "modules"
 
-    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4())[:8])
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     name = Column(String(200), nullable=False, unique=True, index=True)
     parent_id = Column(String(36), ForeignKey("modules.id"), nullable=True)
     path = Column(String(500), default="")

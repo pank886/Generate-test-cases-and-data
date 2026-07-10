@@ -12,6 +12,17 @@ from prompts.response_model import TestPointList, IntentConfirmation, ApiDefinit
 logger = get_logger(__name__)
 
 
+def _mod_exists_in_tree(module_name: str) -> bool:
+    """检查模块名是否在模块树中真实存在。"""
+    import agent_components.module_tree as mt
+    try:
+        all_modules = mt.get_all()
+        return any(m.get("name") == module_name for m in all_modules)
+    except Exception:
+        logger.debug("查询模块树失败，假定模块 [%s] 不存在", module_name, exc_info=True)
+        return False
+
+
 class RetrievalMixin:
     """Phase C 多跳检索 + 测试点分析节点"""
     # ==================== 图外方法（确认后执行） ====================
@@ -45,7 +56,7 @@ class RetrievalMixin:
                     for r in results
                 ]
         except Exception as e:
-            logger.warning(f"   ChromaDB product_docs 检索异常: {e}")
+            logger.warning("ChromaDB product_docs 检索异常: %s", e, exc_info=True)
         return []
 
     def _search_api_defs(self, query: str, doc_ids: list[str] | None = None) -> list[dict]:
@@ -66,13 +77,25 @@ class RetrievalMixin:
                         apis.append(api)
                 return apis
         except Exception as e:
-            logger.warning(f"   ChromaDB api_defs 检索异常: {e}")
+            logger.warning("ChromaDB api_defs 检索异常: %s", e, exc_info=True)
         return []
 
     # ---- 节点 1：意图识别与推荐 ----
 
     def _confirm_user_intent(self, state: State):
-        """纯语义计算：根据用户输入匹配候选模块，不触碰业务数据。"""
+        """纯语义计算：根据用户输入匹配候选模块，不触碰业务数据。
+
+        工作流恢复路径：当 state 已携带 confirmed_module + CONFIRMED 状态时，
+        跳过 LLM 调用直接放行，避免覆盖恢复进度。
+        """
+        # 恢复路径：用户已在前端确认模块 → 跳过意图识别直接放行
+        if state.get("confirmed_module") and state.get("workflow_status") == "CONFIRMED":
+            logger.info("   => 恢复路径: 已确认模块 [%s]，跳过意图识别", state["confirmed_module"])
+            return {
+                "candidate_modules": [state["confirmed_module"]],
+                "workflow_status": "CONFIRMED",
+            }
+
         logger.info("\n🎯 [节点1] 意图识别与模块推荐 ---")
 
         # 获取所有模块名
@@ -139,15 +162,12 @@ class RetrievalMixin:
 
         # Step 1: SQLite 精确过滤
         if confirmed_module:
-            from database import get_session
+            from database import get_session_ctx
             from database.operations import BindingOps
-            session = get_session()
-            try:
+            with get_session_ctx() as session:
                 bound_docs = BindingOps.get_bound_docs(session, confirmed_module)
                 doc_ids = [d.id for d in bound_docs if d.doc_type in ("product", "axure")]
                 logger.info(f"   模块 [{confirmed_module}] 绑定 {len(doc_ids)} 个产品文档")
-            finally:
-                session.close()
 
         # Step 2: ChromaDB 语义检索
         if doc_ids:
@@ -189,10 +209,9 @@ class RetrievalMixin:
         doc_sources = [s for s in doc_sources if s]  # 过滤空
 
         if doc_sources:
-            from database import get_session
+            from database import get_session_ctx
             from database.operations import BindingOps
-            session = get_session()
-            try:
+            with get_session_ctx() as session:
                 results = BindingOps.get_partners_batch(
                     session, "product", doc_sources, partner_type="module",
                 )
@@ -200,8 +219,6 @@ class RetrievalMixin:
                     for _ptype, pname in partners:
                         if pname and pname != confirmed_module:
                             related.add(pname)
-            finally:
-                session.close()
 
         mods = sorted(related)
         logger.info(f"   => 关联模块: {mods if mods else '无'}")
@@ -216,37 +233,98 @@ class RetrievalMixin:
         all_docs: list[dict] = list(state.get("product_docs", []))
         query = state["user_input"]
 
-        # Hop 2a: 检索关联模块的产品文档
-        for mod in modules:
-            extra = self._search_product_docs(query, doc_ids=None)
-            for d in extra:
-                if d not in all_docs:
-                    all_docs.append(d)
-                    logger.info(f"   + 追加文档: {mod}")
+        from database import get_session_ctx
+        from database.operations import BindingOps
+        with get_session_ctx() as session:
+            # Hop 2a: 检索关联模块的产品文档（按模块过滤 doc_id）
+            for mod in modules:
+                bound_docs = BindingOps.get_bound_docs(session, mod)
+                doc_ids = [d.id for d in bound_docs if d.doc_type in ("product", "axure")]
+                if not doc_ids:
+                    continue
+                extra = self._search_product_docs(query, doc_ids=doc_ids)
+                for d in extra:
+                    if d not in all_docs:
+                        all_docs.append(d)
+                        logger.info(f"   + 追加文档: {mod}")
 
-        # Hop 2b: 检索主模块 + 关联模块 + 公共基础服务的接口定义
-        api_defs: list[dict] = []
-        confirmed_module = state.get("confirmed_module", "")
-        search_modules: list[str] = list(dict.fromkeys(
-            [m for m in [confirmed_module] + modules if m]
-        ))
-        search_modules.append("公共基础服务")
+            # Hop 2b: 检索主模块 + 关联模块 + 公共基础服务的接口定义
+            api_defs: list[dict] = []
+            confirmed_module = state.get("confirmed_module", "")
+            search_modules: list[str] = list(dict.fromkeys(
+                [m for m in [confirmed_module] + modules if m]
+            ))
+            # 公共基础服务模块（存在时才加入检索，避免空查和无关干扰）
+            _base_mod = config.COMMON_SERVICE_MODULE
+            if _base_mod in search_modules:
+                pass  # 已在列表中
+            elif _mod_exists_in_tree(_base_mod):
+                search_modules.append(_base_mod)
+            else:
+                logger.debug("模块 [%s] 不存在，跳过", _base_mod)
 
-        for mod in search_modules:
-            apis = self._search_api_defs(query, doc_ids=None)
-            if apis:
-                api_defs.extend(apis)
-                logger.info(f"   + 接口: {mod} ({len(apis)} 个)")
+            for mod in search_modules:
+                bound_docs = BindingOps.get_bound_docs(session, mod)
+                doc_ids = [d.id for d in bound_docs if d.doc_type == "api"]
+                if not doc_ids:
+                    continue
+                apis = self._search_api_defs(query, doc_ids=doc_ids)
+                if apis:
+                    api_defs.extend(apis)
+                    logger.info(f"   + 接口: {mod} ({len(apis)} 个)")
+
+        # 接口去重（同一接口绑定到多个模块时只保留一份）
+        seen_api = {}
+        for a in api_defs:
+            key = f"{a.get('method', '')} {a.get('url', '')}"
+            seen_api.setdefault(key, a)
+        if len(api_defs) != len(seen_api):
+            logger.info(f"   => 接口去重: {len(seen_api)} 个唯一（去重前 {len(api_defs)} 个）")
+            api_defs = list(seen_api.values())
 
         logger.info(f"   => 汇总: {len(all_docs)} 文档片段, {len(api_defs)} 个接口")
         return {"product_docs": all_docs, "api_definitions": api_defs}
 
-    # ---- 节点 5：测试点分析（不变） ----
+    # ---- 节点 5：测试点分析 ----
 
-    def _analyze_test_points(self, state: State):
-        """根据产品文档 + 接口定义分析测试点（thinking 模式）。"""
-        logger.info("\n--- 分析测试点（深度思考）---")
-        prompt = self.prompt_factory.analyze_test_points()
+    def _analyze_test_points_raw(self, state: State):
+        """Phase C — 测试点原始分析（thinking 节点）：输出自由文本分析报告。"""
+        logger.info("\n🧠 分析测试场景（深度思考）...")
+        prompt = self.prompt_factory.analyze_test_points_raw()
+
+        docs_text = "\n\n".join(
+            f"[{d.get('module', d.get('source', '?'))}] {d.get('content', '')}"
+            for d in state.get("product_docs", [])
+        )
+        related_text = ", ".join(state.get("related_modules", [])) or "无"
+        apis_text = "\n".join(
+            f"  - {a.get('name', '?')} ({a.get('method', 'GET')} {a.get('url', '')})"
+            for a in state.get("api_definitions", [])
+        )
+
+        # 显式控制 thinking 开关（bind 方式，invoke 的 **kwargs 会被 LangChain 路由到 RunnableConfig）
+        llm_kwargs = {}
+        if config.ENABLE_THINKING:
+            llm_kwargs["extra_body"] = {"thinking": {"type": "enabled"}}
+        else:
+            llm_kwargs["extra_body"] = {"thinking": {"type": "disabled"}}
+        bound_llm = self.llm.bind(**llm_kwargs)
+        result = bound_llm.invoke(
+            prompt.format_messages(
+                user_context=state["original_input"],
+                product_docs=docs_text,
+                related_docs=related_text,
+                api_definitions=apis_text,
+            ),
+        )
+        analysis = result.content if hasattr(result, "content") else str(result)
+        logger.info(f"   => 测试场景分析完成（{len(analysis)} 字符）")
+        return {"test_point_analysis": analysis}
+
+    def _format_test_points(self, state: State):
+        """Phase C — 格式化测试点为 JSON（thinking off + json_mode）。"""
+        logger.info("\n--- 格式化测试点 ---")
+        prompt = self.prompt_factory.format_test_points()
 
         docs_text = "\n\n".join(
             f"[{d.get('module', d.get('source', '?'))}] {d.get('content', '')}"
@@ -260,11 +338,11 @@ class RetrievalMixin:
 
         result = self._invoke_structured(prompt, TestPointList,
             method="json_mode",
-            thinking=True,
             user_context=state["original_input"],
             product_docs=docs_text,
             related_docs=related_text,
             api_definitions=apis_text,
+            test_point_analysis=state.get("test_point_analysis") or "（无）",
         )
 
         if isinstance(result, list):

@@ -11,6 +11,7 @@
         session.commit()
 """
 
+from collections import deque
 from typing import Optional
 from datetime import datetime, timezone
 
@@ -83,10 +84,11 @@ class DocOps:
 
     @staticmethod
     def delete_document(session: Session, doc_id: str) -> bool:
-        """删除文档（glossary 通过 DB 级联删除，bindings 不自动删除）。"""
+        """删除文档（glossary 通过 DB 级联删除，bindings 显式清理）。"""
         doc = session.get(Document, doc_id)
         if not doc:
             return False
+        BindingOps.delete_bindings_for_doc(session, doc_id)
         session.delete(doc)
         return True
 
@@ -275,9 +277,22 @@ class ModuleOps:
 
     @staticmethod
     def _refresh_paths(session: Session):
-        """刷新所有模块路径。_calc_path 沿 parent 链递归，单轮遍历即可。"""
-        for m in session.query(Module).all():
-            m.path = ModuleOps._calc_path(session, m)
+        """BFS 逐层计算所有模块路径，O(N) 避免递归 O(N×D)。"""
+        # 查找根节点（无 parent 的模块）
+        roots = session.query(Module).filter(Module.parent_id.is_(None)).all()
+        q = deque()
+        for root in roots:
+            root.path = "/" if root.name == "全部模块" else f"/{root.name}"
+            q.append(root)
+
+        while q:
+            parent = q.popleft()
+            base = "" if parent.path == "/" else parent.path
+            for child in session.query(Module).filter(Module.parent_id == parent.id).all():
+                child.path = f"{base}/{child.name}"
+                q.append(child)
+
+        session.flush()
 
     @staticmethod
     def get_descendants(session: Session, module_id: str) -> list[str]:

@@ -5,7 +5,11 @@ ChromaDB 只存 chunk 文本、向量和检索必要的 metadata（doc_id, chunk
 """
 
 import json
+import logging
 import os
+import threading
+
+logger = logging.getLogger(__name__)
 
 from langchain_chroma import Chroma
 from langchain_core.documents import Document
@@ -107,9 +111,12 @@ class DualChromaDB:
     # ---- 通用操作 ----
 
     def delete_by_doc_id(self, doc_id: str):
-        """幂等更新：删除指定文档的所有记录。"""
-        self.product_store.delete(where={"doc_id": doc_id})
-        self.api_store.delete(where={"doc_id": doc_id})
+        """幂等更新：删除指定文档的所有记录。两个 store 独立执行，单侧失败不阻塞另一侧。"""
+        for name, store in (("product_docs", self.product_store), ("api_defs", self.api_store)):
+            try:
+                store.delete(where={"doc_id": doc_id})
+            except Exception:
+                logger.error("ChromaDB %s delete_by_doc_id(%s) 失败", name, doc_id, exc_info=True)
 
     def get_doc_chunks(self, doc_id: str) -> list[dict]:
         """获取文档的所有文本块（供前端查看原文内容）。"""
@@ -134,7 +141,14 @@ class DualChromaDB:
         """全库检索（两集合合并，用于 LLM 上下文构建）。"""
         pd = self.product_store.similarity_search(query, k=k)
         ad = self.api_store.similarity_search(query, k=k)
-        combined = (pd + ad)[:k]
+        # 交错合并，确保两类结果都能被召回
+        combined = []
+        for i in range(max(len(pd), len(ad))):
+            if i < len(pd):
+                combined.append(pd[i])
+            if i < len(ad):
+                combined.append(ad[i])
+        combined = combined[:k]
         if not combined:
             return "未在知识库中找到相关内容。"
         parts = []
@@ -143,25 +157,7 @@ class DualChromaDB:
             parts.append(f"[{src}] {doc.page_content}")
         return "\n\n---\n\n".join(parts)
 
-    # ---- 兼容接口（已废弃，业务逻辑迁移到 SQLite） ----
-
-    def get_module_docs(self, module_name: str) -> list[dict]:
-        """[已废弃] 请使用 BindingOps.get_bound_docs() 替代。"""
-        from database import get_session
-        from database.operations import BindingOps
-        session = get_session()
-        docs = BindingOps.get_bound_docs(session, module_name)
-        session.close()
-        return [
-            {
-                "doc_id": d.id,
-                "module": module_name,
-                "type": d.doc_type,
-                "chunks": d.chunk_count,
-            }
-            for d in docs
-        ]
-
+    # ---- 接口查询 ----
     def get_doc_apis(self, doc_id: str) -> list[dict]:
         """获取指定文档下的所有接口定义。"""
         results = self.api_store.get(where={"doc_id": doc_id})
@@ -176,34 +172,17 @@ class DualChromaDB:
             })
         return apis
 
-    def update_doc_module(self, doc_id: str, new_module: str):
-        """[已废弃] 请使用 ModuleOps.rename_module() + BindingOps 替代。"""
-        pass
-
-    def disassociate_doc(self, doc_id: str):
-        """[已废弃] 请使用 BindingOps.unbind() 替代。"""
-        pass
-
-    def get_unassociated_docs(self) -> list[dict]:
-        """[已废弃] 请使用 DocOps.get_unassociated_docs() 替代。"""
-        from database import get_session
-        from database.operations import DocOps
-        session = get_session()
-        docs = DocOps.get_unassociated_docs(session)
-        session.close()
-        return [
-            {"doc_id": d.id, "module": "", "type": d.doc_type, "chunks": d.chunk_count}
-            for d in docs
-        ]
-
 
 # 模块级单例（避免每次请求都重新连接 Ollama）
 _chroma_instance = None
+_chroma_lock = threading.Lock()
 
 
 def get_chroma_db() -> DualChromaDB:
-    """获取全局 DualChromaDB 单例（惰性初始化，首次调用时连接 Ollama）。"""
+    """获取全局 DualChromaDB 单例（模块级双检锁）。"""
     global _chroma_instance
     if _chroma_instance is None:
-        _chroma_instance = DualChromaDB()
+        with _chroma_lock:
+            if _chroma_instance is None:
+                _chroma_instance = DualChromaDB()
     return _chroma_instance

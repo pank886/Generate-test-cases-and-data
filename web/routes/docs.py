@@ -9,69 +9,59 @@ router = APIRouter(prefix="/api/docs", tags=["docs"])
 @router.get("/unassociated")
 async def get_unassociated_docs():
     """获取所有未关联模块的文档。"""
-    from database import get_session
+    from database import get_session_ctx
     from database.operations import DocOps
 
-    session = get_session()
     try:
-        docs = DocOps.get_unassociated_docs(session)
-        return {"success": True, "docs": [
-            {"doc_id": d.id, "module": "", "type": d.doc_type,
-             "chunks": d.chunk_count, "file_name": d.file_name}
-            for d in docs
-        ]}
+        with get_session_ctx() as session:
+            docs = DocOps.get_unassociated_docs(session)
+            return {"success": True, "docs": [
+                {"doc_id": d.id, "module": "", "type": d.doc_type,
+                 "chunks": d.chunk_count, "file_name": d.file_name}
+                for d in docs
+            ]}
     except Exception as e:
         return JSONResponse(status_code=500,
                             content={"success": False, "message": str(e)})
-    finally:
-        session.close()
 
 
 @router.post("/disassociate")
 async def disassociate_doc(data: dict):
     """解除文档的模块关联。"""
-    from database import get_session
+    from database import get_session_ctx
 
     doc_id = data.get("doc_id", "")
     if not doc_id:
         return JSONResponse(status_code=400,
                             content={"success": False, "message": "缺少 doc_id"})
-    session = get_session()
     try:
-        from web.services.doc_binding import rebind_doc_to_module
-        rebind_doc_to_module(session, doc_id, "")
-        session.commit()
-        return {"success": True, "message": "已解除关联"}
+        with get_session_ctx() as session:
+            from web.services.doc_binding import rebind_doc_to_module
+            rebind_doc_to_module(session, doc_id, "")
+            return {"success": True, "message": "已解除关联"}
     except Exception as e:
-        session.rollback()
         return JSONResponse(status_code=500,
                             content={"success": False, "message": str(e)})
-    finally:
-        session.close()
 
 
 @router.post("/change-module")
 async def change_doc_module(data: dict):
     """将文档迁移到另一个模块。"""
-    from database import get_session
+    from database import get_session_ctx
 
     doc_id = data.get("doc_id", "")
     new_module = data.get("module", "")
     if not doc_id or not new_module:
         return JSONResponse(status_code=400,
                             content={"success": False, "message": "缺少 doc_id 或 module"})
-    session = get_session()
     try:
-        from web.services.doc_binding import rebind_doc_to_module
-        rebind_doc_to_module(session, doc_id, new_module)
-        session.commit()
-        return {"success": True, "message": f"已迁移到 {new_module}"}
+        with get_session_ctx() as session:
+            from web.services.doc_binding import rebind_doc_to_module
+            rebind_doc_to_module(session, doc_id, new_module)
+            return {"success": True, "message": f"已迁移到 {new_module}"}
     except Exception as e:
-        session.rollback()
         return JSONResponse(status_code=500,
                             content={"success": False, "message": str(e)})
-    finally:
-        session.close()
 
 
 @router.get("/{doc_id}/chunks")
@@ -111,7 +101,7 @@ async def get_doc_glossary(doc_id: str):
 @router.post("/{doc_id}/glossary")
 async def add_doc_glossary(doc_id: str, data: dict):
     """添加文档术语（幂等：同名先删后插）。"""
-    from database import get_session
+    from database import get_session_ctx
     from database.operations import GlossaryOps
 
     term = data.get("term", "").strip()
@@ -119,64 +109,54 @@ async def add_doc_glossary(doc_id: str, data: dict):
     if not term:
         return JSONResponse(status_code=400,
                             content={"success": False, "message": "术语名不能为空"})
-    session = get_session()
     try:
-        for t in GlossaryOps.get_terms(session, doc_id):
-            if t.term == term:
-                GlossaryOps.delete_term(session, t.id)
-        GlossaryOps.add_term(session, doc_id, term, definition)
-        session.commit()
-        return {"success": True, "message": f"已保存: {term}"}
+        with get_session_ctx() as session:
+            for t in GlossaryOps.get_terms(session, doc_id):
+                if t.term == term:
+                    GlossaryOps.delete_term(session, t.id)
+            GlossaryOps.add_term(session, doc_id, term, definition)
+            return {"success": True, "message": f"已保存: {term}"}
     except Exception as e:
-        session.rollback()
         return JSONResponse(status_code=500,
                             content={"success": False, "message": str(e)})
-    finally:
-        session.close()
 
 
 @router.delete("/{doc_id}/glossary/{term_id}")
 async def delete_doc_glossary(doc_id: str, term_id: str):
     """删除文档术语。"""
-    from database import get_session
+    from database import get_session_ctx
     from database.operations import GlossaryOps
 
-    session = get_session()
     try:
-        ok = GlossaryOps.delete_term(session, int(term_id))
-        session.commit()
-        return {"success": ok, "message": "已删除" if ok else "术语不存在"}
+        with get_session_ctx() as session:
+            ok = GlossaryOps.delete_term(session, int(term_id))
+            return {"success": ok, "message": "已删除" if ok else "术语不存在"}
     except Exception as e:
-        session.rollback()
         return JSONResponse(status_code=500,
                             content={"success": False, "message": str(e)})
-    finally:
-        session.close()
 
 
 @router.get("/{doc_id}/related-docs")
 async def get_doc_related_docs(doc_id: str):
     """获取文档的关联文档（doc↔doc）。"""
-    from database import get_session
+    from database import get_session_ctx
     from database.operations import BindingOps
     from database.models import Document as DocModel
 
-    session = get_session()
-    try:
+    with get_session_ctx() as session:
         doc = session.get(DocModel, doc_id)
         if not doc:
             return {"success": True, "related": []}
         doc_types = ("product", "api", "axure")
         partners = BindingOps.get_partners(session, doc.doc_type, doc_id)
-        related = []
-        for pt, pi in partners:
-            if pt in doc_types:
-                related_doc = session.get(DocModel, pi)
-                related.append({
-                    "doc_id": pi,
-                    "doc_type": pt,
-                    "file_name": related_doc.file_name if related_doc else pi,
-                })
+        # 批量查询所有关联文档，避免 N+1
+        partner_ids = [pi for pt, pi in partners if pt in doc_types]
+        if partner_ids:
+            docs = {d.id: d for d in session.query(DocModel).filter(DocModel.id.in_(partner_ids)).all()}
+        else:
+            docs = {}
+        related = [
+            {"doc_id": pi, "doc_type": pt, "file_name": docs[pi].file_name if pi in docs else pi}
+            for pt, pi in partners if pt in doc_types
+        ]
         return {"success": True, "related": related}
-    finally:
-        session.close()

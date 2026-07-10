@@ -3,7 +3,10 @@ import sys
 import os
 
 # 强制 UTF-8，防止 Windows 终端 GBK 报错
-sys.stdout.reconfigure(encoding="utf-8")
+try:
+    sys.stdout.reconfigure(encoding="utf-8")
+except (AttributeError, ValueError):
+    pass
 
 # 确保能找到项目根目录
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))

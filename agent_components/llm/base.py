@@ -8,6 +8,8 @@
 各模型特有逻辑在各子类中实现（如 DeepSeek 的 tool_calls 归一化）。
 """
 
+from typing import Optional
+
 from langchain_openai import ChatOpenAI
 
 
@@ -33,7 +35,7 @@ class BaseCompatibleChatOpenAI(ChatOpenAI):
     def _create_chat_result(
         self,
         response: dict,
-        generation_info: dict | None = None,
+        generation_info: Optional[dict] = None,
     ):
         """覆写父类：在标准解析前执行通用防御逻辑。"""
         if isinstance(response, dict):

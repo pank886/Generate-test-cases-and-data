@@ -97,8 +97,19 @@ async def workflow_start(user_input: str = Form(...),
     from agent_components.graph_builder import _make_initial_state
     from web.app import (
         _get_imported_files, _phase_c_graph, _phase_c_components,
+        _vector_ready,
         _workflow_sessions, _workflow_sessions_lock, _cleanup_expired_sessions,
     )
+
+    if not user_input.strip():
+        return JSONResponse(status_code=400,
+                            content={"success": False,
+                                     "message": "请输入需求描述"})
+
+    if not _vector_ready:
+        return JSONResponse(status_code=400,
+                            content={"success": False,
+                                     "message": "向量库未就绪，请检查 Ollama 服务状态"})
 
     files = await _get_imported_files()
     if not files:
@@ -114,7 +125,7 @@ async def workflow_start(user_input: str = Form(...),
     # 清理过期会话
     await _cleanup_expired_sessions()
 
-    session_id = uuid.uuid4().hex[:12]
+    session_id = uuid.uuid4().hex
     initial_state = _make_initial_state(user_input)
 
     import asyncio
@@ -179,7 +190,7 @@ async def workflow_confirm(session_id: str = Form(...),
                                          "message": "会话不存在或已过期，请重新开始对话"})
 
         state = session["state"]
-        del _workflow_sessions[session_id]
+        # 暂不删除 session，待后台任务入列后再清理（防止任务被丢弃后无法重试）
 
     candidates: list[str] = state.get("candidate_modules") or []
 
@@ -232,5 +243,8 @@ async def workflow_confirm(session_id: str = Form(...),
     task_id = await _create_task()
     from web.tasks import _resume_workflow_bg
     background_tasks.add_task(_resume_workflow_bg, task_id, session_id, state)
+    # 任务已入列，可安全清理 session
+    async with _workflow_sessions_lock:
+        _workflow_sessions.pop(session_id, None)
     return {"success": True, "task_id": task_id, "status": "running",
             "message": f"已确认模块 [{confirmed_module}]，正在生成测试计划..."}

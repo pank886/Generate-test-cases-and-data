@@ -1,6 +1,7 @@
 """接口提取相关路由：上传 MD → LLM 提取 → 确认入库。"""
 
 import os
+import uuid
 from datetime import datetime
 
 from fastapi import APIRouter, UploadFile, File, Form
@@ -15,7 +16,13 @@ async def extract_api_doc(file: UploadFile = File(...),
     """上传接口 MD → LLM 提取接口列表 → 返回（不入库）。"""
     import asyncio
     from ingest_v2 import process_api_doc_extract
-    file_path = os.path.join("uploads", "md", file.filename)
+    # Windows 路径上限 260 字符，截断原始文件名防止超长
+    raw_name = os.path.basename(file.filename)
+    if len(raw_name) > 100:
+        name_part, ext = os.path.splitext(raw_name)
+        raw_name = name_part[:100] + ext
+    safe_filename = f"{uuid.uuid4().hex[:8]}_{raw_name}"
+    file_path = os.path.join("uploads", "md", safe_filename)
     os.makedirs(os.path.dirname(file_path), exist_ok=True)
     with open(file_path, "wb") as f:
         f.write(await file.read())
@@ -31,7 +38,7 @@ async def extract_api_doc(file: UploadFile = File(...),
         try:
             os.remove(file_path)
         except Exception:
-            pass
+            logger.warning("清理临时文件失败: %s", file_path, exc_info=True)
         return JSONResponse(status_code=500,
                             content={"success": False, "message": str(e)})
 

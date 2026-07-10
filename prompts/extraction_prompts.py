@@ -34,11 +34,29 @@ def glossary_extract_prompt() -> ChatPromptTemplate:
     ])
 
 
-def generate_data_plan_prompt() -> ChatPromptTemplate:
-    """场景级数据规划 prompt（thinking 节点用）"""
+def analyze_data_deps_prompt() -> ChatPromptTemplate:
+    """数据依赖分析 prompt（thinking 节点用）：输出自由文本分析报告。"""
     return ChatPromptTemplate.from_messages([
         ("system",
-         "你是测试数据架构师。根据【接口定义】和【用例步骤】，规划测试数据。\n\n"
+         "你是测试数据架构师。根据【接口定义】和【用例步骤】，分析测试数据依赖。\n\n"
+         "请分析以下方面（自由文本输出，不要输出 JSON）：\n"
+         "1. **数据覆盖**：正常值、边界值、异常值分别需要哪些数据\n"
+         "2. **数据传递链**：步骤间存在哪些数据依赖（步骤 B 依赖步骤 A 的哪个返回值）\n"
+         "3. **断言策略**：每个接口调用的关键校验点\n"
+         "4. **动态数据**：哪些字段需要使用工厂方法生成\n\n"
+         "分析要详细、具体，后续将基于你的分析生成结构化的数据规划。"),
+        ("human",
+         "### 接口定义\n{api_definitions}\n\n"
+         "### 用例步骤\n{test_case_steps}\n\n"
+         "### 用户意图\n{user_context}\n\n请分析以上场景的数据依赖：")
+    ])
+
+
+def generate_data_plan_prompt() -> ChatPromptTemplate:
+    """场景级数据规划 prompt（format 节点用：thinking off + json_mode）。"""
+    return ChatPromptTemplate.from_messages([
+        ("system",
+         "你是测试数据架构师。根据【接口定义】、【数据分析】和【用例步骤】，生成结构化的测试数据规划。\n\n"
          "### 规划要求\n"
          "1. 数据值覆盖：正常值、边界值、异常值。\n"
          "2. 数据传递：如果步骤 B 依赖步骤 A 的返回值，规划 extract_rules。\n"
@@ -55,6 +73,7 @@ def generate_data_plan_prompt() -> ChatPromptTemplate:
          "- shared_context: 步骤间的数据流转说明\n\n"
          "不包含 Markdown。"),
         ("human",
+         "### 数据分析（供参考）:\n{data_analysis}\n\n"
          "### 接口定义\n{api_definitions}\n\n"
          "### 用例步骤\n{test_case_steps}\n\n"
          "### 用户意图\n{user_context}\n\n请规划测试数据：")

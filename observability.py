@@ -17,6 +17,7 @@ import json
 import logging
 import logging.handlers
 import os
+import re
 import sys
 import uuid
 from contextvars import ContextVar
@@ -41,25 +42,50 @@ def set_trace_id(tid: str) -> None:
 
 
 def generate_trace_id() -> str:
-    """生成新的 trace_id（12 位 hex）。"""
-    return uuid.uuid4().hex[:12]
+    """生成新的 trace_id（32 位 hex，128-bit 熵）。"""
+    return uuid.uuid4().hex
 
 
 # ====== JSON 格式化器 ======
 
+SENSITIVE_PATTERNS = [
+    # API Key / Token / Secret 在 JSON 或 URL 参数中的各种表示
+    (re.compile(r'(api[_-]?key|api[_-]?secret|access[_-]?token|auth[_-]?token)["\'\\s:=]+\S+', re.IGNORECASE),
+     r'\1=***'),
+    # Authorization header
+    (re.compile(r'(Authorization|Bearer)\s+\S+', re.IGNORECASE),
+     r'\1 ***'),
+]
+
+
+def _sanitize(msg: str) -> str:
+    """脱敏日志中的敏感字段（API Key、Token、Secret 等）。"""
+    for pattern, replacement in SENSITIVE_PATTERNS:
+        msg = pattern.sub(replacement, msg)
+    return msg
+
+
+def _safe_get_message(record: logging.LogRecord) -> str:
+    """安全获取日志消息，防止 args 与 format string 不匹配时崩溃。"""
+    try:
+        return record.getMessage()
+    except Exception:
+        return record.msg % {k: f"<unprintable {type(v).__name__}>" for k, v in (record.args or {}).items()} if isinstance(record.args, dict) else str(record.msg)
+
+
 class JSONFormatter(logging.Formatter):
-    """将日志记录格式化为 JSON 行。"""
+    """将日志记录格式化为 JSON 行（自动脱敏敏感字段）。"""
 
     def format(self, record: logging.LogRecord) -> str:
         entry: dict = {
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "level": record.levelname,
             "logger": record.name,
-            "message": record.getMessage(),
+            "message": _sanitize(_safe_get_message(record)),
             "trace_id": getattr(record, "trace_id", "") or "-",
         }
         if record.exc_info and record.exc_info[0]:
-            entry["exception"] = self.formatException(record.exc_info)
+            entry["exception"] = _sanitize(self.formatException(record.exc_info))
         return json.dumps(entry, ensure_ascii=False)
 
 

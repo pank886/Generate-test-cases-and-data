@@ -14,7 +14,9 @@ def rebind_doc_to_module(session, doc_id: str, new_module: str, *,
     - delete-file（部分逻辑，已直接调 _cleanup_doc_to_doc_bindings）
     """
     doc = DocOps.get_document(session, doc_id)
-    doc_type = doc.doc_type if doc else "product"
+    if doc is None:
+        raise ValueError(f"文档不存在: doc_id={doc_id}")
+    doc_type = doc.doc_type
 
     # 1. 清理旧 doc↔doc 级联绑定
     _cleanup_doc_to_doc_bindings(session, doc_id)
@@ -40,4 +42,4 @@ def _cleanup_doc_to_doc_bindings(session, doc_id: str):
         Binding.left_type.in_(doc_types),
         Binding.right_type.in_(doc_types),
         ((Binding.left_id == doc_id) | (Binding.right_id == doc_id)),
-    ).delete(synchronize_session=False)
+    ).delete(synchronize_session='fetch')  # 'fetch' 确保 session 状态与 DB 一致

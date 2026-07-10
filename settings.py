@@ -20,7 +20,7 @@ class Settings(BaseSettings):
 
     # ================================================================
     # 节点: 文件上传 (upload-file)
-    # 影响范围: web_app.py → ingest_v2.py → chromadb_file.py
+    # 影响范围: web_app.py → ingest_v2.py → dual_chroma.py
     # ================================================================
 
     # -- 文本切分参数（影响检索粒度） --
@@ -40,17 +40,9 @@ class Settings(BaseSettings):
     )
 
     # -- 向量库 --
-    vector_store_dir: str = Field(
-        default="./vector_store",
-        description="向量库根目录",
-    )
     chroma_db_dir: str = Field(
         default="./vector_store/chroma_db",
         description="ChromaDB 持久化目录",
-    )
-    chroma_collection: str = Field(
-        default="my_rag_collection",
-        description="默认 Collection 名（旧版单集合流程用）",
     )
     collection_product_docs: str = Field(
         default="product_docs",
@@ -80,6 +72,12 @@ class Settings(BaseSettings):
     retrieval_k: int = Field(
         default=50, ge=1, le=200,
         description="向量检索返回的文本块数量",
+    )
+
+    # -- 通用基础服务模块名（Hop 2b 检索接口定义时追加） --
+    common_service_module: str = Field(
+        default="公共基础服务",
+        description="Hop 2b 中追加检索的通用模块名，不同项目可自定义",
     )
 
     # ================================================================
@@ -136,6 +134,16 @@ class Settings(BaseSettings):
         description="YAML 文件并发生成线程数",
     )
 
+    # -- 后台任务线程池 --
+    task_max_workers: int = Field(
+        default=10, ge=1, le=50,
+        description="后台任务线程池大小",
+    )
+    task_max_queue: int = Field(
+        default=30, ge=1, le=200,
+        description="后台任务队列上限（排队 + 运行 ≤ max_workers + max_queue）",
+    )
+
     # ================================================================
     # 节点: Web 服务 (FastAPI)
     # 影响范围: web_app.py
@@ -143,6 +151,18 @@ class Settings(BaseSettings):
 
     web_host: str = Field(default="0.0.0.0", description="FastAPI 绑定地址")
     web_port: int = Field(default=8000, ge=1, le=65535, description="FastAPI 绑定端口")
+
+    # -- 上传限制 --
+    upload_max_size_mb: int = Field(
+        default=100, ge=1, le=1024,
+        description="单文件上传大小上限（MB）",
+    )
+
+    # -- Phase C 工作流会话超时 --
+    workflow_session_ttl: int = Field(
+        default=1800, ge=60, le=86400,
+        description="Phase C 会话超时时间（秒）。超时后用户需重新开始对话",
+    )
 
     # -- 输出路径 --
     testcase_base: str = Field(

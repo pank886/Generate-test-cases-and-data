@@ -12,7 +12,10 @@
 import sys
 
 # 强制 UTF-8 编码，防止 Windows 终端打印 emoji 时报 GBK 错误
-sys.stdout.reconfigure(encoding="utf-8")
+try:
+    sys.stdout.reconfigure(encoding="utf-8")
+except (AttributeError, ValueError):
+    pass
 
 import config
 from web.app import app, logger

@@ -4,15 +4,11 @@
 所有函数委托给 SQLite 操作，保持签名不变以兼容现有调用方。
 """
 
-import os
 import uuid
 
 from observability import get_logger
 
 logger = get_logger(__name__)
-
-# 保留常量用于 init_db 种子导入
-_MODULE_FILE = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "modules.json")
 
 
 def _get_session():
@@ -22,27 +18,49 @@ def _get_session():
 
 # ==================== 查询 ====================
 
-def get_all() -> list:
-    """获取所有模块列表（扁平）。返回 dict 列表兼容旧格式。"""
+def _get_all_with(session) -> list:
+    """get_all 的核心实现（接受外部 session，不管理 session 生命周期）。"""
     from database.operations import ModuleOps
+    modules = ModuleOps.get_all(session)
+    return [
+        {"id": m.id, "name": m.name, "parent_id": m.parent_id, "path": m.path,
+         "created_at": m.created_at.isoformat() if m.created_at else ""}
+        for m in modules
+    ]
+
+
+def get_all(session=None) -> list:
+    """获取所有模块列表（扁平）。返回 dict 列表兼容旧格式。
+
+    支持外部 session 注入（用于事务组合），无参调用时自动管理 session。
+    """
+    if session is not None:
+        return _get_all_with(session)
+    # 向后兼容：自动创建并关闭 session
     session = _get_session()
     try:
-        modules = ModuleOps.get_all(session)
-        return [
-            {"id": m.id, "name": m.name, "parent_id": m.parent_id, "path": m.path,
-             "created_at": m.created_at.isoformat() if m.created_at else ""}
-            for m in modules
-        ]
+        return _get_all_with(session)
     finally:
         session.close()
 
 
-def get_tree() -> list:
-    """获取树形结构。返回 dict 兼容旧格式。"""
+def _get_tree_with(session) -> list:
+    """get_tree 的核心实现（接受外部 session，不管理 session 生命周期）。"""
     from database.operations import ModuleOps
+    return ModuleOps.get_tree(session)
+
+
+def get_tree(session=None) -> list:
+    """获取树形结构。返回 dict 兼容旧格式。
+
+    支持外部 session 注入（用于事务组合），无参调用时自动管理 session。
+    """
+    if session is not None:
+        return _get_tree_with(session)
+    # 向后兼容：自动创建并关闭 session
     session = _get_session()
     try:
-        return ModuleOps.get_tree(session)
+        return _get_tree_with(session)
     finally:
         session.close()
 
@@ -151,6 +169,7 @@ def delete(module_id: str):
         bound_doc_ids = [d.id for d in bound_docs]
 
         # 2. 解除这些文档之间的所有 doc↔doc 绑定
+        # 注：delete_bindings_between_docs 仅在 doc_ids ≥ 2 时有实际效果（单文档无 doc↔doc 关联）
         BindingOps.delete_bindings_between_docs(session, bound_doc_ids)
 
         # 3. 解除这些文档与模块的 doc↔module 绑定

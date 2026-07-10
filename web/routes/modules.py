@@ -18,50 +18,45 @@ async def get_modules():
 @router.get("/{module_name}/docs")
 async def get_module_docs(module_name: str):
     """获取模块关联的所有文档和接口。"""
-    from database import get_session
+    from database import get_session_ctx
     from database.operations import BindingOps
     from web.app import _chroma_db
 
-    session = get_session()
     try:
-        docs = BindingOps.get_bound_docs(session, module_name)
-        chroma = _chroma_db
-        result = []
-        for d in docs:
-            item = {
-                "doc_id": d.id, "module": module_name,
-                "doc_type": d.doc_type, "type": d.doc_type,
-                "chunks": d.chunk_count, "file_name": d.file_name,
-            }
-            if d.doc_type == "api":
-                apis = chroma.get_doc_apis(d.id)
-                item["api_count"] = len(apis)
-                item["api_names"] = [a["api_name"] for a in apis
-                                     if a.get("api_name")]
-            result.append(item)
-        return {"success": True, "docs": result}
+        with get_session_ctx() as session:
+            docs = BindingOps.get_bound_docs(session, module_name)
+            chroma = _chroma_db
+            result = []
+            for d in docs:
+                item = {
+                    "doc_id": d.id, "module": module_name,
+                    "doc_type": d.doc_type, "type": d.doc_type,
+                    "chunks": d.chunk_count, "file_name": d.file_name,
+                }
+                if d.doc_type == "api":
+                    apis = chroma.get_doc_apis(d.id)
+                    item["api_count"] = len(apis)
+                    item["api_names"] = [a["api_name"] for a in apis
+                                         if a.get("api_name")]
+                result.append(item)
+            return {"success": True, "docs": result}
     except Exception as e:
         return JSONResponse(status_code=500,
                             content={"success": False, "message": str(e)})
-    finally:
-        session.close()
 
 
 @router.get("/{module_name}/related")
 async def get_module_related(module_name: str):
     """获取模块的关联模块（module↔module）。"""
-    from database import get_session
+    from database import get_session_ctx
     from database.operations import BindingOps
 
-    session = get_session()
-    try:
+    with get_session_ctx() as session:
         partners = BindingOps.get_partners(
             session, "module", module_name, "module",
         )
         return {"success": True,
                 "related": [{"name": p[1]} for p in partners]}
-    finally:
-        session.close()
 
 
 # ── 模块 CRUD ──

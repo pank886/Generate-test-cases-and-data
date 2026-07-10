@@ -1,11 +1,15 @@
 """数据层：SQLAlchemy 引擎与会话管理。"""
 import os
+import threading
+from contextlib import contextmanager
 from datetime import datetime
 from sqlalchemy import create_engine, event
 from sqlalchemy.orm import sessionmaker, declarative_base
 
 _ENGINE = None
+_ENGINE_LOCK = threading.Lock()
 _SESSION_LOCAL = None
+_SESSION_LOCK = threading.Lock()
 Base = declarative_base()
 
 DB_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data")
@@ -15,27 +19,46 @@ DB_PATH = os.path.join(DB_DIR, "app.db")
 def get_engine():
     global _ENGINE
     if _ENGINE is None:
-        os.makedirs(DB_DIR, exist_ok=True)
-        _ENGINE = create_engine(
-            f"sqlite:///{DB_PATH}",
-            echo=False,
-            connect_args={"check_same_thread": False},
-        )
-        # 启用 WAL 模式 + 外键约束
-        @event.listens_for(_ENGINE, "connect")
-        def _set_pragma(dbapi_connection, connection_record):
-            cursor = dbapi_connection.cursor()
-            cursor.execute("PRAGMA journal_mode=WAL")
-            cursor.execute("PRAGMA foreign_keys=ON")
-            cursor.close()
+        with _ENGINE_LOCK:
+            if _ENGINE is None:  # 双重检查锁
+                os.makedirs(DB_DIR, exist_ok=True)
+                _ENGINE = create_engine(
+                    f"sqlite:///{DB_PATH}",
+                    echo=False,
+                    connect_args={"check_same_thread": False},
+                )
+                # 启用 WAL 模式 + 外键约束
+                @event.listens_for(_ENGINE, "connect")
+                def _set_pragma(dbapi_connection, connection_record):
+                    cursor = dbapi_connection.cursor()
+                    cursor.execute("PRAGMA journal_mode=WAL")
+                    cursor.execute("PRAGMA wal_autocheckpoint=500")  # 防 Windows WAL 文件无限增长
+                    cursor.execute("PRAGMA foreign_keys=ON")
+                    cursor.close()
     return _ENGINE
 
 
 def get_session():
     global _SESSION_LOCAL
     if _SESSION_LOCAL is None:
-        _SESSION_LOCAL = sessionmaker(bind=get_engine())
+        with _SESSION_LOCK:
+            if _SESSION_LOCAL is None:  # 双重检查锁
+                _SESSION_LOCAL = sessionmaker(bind=get_engine())
     return _SESSION_LOCAL()
+
+
+@contextmanager
+def get_session_ctx():
+    """获取 session 的上下文管理器，自动 commit/rollback/close。"""
+    session = get_session()
+    try:
+        yield session
+        session.commit()
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()
 
 
 def init_db():
@@ -51,8 +74,7 @@ def _seed_from_json_if_empty():
     import json
     from database.models import Module
 
-    session = get_session()
-    try:
+    with get_session_ctx() as session:
         if session.query(Module).count() > 0:
             return  # 已有数据，跳过
 
@@ -87,10 +109,6 @@ def _seed_from_json_if_empty():
                 session.query(Module).filter(Module.id == new_id).update(
                     {"parent_id": id_map[mod["parent_id"]]}
                 )
-
-        session.commit()
-    finally:
-        session.close()
 
 
 def drop_db():

@@ -7,6 +7,7 @@
 """
 
 import json5
+import logging
 import os
 import re
 import shutil
@@ -14,6 +15,8 @@ import tempfile
 import zipfile
 from pathlib import Path
 from urllib.parse import unquote
+
+logger = logging.getLogger(__name__)
 
 
 class AxureParser:
@@ -42,61 +45,64 @@ class AxureParser:
         data.js 只读一次、每页 html_path 只查一次（走缓存），避免 O(N) 次全盘遍历。
         """
         self._tmp_dir = tempfile.mkdtemp(prefix="axure_")
-        with zipfile.ZipFile(self.zip_path, "r") as zf:
-            zf.extractall(self._tmp_dir)
+        try:
+            with zipfile.ZipFile(self.zip_path, "r") as zf:
+                zf.extractall(self._tmp_dir)
 
-        root = Path(self._tmp_dir)
+            root = Path(self._tmp_dir)
 
-        # 提取 sitemap
-        sitemap = self._parse_sitemap(root)
+            # 提取 sitemap
+            sitemap = self._parse_sitemap(root)
 
-        # 如果 sitemap 解析失败（新格式没有 var sitemap = {...}），从 HTML 文件发现页面
-        if not sitemap.get("children"):
-            sitemap = self._discover_pages_from_html(root)
+            # 如果 sitemap 解析失败（新格式没有 var sitemap = {...}），从 HTML 文件发现页面
+            if not sitemap.get("children"):
+                sitemap = self._discover_pages_from_html(root)
 
-        # 提取项目名
-        project_name = sitemap.get("name", os.path.basename(self.zip_path).replace(".zip", ""))
+            # 提取项目名
+            project_name = sitemap.get("name", os.path.basename(self.zip_path).replace(".zip", ""))
 
-        # 判断数据格式：全局 data/data.js（旧格式）还是 files/页面名/data.js（新格式）
-        global_data_js = self._find_data_file(root, "data.js")
-        global_data_js_content = None
-        if global_data_js:
-            global_data_js_content = global_data_js.read_text(encoding="utf-8", errors="replace")
+            # 判断数据格式：全局 data/data.js（旧格式）还是 files/页面名/data.js（新格式）
+            global_data_js = self._find_data_file(root, "data.js")
+            global_data_js_content = None
+            if global_data_js:
+                global_data_js_content = global_data_js.read_text(encoding="utf-8", errors="replace")
 
-        use_per_page_data_js = global_data_js_content is None
+            use_per_page_data_js = global_data_js_content is None
 
-        # 遍历页面，提取 UI 文本和交互
-        page_details = {}
-        all_pages = self._flatten_pages(sitemap.get("children", []))
-        for page in all_pages:
-            url = page["url"]
-            decoded_url = unquote(url)
+            # 遍历页面，提取 UI 文本和交互
+            page_details = {}
+            all_pages = self._flatten_pages(sitemap.get("children", []))
+            for page in all_pages:
+                url = page["url"]
+                decoded_url = unquote(url)
 
-            # 实例方法查找 HTML 路径（自动走 _page_path_cache）
-            html_path = self._find_page_html(root, decoded_url)
+                # 实例方法查找 HTML 路径（自动走 _page_path_cache）
+                html_path = self._find_page_html(root, decoded_url)
 
-            ui_text = self._extract_ui_text_from_html(html_path)
+                ui_text = self._extract_ui_text_from_html(html_path)
 
-            # 新格式：每个页面有独立的 data.js；旧格式：用全局 data.js
-            if use_per_page_data_js:
-                per_page_data = self._find_page_data_js(root, decoded_url)
-            else:
-                per_page_data = global_data_js_content
+                # 新格式：每个页面有独立的 data.js；旧格式：用全局 data.js
+                if use_per_page_data_js:
+                    per_page_data = self._find_page_data_js(root, decoded_url)
+                else:
+                    per_page_data = global_data_js_content
 
-            interactions = self._extract_interactions_for_page(
-                url, decoded_url, per_page_data, html_path
-            )
-            page_details[url] = {
-                "page_name": page["name"],
-                "ui_text": ui_text,
-                "interactions": interactions,
+                interactions = self._extract_interactions_for_page(
+                    url, decoded_url, per_page_data, html_path
+                )
+                page_details[url] = {
+                    "page_name": page["name"],
+                    "ui_text": ui_text,
+                    "interactions": interactions,
+                }
+
+            return {
+                "project_name": project_name,
+                "pages": sitemap.get("children", []),
+                "page_details": page_details,
             }
-
-        return {
-            "project_name": project_name,
-            "pages": sitemap.get("children", []),
-            "page_details": page_details,
-        }
+        finally:
+            self.cleanup()
 
     # ---- Sitemap 解析 ----
 
@@ -118,7 +124,7 @@ class AxureParser:
             if match:
                 return json5.loads(match.group(1))
             return json5.loads(content)
-        except Exception:
+        except (ValueError, json5.Json5Exception):
             return {"name": "Unknown", "children": []}
 
     @staticmethod
@@ -544,6 +550,8 @@ class AxureParser:
             if i not in seen:
                 seen.add(i)
                 ordered.append(i)
+        if len(ordered) > 20:
+            logger.warning("页面交互数 %d > 20，已截断至 20 条", len(ordered))
         return ordered[:20]
 
     # ---- 转产品文档块 ----
@@ -569,6 +577,8 @@ class AxureParser:
 
             chunks.append("\n".join(lines))
 
+        if len(chunks) > 50:
+            logger.warning("页面总数 %d > 50，已截断至 50 页", len(chunks))
         return chunks[:50]
 
     def cleanup(self):

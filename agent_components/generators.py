@@ -10,46 +10,55 @@ from openpyxl import load_workbook
 
 import config
 from observability import get_logger
-from agent_components.state import State
-from prompts.response_model import PyFile, ClassCode
+from prompts.response_model import ClassCode, TestData
 
 logger = get_logger(__name__)
 
 
 class GenerationMixin:
     """PY/YAML 测试文件生成节点"""
-    def _generate_data_plan(self, case_steps: str, api_defs_json: str,
-                            user_ctx: str) -> dict:
-        """场景级数据规划（thinking 模式）：分析数据依赖、提取规则、断言策略。"""
+
+    def _analyze_data_deps(self, case_steps: str, api_defs_json: str,
+                           user_ctx: str) -> str:
+        """数据依赖分析（thinking on，自由文本）。"""
+        from prompts.extraction_prompts import analyze_data_deps_prompt
+
+        logger.info("\n🧠 分析数据依赖（深度思考）...")
+        prompt = analyze_data_deps_prompt()
+        llm_kwargs = {}
+        if config.ENABLE_THINKING:
+            llm_kwargs["extra_body"] = {"thinking": {"type": "enabled"}}
+        else:
+            llm_kwargs["extra_body"] = {"thinking": {"type": "disabled"}}
+        bound_llm = self.llm.bind(**llm_kwargs)
+        result = bound_llm.invoke(prompt.format_messages(
+            api_definitions=api_defs_json,
+            test_case_steps=case_steps,
+            user_context=user_ctx,
+        ))
+        analysis = result.content if hasattr(result, "content") else str(result)
+        logger.info(f"   => 数据依赖分析完成（{len(analysis)} 字符）")
+        return analysis
+
+    def _format_data_plan(self, data_analysis: str, case_steps: str,
+                          api_defs_json: str, user_ctx: str) -> dict:
+        """格式化数据规划（thinking off + json_mode）。"""
         from prompts.extraction_prompts import generate_data_plan_prompt
         from prompts.response_model import DataPlan
 
-        logger.info("\n--- 场景数据规划（深度思考）---")
+        logger.info("\n--- 生成结构化数据规划 ---")
         prompt = generate_data_plan_prompt()
         result = self._invoke_structured(prompt, DataPlan,
             method="json_mode",
-            thinking=True,
+            data_analysis=data_analysis,
             api_definitions=api_defs_json,
             test_case_steps=case_steps,
             user_context=user_ctx,
         )
         if isinstance(result, list):
             result = DataPlan(steps=result, scenario_name="")
-        logger.info(f"   => 规划完成: {len(result.steps)} 步")
+        logger.info(f"   => 数据规划完成: {len(result.steps)} 步")
         return {"data_plan": result.model_dump()}
-
-    @staticmethod
-    def _yaml_to_case_name(yaml_name: str) -> str:
-        """
-        将 YAML 文件名转为测试方法名: carIn_005.yaml → test_CarIn
-        TODO: 后续 Class 分组合理性检查环节可能用到
-        """
-        stem = os.path.splitext(yaml_name)[0]          # carIn_005
-        # 去掉末尾的场景序号 _NNN 或 _YYYYMMDD_NNN
-        stem = re.sub(r'_\d{8}_\d+$', '', stem)         # carIn_20260620_008 → carIn
-        stem = re.sub(r'_\d+$', '', stem)                # carIn_005 → carIn
-        # 首字母大写 + test_ 前缀
-        return "test_" + stem[0].upper() + stem[1:] if stem else "test_Step"
 
     @staticmethod
     def _read_excel_rows(excel_path: str, enabled_only: bool = False) -> list[dict]:
@@ -158,7 +167,7 @@ class GenerationMixin:
             os.remove(tmp_path)
         except OSError:
             pass
-        with open(tmp_path, "w", encoding="utf-8") as f:
+        with open(tmp_path, "w", encoding="utf-8", newline="\r\n") as f:
             f.write(full_content)
         os.replace(tmp_path, py_path)
 
@@ -177,22 +186,24 @@ class GenerationMixin:
     def _generate_one_yaml(self, row: dict, api_defs_json: str, user_ctx: str, output_path: str) -> str:
         """生成单个 YAML 文件写入指定路径（路径由外层循环决定）"""
         prompt = self.prompt_factory.generate_data_node()
-        schema = self.prompt_factory.get_data_schema()
         test_case_logic = f"执行步骤: {row['steps']}"
 
         # 从 data_factory/methods.yaml 读取出可用工厂方法
         factory_methods_text = self._load_factory_methods()
 
         result = self._invoke_structured(prompt, TestData,
-            method="json_mode",
-            json_schema=schema,
+            method="function_calling",
             all_apis_info=api_defs_json,
             user_context=user_ctx,
             test_case_logic=test_case_logic,
             data_factory_methods=factory_methods_text,
         )
 
-        yaml_text = yaml.dump(result.data, allow_unicode=True, indent=2, default_flow_style=False)
+        # Pydantic V2 模型需先转 dict，否则 yaml.dump 输出含 __pydantic_* 内部字段
+        yaml_text = yaml.dump(
+            [step.model_dump(exclude_none=True) for step in result.data],
+            allow_unicode=True, indent=2, default_flow_style=False,
+        )
         os.makedirs(os.path.dirname(output_path), exist_ok=True)
         # 原子写入：先写临时文件再 rename，避免中途崩溃留下半截文件
         tmp_path = output_path + ".tmp"

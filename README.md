@@ -36,20 +36,22 @@ Workflow（运行阶段）
   ├── Hop 2a: 检索关联模块产品文档
   ├── Hop 2b: 检索关联模块 + 公共基础服务接口
   │
-  ├── 测试点分析（thinking + json_mode）
+  ├── 测试点分析（两阶段：thinking 自由文本 → format json_mode）
   │     输出测试点列表 + 风险区域
   │
-  ├── Excel 测试计划（thinking + json_mode）
-  │     ├── Pydantic 校验 ← 自动修复循环 ← 校验节点
+  ├── Excel 测试计划（两阶段：analyze_scenarios → generate_excel_plan）
+  │     ├── 思考阶段（thinking, 自由文本分析场景）
+  │     ├── 格式化阶段（function_calling + Pydantic 模型约束）
+  │     ├── Pydantic 校验 ← 自动修复循环
   │     └── 文件层校验 ← 通过 → 继续
   │         └── 失败 → 重试（最多 3 次）
   │             └── 仍失败 → 标记需人工审查
   │
-  ├── 场景数据规划（thinking + json_mode）
+  ├── 数据规划（两阶段：analyze_data_deps → format_data_plan）
   │     分析数据依赖、提取规则、断言策略
   │
-  ├── YAML 填充（json_mode, 无 thinking）
-  └── .py 文件生成（json_mode, 无 thinking）
+  ├── YAML 填充（function_calling, 无 thinking）
+  └── .py 文件生成（function_calling, 无 thinking）
 ```
 
 ---
@@ -72,18 +74,23 @@ Workflow（运行阶段）
 
 ## 节点与模型策略
 
-| 节点 | method | thinking | 用途 |
+| 节点 | method | thinking | Pydantic 模型 |
 |------|--------|----------|------|
-| 产品文档解析 | json_mode | — | 输入解析 |
-| 测试点分析 | json_mode | ✅ | 跨模块推理 |
-| 场景数据规划 | json_mode | ✅ | 数据依赖链推理 |
-| Excel 计划 | json_mode | ✅ | 测试场景设计 |
-| YAML 填充 | json_mode | — | 机械填入 |
-| .py 生成 | json_mode | — | 代码生成 |
+| 产品文档解析 | json_mode | ❌ | DocModuleExtract |
+| 接口提取 | json_mode | ❌ | ApiDefExtract / ApiDefinitionList |
+| 分析场景（thinking） | free_text | ✅ | 无（自由文本） |
+| 测试点分析（thinking） | free_text | ✅ | 无（自由文本） |
+| 格式化测试点 | json_mode | ❌ | TestPointList |
+| 格式化 Excel 计划 | function_calling | ❌ | ExcelPlan |
+| 场景数据规划 | free_text → function_calling | ✅→❌ | DataPlan |
+| YAML 填充 | function_calling | ❌ | TestData |
+| .py 生成 | function_calling | ❌ | PyFile / ClassCode |
 
-> DeepSeek V4 的 thinking 模式通过 `extra_body` 显式控制：
-> - 需要思考 → `extra_body={"thinking": {"type": "enabled"}}`
-> - 需要 function_calling → `extra_body={"thinking": {"type": "disabled"}}`
+> DeepSeek V4 的 thinking 控制通过声明式 `METHOD_FEATURES` 配置表管理：
+> - `METHOD_FEATURES = {"function_calling": {"supports_thinking": False}, ...}`
+> - `function_calling` / `json_mode` / `json_schema` 均不支持 thinking
+> - `free_text` 支持 thinking（分析节点）
+> - 未知 method 自动禁用 thinking 并记日志警告
 
 ---
 
@@ -117,16 +124,25 @@ pip install -r requirements.txt
 EMBEDDING_MODEL=bge-m3
 EMBEDDING_URL=http://localhost:11434
 
-# ========== DeepSeek API ==========
+# ========== DeepSeek API（推荐） ==========
 DEEP_URL=https://api.deepseek.com
 DEEP_API_KEY=sk-your-key-here
 DEEP_MODEL=deepseek-v4-pro
 
+# ========== 本地 LLM（DeepSeek 未配时自动降级） ==========
+# LLM_MODEL=qwen2.5:14b
+# LANGCHAIN_URL=http://localhost:11434/v1
+
 # ========== 深度思考控制 ==========
 ENABLE_THINKING=true
 
-# ========== 输出路径 ==========
-TESTCASE_BASE=./testcase_out
+# ========== 可选调优 ==========
+# UPLOAD_MAX_SIZE_MB=100
+# TASK_MAX_WORKERS=10
+# TASK_MAX_QUEUE=30
+# WORKFLOW_SESSION_TTL=1800
+# TESTCASE_BASE=./testcase_out
+# LOG_LEVEL=INFO
 ```
 
 ### 启动
@@ -192,7 +208,8 @@ Generate-test-cases-and-data/
 │   ├── module_tree.py             # 模块目录树管理
 │   ├── validator.py               # 只读校验节点
 │   ├── axure_parser.py            # Axure 原型解析器
-│   ├── chromadb_file.py           # 旧版 ChromaDB 客户端
+│   ├── generators.py              # PY/YAML 生成节点
+│   ├── retrievers.py              # 多跳检索节点
 │   └── ...
 │
 ├── prompts/
@@ -200,11 +217,15 @@ Generate-test-cases-and-data/
 │   ├── extraction_prompts.py      # 提取/修复 prompt
 │   └── response_model.py          # Pydantic 模型
 │
+├── docs/
+│   └── fixes_summary.md           # 修复总结报告
+│
 ├── templates/
 │   └── index.html                 # 前端页面
 │
 ├── tests/
-│   └── test_llm_adapter.py        # 适配器单元测试
+│   ├── test_key_flows.py          # 关键流程集成测试
+│   └── test_phase_a_flow.py       # Phase A 完整流程测试
 │
 ├── uploads/                        # 上传文件存储
 │   ├── pdf/
@@ -260,8 +281,14 @@ Pydantic 层校验    ←     自动修复循环
 
 ## 最新变更
 
-- **Phase C** — 多跳检索 + 测试点分析 + Excel 计划生成（thinking 模式）
-- **Phase A** — 双集合存储、LLM 提取模块关联、Axure 解析、Word 支持、业务术语表
-- **Phase B** — 前端审核弹窗、模块目录树、降级警告、时序记忆
-- **适配器** — DeepSeekChatOpenAI 子类，tool_calls 归一化，显式 thinking 控制
-- **校验节点** — 纯 Python 文件层校验 + 自动修复循环 + 人工审查兜底
+详见 `docs/fixes_summary.md`（架构审查修复总结，覆盖 P0~P3 共 50+ 项问题）。
+
+- **P0 — Phase C 工作流恢复断裂** — `_confirm_user_intent` 覆盖 CONFIRMED 状态已修复
+- **P0 — 路径遍历漏洞** — 所有文件上传入口加 basename 清洗 + UUID 前缀
+- **P0 — 向量库数据孤岛** — 废弃 ReadersChromadb，统一使用 DualChromaDB
+- **P0 — DeepSeek thinking 兼容性** — METHOD_FEATURES 声明式配置表 + 自动降级
+- **P1 — 两阶段节点拆分** — analyze_scenarios (thinking) → generate_excel_plan (format)
+- **P1 — API Key 安全** — 模块级变量改为运行时函数，日志加脱敏
+- **P2 — 测试数据 Pydantic 化** — StepData/TestCase 模型，model_validator 字段漂移防御
+- **P2 — Session 统一管理** — `get_session_ctx()` 上下文管理器，22 处调用点迁移
+- **P3 — 全量代码清理** — 删除 4 个废弃方法、2 个废弃类、死代码、未使用导入

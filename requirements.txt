@@ -5,9 +5,7 @@ langchain-chroma>=1.1.0
 langchain-ollama>=1.0.0
 langchain-openai>=1.1.0
 langchain-text-splitters>=1.1.0
-langchain-classic>=1.0.0
 langgraph>=1.0.0
-chromadb>=1.5.0
 
 # ====== LLM / Embedding ======
 openai>=1.0.0
@@ -26,10 +24,10 @@ httpx>=0.28.0
 
 # ====== 配置 ======
 python-dotenv>=1.0.0
-
-# ====== 数据模型 ======
 pydantic>=2.0.0
 pydantic-settings>=2.0.0
+
+# ====== 数据序列化 ======
 pyyaml>=6.0
 openpyxl>=3.1.0
 

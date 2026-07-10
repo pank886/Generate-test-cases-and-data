@@ -7,12 +7,14 @@
     print(config.WEB_PORT)
 """
 
+import os
 from settings import settings
 
+# 项目根目录绝对路径（供文件路径拼接使用，不受运行时 os.chdir() 影响）
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
 # ====== 向量数据库 ======
-VECTOR_STORE_DIR = settings.vector_store_dir
 CHROMA_DB_DIR = settings.chroma_db_dir
-CHROMA_COLLECTION = settings.chroma_collection
 
 # ====== Embedding 模型 ======
 EMBEDDING_MODEL = settings.embedding_model
@@ -20,16 +22,24 @@ EMBEDDING_URL = settings.embedding_url
 
 # ====== LLM 配置 ======
 LLM_MODEL = settings.active_llm_model
-LLM_API_KEY = settings.active_llm_api_key
 LLM_BASE_URL = settings.active_llm_base_url
+
+
+def LLM_API_KEY() -> str:
+    """获取 LLM API Key（运行时读取，避免模块级变量暴露敏感信息）"""
+    return settings.active_llm_api_key
 LLM_TEMPERATURE = settings.llm_temperature
 LLM_PROVIDER = settings.llm_provider
 
 # ====== 线上 LLM（原始值，供直接引用） ======
 DEEP_URL = settings.deep_url
-DEEP_API_KEY = settings.deep_api_key
 DEEP_MODEL = settings.deep_model
 DEEPSEEK_READY = settings.deepseek_ready
+
+
+def DEEP_API_KEY() -> str:
+    """获取 DeepSeek API Key（运行时读取，避免模块级变量暴露敏感信息）"""
+    return settings.deep_api_key
 
 # ====== Phase A 双集合配置 ======
 COLLECTION_PRODUCT_DOCS = settings.collection_product_docs
@@ -47,7 +57,6 @@ WEB_PORT = settings.web_port
 
 # ====== 目标项目路径 ======
 TESTCASE_BASE = settings.testcase_base
-PYCHARM_MISC = settings.testcase_base  # 兼容旧变量名
 
 # ====== 日志 ======
 LOG_DIR = settings.log_dir
@@ -55,7 +64,12 @@ LOG_LEVEL = settings.log_level
 
 # ====== 节点可调参数（供各节点读取，替换硬编码） ======
 RETRIEVAL_K = settings.retrieval_k
+COMMON_SERVICE_MODULE = settings.common_service_module
 MAX_RETRIES = settings.max_retries
 YAML_CONCURRENCY = settings.yaml_concurrency
 EXCEL_REPAIR_ATTEMPTS = settings.excel_repair_attempts
 TASK_TTL_SECONDS = settings.task_ttl_seconds
+TASK_MAX_WORKERS = settings.task_max_workers
+TASK_MAX_QUEUE = settings.task_max_queue
+UPLOAD_MAX_SIZE = settings.upload_max_size_mb * 1024 * 1024
+WORKFLOW_SESSION_TTL = settings.workflow_session_ttl

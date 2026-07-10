@@ -7,6 +7,7 @@
 import asyncio
 import os
 import json as _json
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 
@@ -14,9 +15,24 @@ from observability import set_trace_id, get_logger
 
 logger = get_logger(__name__)
 
-# 自定义线程池，限制最大并发 worker 数，防止线程爆炸
-_MAX_WORKERS = 10
-_executor = ThreadPoolExecutor(max_workers=_MAX_WORKERS)
+
+class _BoundedThreadPoolExecutor(ThreadPoolExecutor):
+    """有界线程池：队列满时 submit 阻塞（默认 LinkedBlockingQueue 会无限制累积）。"""
+
+    def __init__(self, max_workers: int = 10, max_queue: int = 30, **kwargs):
+        super().__init__(max_workers=max_workers, **kwargs)
+        self._sem = threading.BoundedSemaphore(max_queue)
+
+    def submit(self, fn, *args, **kwargs):
+        self._sem.acquire()
+        future = super().submit(fn, *args, **kwargs)
+        future.add_done_callback(lambda _: self._sem.release())
+        return future
+
+
+import config as _config
+_MAX_WORKERS = _config.TASK_MAX_WORKERS
+_executor = _BoundedThreadPoolExecutor(max_workers=_MAX_WORKERS, max_queue=_config.TASK_MAX_QUEUE)
 
 
 # ========================================================================
@@ -69,7 +85,7 @@ async def _process_file_bg(task_id: str, file_path: str, ext: str,
                 try:
                     os.remove(file_path)
                 except Exception:
-                    pass
+                    logger.warning("删除空结果文件失败: %s", file_path, exc_info=True)
                 await _update_task(task_id, status="failed",
                                    error="未提取到接口定义，请检查文档格式。")
                 return
@@ -125,7 +141,7 @@ async def _process_file_bg(task_id: str, file_path: str, ext: str,
             with open(file_path + ".meta.json", "w", encoding="utf-8") as _mf:
                 _json.dump(_meta, _mf, ensure_ascii=False)
         except Exception:
-            pass
+            logger.warning("写入 meta.json 失败: %s", file_path, exc_info=True)
 
         resp = {
             "success": True,
@@ -149,7 +165,7 @@ async def _process_file_bg(task_id: str, file_path: str, ext: str,
             try:
                 os.remove(file_path)
             except Exception:
-                pass
+                logger.warning("清理失败文件失败: %s", file_path, exc_info=True)
 
 
 # ========================================================================

@@ -1,50 +1,53 @@
-# created by virtualenv automatically
-
-# 忽略虚拟环境
+# 虚拟环境
 .venv/
 venv/
 .env
 
-# 忽略 IDE 配置
+# IDE
 .idea/
 .vscode/
 
-# 忽略 Python 编译文件
+# Python 编译
 __pycache__/
 *.pyc
 *.pyo
 *.pyd
 
-# 忽略测试缓存与报告
+# 测试缓存与报告
 .pytest_cache/
 .mypy_cache/
 .coverage
 htmlcov/
 
-# 忽略工作流运行日志
+# 工作流运行日志
 logs/
+*.log
 
-# 忽略 Claude Code 会话工作区
+# Claude Code 会话工作区
 .claude/
 
-# 忽略运行时数据
+# 运行时数据与产物
 uploads/
 *.meta.json
 *.tmp
-*.log
+*.db
+*.db-journal
+*.db-wal
 data/
 testcase_out/
 vector_store/
 
-# 忽略操作系统文件
+# 文档提取临时目录
+_images/
+
+# 操作系统文件
 .DS_Store
 Thumbs.db
 
-# 忽略 SQLite 运行时文件
-*.db-journal
-*.db-wal
-
-# 忽略构建产物
+# 构建产物
 *.egg-info/
 dist/
 build/
+
+# debug日志
+docs/

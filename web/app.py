@@ -51,10 +51,6 @@ _imported_files: dict[str, list[dict]] = {}
 _DEFAULT_USER = "default"
 _state_lock = asyncio.Lock()
 
-# 以下已废弃，保留兼容旧引用的占位，可安全删除
-_last_api_defs = None  # deprecated，改用 task result 传递
-_last_user_input = None  # deprecated，改用 task result 传递
-
 # 后台任务状态追踪 {task_id: {status, progress, message, result, error}}
 _task_store: dict = {}
 _task_store_lock = asyncio.Lock()
@@ -63,7 +59,47 @@ _task_store_lock = asyncio.Lock()
 # {session_id: {"state": dict, "created_at": float, "user_id": str}}
 _workflow_sessions: dict = {}
 _workflow_sessions_lock = asyncio.Lock()
-WORKFLOW_SESSION_TTL = 1800  # 30 分钟超时
+WORKFLOW_SESSION_TTL = config.WORKFLOW_SESSION_TTL
+
+
+# ====== 临时文件定时清理 ======
+
+_TEMP_CLEANUP_INTERVAL = 3600  # 每小时检查一次
+_TEMP_FILE_MAX_AGE = 86400     # 24 小时未修改即视为过期
+
+
+# TODO(多用户): 用 Redis 的 temp_token + 自动过期替代定时扫描清理。
+#   每用户上传 extract-api 时生成临时 token（含 file_path），token TTL=1h 自动过期，
+#   用户 commit/retry 时续期或主动删除，彻底解决"用户关浏览器"场景下的文件残留。
+#   见 web/routes/api_extract.py 中的 extract_api_doc 和 commit_api_endpoint。
+
+
+async def _cleanup_temp_files_loop():
+    """后台定时任务：清理 extract-api 产生的中间 MD 文件（带 UUID 前缀的临时文件）。"""
+    import re
+    import time as _time
+    md_dir = os.path.join(config.BASE_DIR, "uploads", "md")
+    pattern = re.compile(r'^[0-9a-f]{8,32}_')
+    while True:
+        try:
+            await asyncio.sleep(_TEMP_CLEANUP_INTERVAL)
+            if not os.path.isdir(md_dir):
+                continue
+            now = _time.time()
+            for fname in os.listdir(md_dir):
+                if not pattern.match(fname):
+                    continue
+                fpath = os.path.join(md_dir, fname)
+                if not os.path.isfile(fpath):
+                    continue
+                if now - os.path.getmtime(fpath) > _TEMP_FILE_MAX_AGE:
+                    os.remove(fpath)
+                    logger.info("已清理过期临时文件: %s (age=%.1fh)", fname,
+                                (now - os.path.getmtime(fpath)) / 3600)
+        except asyncio.CancelledError:
+            break
+        except Exception:
+            logger.warning("临时文件清理异常", exc_info=True)
 
 
 # ====== 文件列表辅助函数（user-scoped） ======
@@ -124,8 +160,10 @@ class TraceMiddleware:
         async def send_with_trace(message):
             if message["type"] == "http.response.start":
                 headers = list(message.get("headers", []))
-                headers.append((b"x-trace-id", tid.encode()))
-                message["headers"] = headers
+                # 防重复注入：链式中间件可能已追加过 trace_id
+                if not any(k == b"x-trace-id" for k, _ in headers):
+                    headers.append((b"x-trace-id", tid.encode()))
+                    message["headers"] = headers
             await send(message)
 
         await self.app(scope, receive, send_with_trace)
@@ -139,7 +177,7 @@ async def _create_task() -> str:
     import config as _config
     now = datetime.now()
     ttl = _config.TASK_TTL_SECONDS
-    task_id = uuid.uuid4().hex[:12]
+    task_id = uuid.uuid4().hex
     async with _task_store_lock:
         expired = []
         for tid, t in _task_store.items():
@@ -241,8 +279,28 @@ async def lifespan(app: FastAPI):
     # Phase C 工作流（独立 graph 实例，不共享 _chat_func）
     _phase_c_graph, _phase_c_components = build_new_workflow()
 
-    # 4. 扫描 uploads/ 恢复已导入文件列表
+    # 4. 恢复已导入文件列表（SQLite 为主，文件系统为补充）
+    from database import get_session, get_session_ctx
+    from database.operations import DocOps
     ext_to_type = {".pdf": "product", ".docx": "product", ".zip": "axure"}
+    db_files: dict[str, dict] = {}
+    try:
+        with get_session_ctx() as session:
+            for d in DocOps.get_all_documents(session):
+                db_files[d.file_name] = {
+                    "name": d.file_name,
+                    "type": d.doc_type,
+                    "chunks": d.chunk_count or "—",
+                    "time": d.upload_time.strftime("%Y-%m-%d %H:%M:%S")
+                    if d.upload_time else "—",
+                    "doc_id": d.id,
+                    "status": d.status or "",
+                }
+    except Exception:
+        logger.warning("SQLite 查询失败，降级为纯文件扫描", exc_info=True)
+
+    seen_names = set(db_files.keys())
+    # 文件系统补充：仅添加 SQLite 中不存在的文件
     scan_dirs = [
         ("uploads/pdf", ".pdf"),
         ("uploads/docx", ".docx"),
@@ -251,39 +309,40 @@ async def lifespan(app: FastAPI):
         ("uploads/axure", ".zip"),
         ("uploads", ".pdf"),
     ]
-    seen_names = set()
     for scan_dir, ext in scan_dirs:
-        dir_path = Path(scan_dir)
-        if dir_path.exists():
-            files = sorted(dir_path.glob(f"*{ext}"),
-                           key=lambda p: p.stat().st_mtime, reverse=True)
-            for f in files:
-                if f.name in seen_names:
-                    continue
-                seen_names.add(f.name)
-                size_kb = f.stat().st_size / 1024
-                mtime = datetime.fromtimestamp(f.stat().st_mtime).strftime(
-                    "%Y-%m-%d %H:%M:%S")
-                file_type = ext_to_type.get(f.suffix.lower(), "?")
+        dir_path = Path(config.BASE_DIR) / scan_dir
+        if not dir_path.exists():
+            continue
+        for f in sorted(dir_path.glob(f"*{ext}"),
+                        key=lambda p: p.stat().st_mtime, reverse=True):
+            if f.name in seen_names:
+                continue
+            seen_names.add(f.name)
+            size_kb = f.stat().st_size / 1024
+            mtime = "—"
+            chunks = "—"
+            meta_path = str(f) + ".meta.json"
+            if os.path.exists(meta_path):
+                try:
+                    with open(meta_path, "r", encoding="utf-8") as _mf:
+                        _meta = json.load(_mf)
+                    chunks = _meta.get("chunks", "—")
+                    mtime = _meta.get("time", mtime)
+                except Exception:
+                    logger.warning("读取 meta.json 失败: %s", meta_path, exc_info=True)
+            db_files[f.name] = {
+                "name": f.name,
+                "size": f"{size_kb:.1f} KB",
+                "chunks": chunks,
+                "time": mtime,
+                "type": ext_to_type.get(f.suffix.lower(), "?"),
+            }
 
-                chunks = "—"
-                meta_path = str(f) + ".meta.json"
-                if os.path.exists(meta_path):
-                    try:
-                        with open(meta_path, "r", encoding="utf-8") as _mf:
-                            _meta = json.load(_mf)
-                        chunks = _meta.get("chunks", "—")
-                        mtime = _meta.get("time", mtime)
-                    except Exception:
-                        pass
-
-                _imported_files.setdefault(_DEFAULT_USER, []).append({
-                    "name": f.name,
-                    "size": f"{size_kb:.1f} KB",
-                    "chunks": chunks,
-                    "time": mtime,
-                    "type": file_type,
-                })
+    _imported_files[_DEFAULT_USER] = list(db_files.values())
+    logger.info("已恢复 %d 个文件（SQLite %d + 文件补充 %d）",
+                len(db_files),
+                sum(1 for v in db_files.values() if v.get("doc_id")),
+                sum(1 for v in db_files.values() if not v.get("doc_id")))
 
     # 5. 判断向量库是否已就绪
     chroma_path = Path(config.CHROMA_DB_DIR)
@@ -294,9 +353,13 @@ async def lifespan(app: FastAPI):
     else:
         logger.info("   ℹ️ 向量库为空，请上传 API 文档")
 
+    # 6. 启动定时清理临时文件后台任务
+    _cleanup_task = asyncio.create_task(_cleanup_temp_files_loop())
+
     yield
 
     # --- shutdown ---
+    _cleanup_task.cancel()
     from web.tasks import _executor
     _executor.shutdown(wait=True)
 
@@ -333,7 +396,7 @@ async def chrome_devtools_probe():
 @app.post("/update-module")
 async def audit_module(data: dict):
     """审核确认/修改模块关联关系。"""
-    from database import get_session
+    from database import get_session, get_session_ctx
     from database.operations import DocOps
     from web.services.doc_binding import rebind_doc_to_module
 
@@ -343,26 +406,22 @@ async def audit_module(data: dict):
     if not doc_id:
         return JSONResponse(status_code=400,
                             content={"success": False, "message": "缺少 doc_id"})
-    session = get_session()
     try:
-        rebind_doc_to_module(session, doc_id, module_name or "")
-        # 额外关联模块（不同名才绑定）
-        from ingest_v2 import _cascade_bind_to_module_docs
-        doc = DocOps.get_document(session, doc_id)
-        doc_type = doc.doc_type if doc else "product"
-        for rmod in related_modules:
-            if rmod != module_name:
-                from database.operations import BindingOps
-                BindingOps.bind(session, doc_type, doc_id, "module", rmod)
-                _cascade_bind_to_module_docs(session, doc_type, doc_id, rmod)
-        session.commit()
-        return {"success": True, "message": f"模块信息已更新: {module_name}"}
+        with get_session_ctx() as session:
+            rebind_doc_to_module(session, doc_id, module_name or "")
+            # 额外关联模块（不同名才绑定）
+            from ingest_v2 import _cascade_bind_to_module_docs
+            doc = DocOps.get_document(session, doc_id)
+            doc_type = doc.doc_type if doc else "product"
+            for rmod in related_modules:
+                if rmod != module_name:
+                    from database.operations import BindingOps
+                    BindingOps.bind(session, doc_type, doc_id, "module", rmod)
+                    _cascade_bind_to_module_docs(session, doc_type, doc_id, rmod)
+            return {"success": True, "message": f"模块信息已更新: {module_name}"}
     except Exception as e:
-        session.rollback()
         return JSONResponse(status_code=500,
                             content={"success": False, "message": str(e)})
-    finally:
-        session.close()
 
 
 # ----------------------------------------------------------------

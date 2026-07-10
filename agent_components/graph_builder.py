@@ -2,22 +2,18 @@
 from types import SimpleNamespace
 from langgraph.graph import StateGraph, START, END
 
-import config
 from agent_components.state import State
 from agent_components.nodes import ChatTestAgentGraph
 
 
-def build_and_run_agent(db_path: str = None):
+def build_and_run_agent():
     """
     构建并返回智能测试助手的 LangGraph 应用
-
-    Args:
-        db_path: 向量数据库路径，默认使用 config.CHROMA_DB_DIR
 
     Returns:
         chat(user_input: str) -> response_obj
     """
-    components = ChatTestAgentGraph(db_path=db_path or config.CHROMA_DB_DIR)
+    components = ChatTestAgentGraph()
 
     # 构建图
     builder = StateGraph(State)
@@ -25,13 +21,18 @@ def build_and_run_agent(db_path: str = None):
     builder.add_node("retrieve", lambda state: components._retrieve_node(state))
     builder.add_node("parse_api", lambda state: components._parse_api_node(state))
     builder.add_node(
+        "analyze_scenarios",
+        lambda state: components._analyze_scenarios_node(state),
+    )
+    builder.add_node(
         "generate_excel_plan",
         lambda state: components._generate_excel_plan_node(state),
     )
     # 连接节点（PY/YAML 生成在用户确认后执行）
     builder.add_edge(START, "retrieve")
     builder.add_edge("retrieve", "parse_api")
-    builder.add_edge("parse_api", "generate_excel_plan")
+    builder.add_edge("parse_api", "analyze_scenarios")
+    builder.add_edge("analyze_scenarios", "generate_excel_plan")
     builder.add_edge("generate_excel_plan", END)
 
     graph = builder.compile()
@@ -49,16 +50,19 @@ def build_and_run_agent(db_path: str = None):
             "excel_plan": None,
             "excel_path": None,
             "output_dir": None,
+            "scenario_analysis": None,
+            "all_apis_json": None,
         }
         result = graph.invoke(initial_state)
         resp = result.get("response_obj")
-        # 把状态中的额外数据附加到响应对象上
-        if not resp:
+        if resp is None:
             resp = SimpleNamespace()
             plan = result.get("excel_plan")
             case_count = len(plan.rows) if plan and hasattr(plan, "rows") else 0
             resp.proper_thinking = [f"已提取 {len(result.get('api_definition_list', []))} 个接口"]
             resp.final_response = f"Excel 测试计划已生成：共 {case_count} 条用例"
+            resp.requires_review = result.get("requires_review", False)
+            resp.error_info = result.get("error_info", [])
         resp.excel_path = result.get("excel_path")
         resp.excel_plan = result.get("excel_plan")
         resp.api_definition_list = result.get("api_definition_list")
@@ -89,6 +93,7 @@ def _make_initial_state(user_input: str) -> dict:
         "related_modules": None,
         "api_definitions": None,
         "test_points": None,
+        "test_point_analysis": None,
         # Phase C 多轮对话
         "candidate_modules": None,
         "confirmation_question": None,
@@ -96,39 +101,7 @@ def _make_initial_state(user_input: str) -> dict:
         "confirmed_module": None,
     }
 
-
-def _build_result_response(result: dict):
-    """从 graph invoke 结果构建响应对象。"""
-    resp = SimpleNamespace()
-    plan = result.get("excel_plan")
-    case_count = len(plan.rows) if plan and hasattr(plan, "rows") else 0
-    tps = (result.get("test_points") or {}).get("test_points", [])
-    tp_count = len(tps) if isinstance(tps, list) else 0
-    resp.proper_thinking = [f"分析出 {tp_count} 个测试点"]
-
-    if result.get("requires_review"):
-        errs = result.get("error_info", [])
-        resp.final_response = (
-            f"测试分析完成：{tp_count} 个测试点，但 Excel 计划校验失败（需人工审查）。\n"
-            f"错误: {'; '.join('- ' + e for e in errs[:5])}"
-        )
-        if len(errs) > 5:
-            resp.final_response += f"\n... 共 {len(errs)} 个错误"
-    else:
-        resp.final_response = f"测试分析完成：{tp_count} 个测试点, Excel 计划 {case_count} 条用例"
-
-    resp.excel_path = result.get("excel_path")
-    resp.excel_plan = result.get("excel_plan")
-    resp.api_definition_list = result.get("api_definition_list")
-    resp.original_input = result.get("original_input")
-    resp.output_dir = result.get("output_dir")
-    resp.test_points = result.get("test_points")
-    resp.requires_review = result.get("requires_review", False)
-    resp.error_info = result.get("error_info", [])
-    return resp
-
-
-def build_new_workflow(db_path: str = None):
+def build_new_workflow():
     """构建三段式多跳检索工作流（Phase C），支持 LangGraph 条件中断。
 
     工作流结构:
@@ -150,7 +123,9 @@ def build_new_workflow(db_path: str = None):
            ▼
       retrieve_related_data   (节点4)
            ▼
-      analyze_test_points     (节点5)
+      analyze_test_points_raw (节点5a)
+           ▼
+      format_test_points      (节点5b)
            ▼
       bridge_api_defs         (节点6)
            ▼
@@ -158,14 +133,11 @@ def build_new_workflow(db_path: str = None):
            ▼
           END
 
-    Args:
-        db_path: 向量数据库路径
-
     Returns:
         (graph, components) 元组，供 API 层管理多轮会话
     """
     from agent_components.state import State
-    components = ChatTestAgentGraph(db_path=db_path or config.CHROMA_DB_DIR)
+    components = ChatTestAgentGraph()
 
     builder = StateGraph(State)
 
@@ -173,7 +145,8 @@ def build_new_workflow(db_path: str = None):
     builder.add_node("retrieve_product_docs", lambda state: components._retrieve_product_docs(state))
     builder.add_node("extract_related_modules", lambda state: components._extract_related_modules(state))
     builder.add_node("retrieve_related_data", lambda state: components._retrieve_related_data(state))
-    builder.add_node("analyze_test_points", lambda state: components._analyze_test_points(state))
+    builder.add_node("analyze_test_points_raw", lambda state: components._analyze_test_points_raw(state))
+    builder.add_node("format_test_points", lambda state: components._format_test_points(state))
     builder.add_node("bridge_api_defs", lambda state: components._prepare_excel_plan_data(state))
     builder.add_node("generate_excel_plan", lambda state: components._generate_excel_plan_node(state))
 
@@ -199,8 +172,9 @@ def build_new_workflow(db_path: str = None):
         {"no_data": END, "continue": "extract_related_modules"},
     )
     builder.add_edge("extract_related_modules", "retrieve_related_data")
-    builder.add_edge("retrieve_related_data", "analyze_test_points")
-    builder.add_edge("analyze_test_points", "bridge_api_defs")
+    builder.add_edge("retrieve_related_data", "analyze_test_points_raw")
+    builder.add_edge("analyze_test_points_raw", "format_test_points")
+    builder.add_edge("format_test_points", "bridge_api_defs")
     builder.add_edge("bridge_api_defs", "generate_excel_plan")
     builder.add_edge("generate_excel_plan", END)
 

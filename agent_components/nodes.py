@@ -2,6 +2,7 @@
 import json
 import os
 import re
+import threading
 from datetime import datetime
 from typing import Optional, Type
 
@@ -17,7 +18,6 @@ from agent_components.llm.deepseek import DeepSeekChatOpenAI
 
 import config
 from observability import get_logger, get_error_snapshot_logger
-from agent_components.chromadb_file import ReadersChromadb
 from agent_components.dual_chroma import get_chroma_db
 from agent_components.state import State, ApiDefinitionList
 from prompts.response_model import (
@@ -37,6 +37,43 @@ from agent_components.generators import GenerationMixin
 
 logger = get_logger(__name__)
 
+# 方法特性配置表（声明式，集中管理 method 与 thinking 的兼容性）
+METHOD_FEATURES = {
+    "function_calling": {"supports_thinking": False},
+    "json_mode": {"supports_thinking": False},
+    "json_schema": {"supports_thinking": False},
+    "free_text": {"supports_thinking": True},
+}
+
+# 数据工厂方法缓存（文件不变时只读一次磁盘）
+_factory_methods_cache: str | None = None
+_factory_methods_lock = threading.Lock()
+
+# 全局共享的 LLM 客户端单例（避免多个 ChatTestAgentGraph 实例重复创建）
+_llm_instance: Optional[DeepSeekChatOpenAI] = None
+_llm_lock = threading.Lock()
+
+
+def reload_llm():
+    """重置 LLM 单例，下次 _get_llm 调用时使用最新配置重建（支持热重载）。"""
+    global _llm_instance
+    with _llm_lock:
+        _llm_instance = None
+
+
+def _get_llm() -> DeepSeekChatOpenAI:
+    global _llm_instance
+    if _llm_instance is None:
+        with _llm_lock:
+            if _llm_instance is None:  # 双重检查锁，防并发竞态
+                _llm_instance = DeepSeekChatOpenAI(
+                    model=config.LLM_MODEL,
+                    base_url=config.LLM_BASE_URL,
+                    api_key=config.LLM_API_KEY(),
+                    temperature=config.LLM_TEMPERATURE,
+                )
+    return _llm_instance
+
 
 class ChatTestAgentGraph(RetrievalMixin, GenerationMixin):
     """智能测试助手——LangGraph 节点方法的容器类
@@ -46,19 +83,10 @@ class ChatTestAgentGraph(RetrievalMixin, GenerationMixin):
     PY/YAML 生成节点 → GenerationMixin (generators.py)
     """
 
-    def __init__(self, db_path: Optional[str] = None):
-        self.llm = DeepSeekChatOpenAI(
-            model=config.LLM_MODEL,
-            base_url=config.LLM_BASE_URL,
-            api_key=config.LLM_API_KEY,
-            temperature=config.LLM_TEMPERATURE,
-        )
+    def __init__(self):
+        self.llm = _get_llm()
 
         self.prompt_factory = PromptFactory()
-
-        self.vector_store = None
-        if db_path:
-            self.vector_store = ReadersChromadb(persist_directory=db_path)
 
         self.dual_chroma = get_chroma_db()
 
@@ -76,14 +104,14 @@ class ChatTestAgentGraph(RetrievalMixin, GenerationMixin):
         self._run_timestamp = None
 
         logger.info("🔍 [节点] 正在调用外部工具检索...")
-        if not self.vector_store:
-            context = "未检索到知识库"
-        else:
-            # 使用较大的 k 值以覆盖所有接口（每个块 ≈ 一个接口）
-            context = self.vector_store.search_context(
-                user_question_str=state["user_input"],
+        try:
+            context = self.dual_chroma.search_context(
+                query=state["user_input"],
                 k=config.RETRIEVAL_K,
             )
+        except Exception as e:
+            logger.error("ChromaDB 检索失败: %s", e, exc_info=True)
+            context = f"【向量库异常】{e}，请检查 Ollama 服务状态后重试"
         self._log_node_output("retrieve", {"context": context})
         return {"context": context}
 
@@ -92,14 +120,11 @@ class ChatTestAgentGraph(RetrievalMixin, GenerationMixin):
         logger.info("\n正在分析文档，提取接口定义...")
 
         prompt = self.prompt_factory.parse_api_node()
-        chain = prompt | self.llm.with_structured_output(
-            ApiDefinitionList, method="json_mode"
+        result = self._invoke_structured(
+            prompt, ApiDefinitionList, method="json_mode",
+            content=state["context"],
+            user_context=state["original_input"],
         )
-
-        result = chain.invoke({
-            "content": state["context"],
-            "user_context": state["original_input"],
-        })
 
         # json_mode 有时会返回 [{...}] 而非 {"apis": [{...}]}
         if isinstance(result, list):
@@ -116,8 +141,35 @@ class ChatTestAgentGraph(RetrievalMixin, GenerationMixin):
         self._log_node_output("parse_api", {"api_definition_list": api_list})
         return {"api_definition_list": api_list}
 
+    def _analyze_scenarios_node(self, state: State):
+        """场景分析（thinking 节点）：输出自由文本分析报告供 format 节点使用。"""
+        logger.info("\n🧠 正在分析测试场景（深度思考）...")
+        prompt = self.prompt_factory.analyze_scenarios()
+        all_apis_dict = [api.model_dump() for api in state["api_definition_list"]]
+        if not all_apis_dict:
+            logger.warning("接口列表为空，场景分析将无内容")
+        all_apis_json = json.dumps(all_apis_dict, indent=2, ensure_ascii=False)
+
+        # 显式控制 thinking 开关（bind 方式，invoke 的 **kwargs 会被 LangChain 路由到 RunnableConfig）
+        llm_kwargs = {}
+        if config.ENABLE_THINKING:
+            llm_kwargs["extra_body"] = {"thinking": {"type": "enabled"}}
+        else:
+            llm_kwargs["extra_body"] = {"thinking": {"type": "disabled"}}
+        bound_llm = self.llm.bind(**llm_kwargs)
+        result = bound_llm.invoke(
+            prompt.format_messages(
+                all_apis_info=all_apis_json,
+                user_context=state["original_input"],
+            ),
+        )
+        analysis = result.content if hasattr(result, "content") else str(result)
+        logger.info(f"   => 场景分析完成（{len(analysis)} 字符）")
+        self._log_node_output("analyze_scenarios", {"scenario_analysis": analysis[:200]})
+        return {"scenario_analysis": analysis, "all_apis_json": all_apis_json}
+
     def _generate_excel_plan_node(self, state: State):
-        """生成 Excel 测试计划（含自动校验修复循环）"""
+        """生成 Excel 测试计划（format 节点：thinking off + json_mode，含自动校验修复循环）"""
         logger.info("\n📊 正在生成 Excel 测试计划...")
 
         from prompts.extraction_prompts import repair_excel_plan_prompt
@@ -125,8 +177,14 @@ class ChatTestAgentGraph(RetrievalMixin, GenerationMixin):
 
         prompt = self.prompt_factory.generate_excel_plan_node()
         all_apis_dict = [api.model_dump() for api in state["api_definition_list"]]
-        all_apis_json = json.dumps(all_apis_dict, indent=2, ensure_ascii=False)
-        prompt_vars = {"all_apis_info": all_apis_json, "user_context": state["original_input"]}
+        all_apis_json = state.get("all_apis_json")
+        if not all_apis_json:
+            all_apis_json = json.dumps(all_apis_dict, indent=2, ensure_ascii=False)
+        prompt_vars = {
+            "all_apis_info": all_apis_json,
+            "user_context": state["original_input"],
+            "scenario_analysis": state.get("scenario_analysis") or "（无）",
+        }
 
         bad_output_text = ""
         repair_errors = []
@@ -134,10 +192,10 @@ class ChatTestAgentGraph(RetrievalMixin, GenerationMixin):
         for attempt in range(config.EXCEL_REPAIR_ATTEMPTS):
             if attempt == 0:
                 plan = self._invoke_structured(prompt, ExcelPlan,
-                    method="json_mode", thinking=True, **prompt_vars)
+                    method="json_mode", **prompt_vars)
             else:
                 plan = self._invoke_structured(repair_excel_plan_prompt(), ExcelPlan,
-                    method="json_mode", thinking=True,
+                    method="json_mode",
                     original_system=str(prompt), user_vars=str(prompt_vars),
                     bad_output=bad_output_text,
                     repair_errors="\n".join(repair_errors),
@@ -199,13 +257,23 @@ class ChatTestAgentGraph(RetrievalMixin, GenerationMixin):
                 width = max(len(h) + 2, min(max_data + 2, 55))
                 ws.column_dimensions[get_column_letter(ci + 1)].width = width
             wb.save(excel_path)
+            wb.close()
             logger.info(f"   📄 Excel 已保存: {excel_path} ({len(plan.rows)}条/{len(set(r.module_name for r in plan.rows))}模块)")
 
-            # 文件层校验
+            # 文件层校验（Windows 需先 close 释放文件锁）
             file_ok, file_errors = validate_excel_file(excel_path)
             if file_ok:
                 self._log_node_output("generate_excel_plan", {"excel_plan": plan, "excel_path": excel_path, "output_dir": output_dir})
-                return {"excel_plan": plan, "excel_path": excel_path, "output_dir": output_dir}
+                return {
+                    "excel_plan": plan,
+                    "excel_path": excel_path,
+                    "output_dir": output_dir,
+                    "response_obj": ProperResponse(
+                        proper_thinking=[f"已提取 {len(all_apis_dict)} 个接口，分析 {len(plan.rows)} 条用例"],
+                        final_response=f"Excel 测试计划已生成：共 {len(plan.rows)} 条用例",
+                        worth_to_remember=False,
+                    ),
+                }
             else:
                 repair_errors = file_errors
                 bad_output_text = str(plan.model_dump())
@@ -236,6 +304,11 @@ class ChatTestAgentGraph(RetrievalMixin, GenerationMixin):
             "requires_review": True,
             "error_info": repair_errors,
             "output_dir": fallback_dir,
+            "response_obj": ProperResponse(
+                proper_thinking=[f"⚠️ 校验失败（已重试 {config.EXCEL_REPAIR_ATTEMPTS} 次），请人工审查"],
+                final_response="Excel 测试计划生成中遇到校验问题，请查看日志人工审核。",
+                worth_to_remember=True,
+            ),
         }
 
     # ==================== 图外方法（确认后执行） ====================
@@ -312,7 +385,9 @@ class ChatTestAgentGraph(RetrievalMixin, GenerationMixin):
             f"{self._run_timestamp[9:11]}:{self._run_timestamp[11:13]}:{self._run_timestamp[13:15]}",
             "",
         ]
-        node_order = ["retrieve", "parse_api", "generate_excel_plan", "generate_py_file", "generate_all_yamls"]
+        node_order = ["retrieve", "parse_api", "analyze_scenarios", "generate_excel_plan",
+                       "analyze_test_points_raw", "format_test_points",
+                       "generate_py_file", "generate_all_yamls"]
         for nname in node_order:
             if nname not in self._run_data:
                 continue
@@ -409,28 +484,38 @@ class ChatTestAgentGraph(RetrievalMixin, GenerationMixin):
 
     @staticmethod
     def _load_factory_methods() -> str:
-        """从 data_factory/methods.yaml 读取数据工厂方法列表，格式化为提示文本"""
-        factory_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data_factory", "methods.yaml")
-        if not os.path.exists(factory_path):
-            return "（无可用数据工厂方法）"
+        """从 data_factory/methods.yaml 读取数据工厂方法列表（带缓存+双检锁，文件不变时不重复读盘）。"""
+        global _factory_methods_cache
+        if _factory_methods_cache is not None:
+            return _factory_methods_cache
+        # 文件 I/O + 缓存赋值全部在锁内执行，防止双检锁模式下多线程重复读盘
+        with _factory_methods_lock:
+            if _factory_methods_cache is not None:
+                return _factory_methods_cache
+            factory_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data_factory", "methods.yaml")
+            if not os.path.exists(factory_path):
+                _factory_methods_cache = "（无可用数据工厂方法）"
+                return _factory_methods_cache
 
-        import yaml as _yaml
-        with open(factory_path, "r", encoding="utf-8") as f:
-            raw = _yaml.safe_load(f)
+            import yaml as _yaml
+            with open(factory_path, "r", encoding="utf-8") as f:
+                raw = _yaml.safe_load(f)
 
-        methods = raw.get("methods", []) if isinstance(raw, dict) else []
-        if not methods:
-            return "（无可用数据工厂方法）"
+            methods = raw.get("methods", []) if isinstance(raw, dict) else []
+            if not methods:
+                _factory_methods_cache = "（无可用数据工厂方法）"
+                return _factory_methods_cache
 
-        lines = []
-        for m in methods:
-            name = m.get("name", "?")
-            syntax = m.get("syntax", f"${{{name}(...)}}")
-            desc = m.get("description", "")
-            lines.append(f"   - `{syntax}`：{desc}")
-            for tip in m.get("usage_tips", []):
-                lines.append(f"     - {tip}")
-        return "\n".join(lines)
+            lines = []
+            for m in methods:
+                name = m.get("name", "?")
+                syntax = m.get("syntax", f"${{{name}(...)}}")
+                desc = m.get("description", "")
+                lines.append(f"   - `{syntax}`：{desc}")
+                for tip in m.get("usage_tips", []):
+                    lines.append(f"     - {tip}")
+            _factory_methods_cache = "\n".join(lines)
+            return _factory_methods_cache
 
     def _invoke_structured(self, prompt, model_class: Type[BaseModel],
                            max_retries: int = config.MAX_RETRIES,
@@ -444,35 +529,39 @@ class ChatTestAgentGraph(RetrievalMixin, GenerationMixin):
             model_class: Pydantic 模型类
             max_retries: 最大重试次数（默认 2）
             method: 结构化输出方法，可选 "function_calling" / "json_mode" / "json_schema"
-            thinking: 是否使用深度思考模式（仅 method="json_mode" 时生效）
+            thinking: 是否使用深度思考模式（由 METHOD_FEATURES 判定兼容性）
             **kwargs: prompt 模板变量
         """
-        # 显式控制 thinking 开关
-        # DeepSeek V4 默认开启 thinking，function_calling 必须显式禁用
-        # 参考: https://api-docs.deepseek.com/zh-cn/guides/json_mode
+        # 根据 method 特性配置 thinking 开关
+        features = METHOD_FEATURES.get(method)
         llm_kwargs = {}
-        if method == "function_calling":
+        if features is None:
+            logger.warning("未知 method '%s'，使用保守配置（禁用 thinking）", method)
+            llm_kwargs["extra_body"] = {"thinking": {"type": "disabled"}}
+        elif not features["supports_thinking"]:
+            if thinking:
+                logger.warning("%s 不支持 thinking=True，已自动禁用 thinking", method)
             llm_kwargs["extra_body"] = {"thinking": {"type": "disabled"}}
         elif thinking and config.ENABLE_THINKING:
             llm_kwargs["extra_body"] = {"thinking": {"type": "enabled"}}
 
         last_error = None
+        # chain 在重试间不变，只需构建一次
+        chain = prompt | self.llm.with_structured_output(
+            model_class, method=method, **llm_kwargs
+        )
 
         for attempt in range(1 + max_retries):
-            chain = prompt | self.llm.with_structured_output(
-                model_class, method=method, **llm_kwargs
-            )
-
             try:
                 result = chain.invoke(kwargs)
                 if isinstance(result, dict):
                     result = model_class(**result)
                 return result
-            except (ValidationError, ValueError, TypeError, OutputParserException,
+            except (ValidationError, OutputParserException,
                     openai.BadRequestError) as e:
                 last_error = e
                 if attempt < max_retries:
-                    logger.warning(f"   ⚠️ 输出校验失败，第 {attempt + 1} 次重试... ({e})")
+                    logger.warning("输出校验失败，第 %d 次重试: %s", attempt + 1, e, exc_info=True)
 
         raise RuntimeError(
             f"LLM 结构化输出校验失败（已重试 {max_retries} 次）: {last_error}"

@@ -1,5 +1,12 @@
 from langchain_core.prompts import ChatPromptTemplate
 
+# ============================================================
+# 字段 Schema 定义已迁移至 response_model.py
+# LLM 输出结构由 Pydantic 模型 + Function Calling 约束
+# 本文件仅维护 Prompt 文本，不再包含 JSON Schema 字符串
+# 详见 prompts/response_model.py
+# ============================================================
+
 class PromptFactory:
 
     def parse_api_node(self) -> ChatPromptTemplate:
@@ -35,14 +42,12 @@ class PromptFactory:
 
     def generate_data_node(self) -> ChatPromptTemplate:
         """
-        根据 JSON Schema 生成结构化测试数据
+        生成结构化测试数据（由 function_calling 约束输出结构，无需 prompt 内嵌 Schema）
         """
         return ChatPromptTemplate.from_messages([
         ("system",
          "你是资深测试数据构造专家。\n"
-         "根据【接口定义】与【用例逻辑】，严格按下方 JSON Schema 生成测试数据（外层为对象，内含 data 数组）。\n\n"
-         "### JSON Schema\n"
-         "{json_schema}\n\n"
+         "根据【接口定义】与【用例逻辑】，生成测试数据。\n\n"
          "### 映射铁律\n"
          "1. 数据优先级：用例指定值 > 接口示例值 > 智能模拟（数字填0/1，字符串加test_，布尔false）。\n"
          "2. 禁止捏造字段，仅使用接口定义中的字段；类型与枚举必须严格匹配。\n"
@@ -53,11 +58,13 @@ class PromptFactory:
          "     - `${{get_extract_data(key)}}`：取指定 key 的第 0 个值（默认），如 `${{get_extract_data(token)}}`\n"
          "     - `${{get_extract_data(key, randoms=0)}}`：从随机列表取第 0 个，如 `${{get_extract_data(plates, randoms=0)}}`\n"
          "     - `${{get_extract_data(key, sec_node_name)}}`：指定从某接口节点的响应中取值，如 `${{get_extract_data(token, login)}}`\n"
-         "4. 断言规则：每个用例必须配置断言不可为空。断言字段**必须从接口的 `returns` 中实际存在的字段中选择**，不得捏造。增删改用 eq/contains 校验返回的标识字段（如 success、code），查询用 eq/contains 校验结果数据。\n"
+         "4. 断言规则：每个用例必须配置断言不可为空。断言字段**必须从接口的 `returns` 中实际存在的字段中选择**，不得捏造。\n"
+         "   - 格式：`eq: {字段名: 期望值}` 或 `contains: {字段名: 期望值}`，字段名直接写键名（如 success、retCode），**不要用 JSONPath**。\n"
+         "   - 增删改用 eq 校验返回的标识字段（如 `success: true`、`retCode: 0`）。\n"
+         "   - 查询用 eq 或 contains 校验结果数据。\n"
          "5. **数据工厂方法**（在 json 字段值中使用 `${{方法名}}`，运行时自动替换）：\n"
          "{data_factory_methods}\n\n"
          "### 输出要求\n"
-         "直接输出一个 JSON 对象，该对象必须包含一个名为 `data` 的键，其值为符合上述 Schema 的数组。\n"
          "仅输出有实际数据的字段，可选字段为空时不要输出，避免出现空对象或空数组。\n"
          "禁止 Markdown、禁止解释文字。"
         ),
@@ -65,80 +72,38 @@ class PromptFactory:
          "### 接口定义\n{all_apis_info}\n\n"
          "### 用例逻辑\n{test_case_logic}\n\n"
          "### 用户意图\n{user_context}\n\n"
-         "请输出 JSON："
+         "请输出测试数据："
         )
     ])
-
-    @staticmethod
-    def get_data_schema() -> str:
-        """返回测试数据的 JSON Schema 描述"""
-        return """{
-  "type": "object",
-  "properties": {
-    "data": {
-      "type": "array",
-      "items": {
-        "type": "object",
-        "properties": {
-          "baseInfo": {
-            "type": "object",
-            "properties": {
-              "api_name": {"type": "string"},
-              "url": {"type": "string"},
-              "method": {"type": "string", "enum": ["get", "post", "put", "delete", "patch"]},
-              "header": {
-                "type": "object",
-                "properties": {
-                  "Content-Type": {"const": "application/json;charset=UTF-8"}
-                },
-                "additionalProperties": true
-              },
-              "cookies": {"type": "object", "additionalProperties": {"type": "string"}}
-            },
-            "required": ["api_name", "url", "method", "header"]
-          },
-          "testCase": {
-            "type": "array",
-            "items": {
-              "type": "object",
-              "properties": {
-                "case_name": {"type": "string"},
-                "json": {"type": "object"},
-                "data": {"type": "object"},
-                "params": {"type": "object"},
-                "validation": {
-                  "type": "array",
-                  "items": {
-                    "oneOf": [
-                      {"type": "object", "properties": {"eq": {"type": "object"}}, "required": ["eq"]},
-                      {"type": "object", "properties": {"ne": {"type": "object"}}, "required": ["ne"]},
-                      {"type": "object", "properties": {"contains": {"type": "object"}}, "required": ["contains"]},
-                      {"type": "object", "properties": {"db": {"type": "object"}}, "required": ["db"]}
-                    ]
-                  }
-                },
-                "extract_list": {"type": "object", "additionalProperties": {"type": "string"}},
-                "extract": {"type": "object", "additionalProperties": {"type": "string"}},
-                "input_extract": {"type": "object", "additionalProperties": {"type": "string"}}
-              },
-              "required": ["case_name", "json", "validation"]
-            }
-          }
-        },
-        "required": ["baseInfo", "testCase"]
-      }
-    }
-  },
-  "required": ["data"]
-}"""
+    def analyze_scenarios(self) -> ChatPromptTemplate:
+        """
+        Phase A — 场景分析（thinking 节点用）：输出自由文本分析报告。
+        """
+        return ChatPromptTemplate.from_messages([
+            ("system",
+             "你是高级测试设计专家。根据【接口定义】和【用户意图】，分析测试场景。\n\n"
+             "请分析以下方面（自由文本输出，不要输出 JSON）：\n"
+             "1. **场景划分**：根据接口功能划分测试场景，列出每个场景的标题和包含的接口\n"
+             "2. **用例设计思路**：每个场景需要哪些测试用例（边界值、异常、主流程）\n"
+             "3. **数据依赖**：接口间的数据传递关系和依赖顺序\n"
+             "4. **前置条件**：需要哪些前置数据准备\n\n"
+             "分析要全面、详细，后续将基于你的分析生成 Excel 测试计划。"
+            ),
+            ("human",
+             "### 接口定义列表:\n{all_apis_info}\n\n"
+             "### 用户测试意图:\n{user_context}\n\n"
+             "请分析以上接口的测试场景："
+            )
+        ])
 
     def generate_excel_plan_node(self) -> ChatPromptTemplate:
         """
-        生成 Excel 测试计划
+        生成 Excel 测试计划（format 节点用，thinking off + json_mode）。
+        接受 scenario_analysis 作为额外分析上下文。
         """
         return ChatPromptTemplate.from_messages([
         ("system",
-         "你是高级测试设计专家。根据【接口定义】和【用户意图】，生成 Excel 测试计划，严格按以下规则输出 JSON。\n\n"
+         "你是高级测试设计专家。根据【接口定义】、【场景分析】和【用户意图】，生成 Excel 测试计划，严格按以下规则输出 JSON。\n\n"
          "### 核心概念\n"
          "Excel 的每一行 = 一个测试用例（= 一个 def 方法）。\n"
          "多个相同场景的用例（相同的 allure_story + allure_feature + fixture_level）合并在同一个 Class 中。\n"
@@ -173,47 +138,69 @@ class PromptFactory:
          "禁止输出纯数组，禁止解释或 Markdown。"
         ),
         ("human",
+         "### 场景分析（供参考）:\n{scenario_analysis}\n\n"
          "### 接口定义列表:\n{all_apis_info}\n\n"
          "### 用户测试意图:\n{user_context}\n\n"
          "请根据以上信息，设计完整的测试计划："
         )
     ])
 
-    def analyze_test_points(self) -> ChatPromptTemplate:
+    def analyze_test_points_raw(self) -> ChatPromptTemplate:
         """
-        分析测试点（thinking 节点用）
+        Phase C — 测试点原始分析（thinking 节点用）：输出自由文本分析报告。
         """
         return ChatPromptTemplate.from_messages([
-        ("system",
-         "你是一位资深测试架构师。\n"
-         "根据【产品文档】和【接口定义】，分析测试点。\n\n"
-         "### 分析要求\n"
-         "1. **覆盖度**：覆盖产品文档中描述的所有功能模块和业务场景。\n"
-         "2. **关联追溯**：注意产品文档中提到的跨模块依赖关系，涉及其他模块的功能也要纳入测试范围。\n"
-         "3. **分层**：\n"
-         "   - P0：核心业务流程（Happy Path）\n"
-         "   - P1：重要功能分支\n"
-         "   - P2：边界条件和异常场景\n"
-         "   - P3：兼容性和体验类\n"
-         "4. **测试类型**：明确标注每个测试点的类型（功能/边界/异常/兼容）。\n"
-         "5. **风险标注**：识别业务复杂、依赖多、改动频繁的区域作为风险点。\n\n"
-         "### 输出 JSON 字段要求（严格遵循）\n"
-         "输出格式：\n"
-         "- project_name: 字符串\n"
-         "- summary: 字符串\n"
-         "- test_points: 数组，每个元素含 module, scenario, description, priority (P0/P1/P2/P3), test_type (功能/边界/异常/兼容), related_requirement (可选), risk (true/false)\n"
-         "- risk_areas: 字符串数组，每个元素为一个风险点名称\n"
-         "每个 test_point 都必须包含以上所有字段，禁止使用 id 字段。\n"
-         "禁止输出 Markdown、禁止解释文字。"
-        ),
-        ("human",
-         "### 用户需求\n{user_context}\n\n"
-         "### 产品文档片段\n{product_docs}\n\n"
-         "### 关联模块产品文档\n{related_docs}\n\n"
-         "### 接口定义\n{api_definitions}\n\n"
-         "请根据以上信息，分析测试点："
-        )
-    ])
+            ("system",
+             "你是一位资深测试架构师。\n"
+             "根据【产品文档】和【接口定义】，深入分析测试场景。\n\n"
+             "### 分析要求\n"
+             "1. **覆盖度**：覆盖产品文档中描述的所有功能模块和业务场景。\n"
+             "2. **关联追溯**：注意产品文档中提到的跨模块依赖关系，涉及其他模块的功能也要纳入测试范围。\n"
+             "3. **分层**：\n"
+             "   - P0：核心业务流程（Happy Path）\n"
+             "   - P1：重要功能分支\n"
+             "   - P2：边界条件和异常场景\n"
+             "   - P3：兼容性和体验类\n"
+             "4. **测试类型**：明确标注每个测试点的类型（功能/边界/异常/兼容）。\n"
+             "5. **风险标注**：识别业务复杂、依赖多、改动频繁的区域作为风险点。\n\n"
+             "请输出**自由文本分析报告**，不要输出 JSON。后续将基于你的分析生成结构化的测试点列表。"
+            ),
+            ("human",
+             "### 用户需求\n{user_context}\n\n"
+             "### 产品文档片段\n{product_docs}\n\n"
+             "### 关联模块产品文档\n{related_docs}\n\n"
+             "### 接口定义\n{api_definitions}\n\n"
+             "请分析以上信息的测试场景："
+            )
+        ])
+
+    def format_test_points(self) -> ChatPromptTemplate:
+        """
+        Phase C — 格式化测试点为 JSON（thinking off + json_mode）。
+        接受 test_point_analysis 作为分析上下文。
+        """
+        return ChatPromptTemplate.from_messages([
+            ("system",
+             "你是一位资深测试架构师。\n"
+             "根据【产品文档】、【测试分析】和【接口定义】，生成结构化的测试点列表。\n\n"
+             "### 输出 JSON 字段要求（严格遵循）\n"
+             "输出格式：\n"
+             "- project_name: 字符串\n"
+             "- summary: 字符串\n"
+             "- test_points: 数组，每个元素含 module, scenario, description, priority (P0/P1/P2/P3), test_type (功能/边界/异常/兼容), related_requirement (可选), risk (true/false)\n"
+             "- risk_areas: 字符串数组，每个元素为一个风险点名称\n"
+             "每个 test_point 都必须包含以上所有字段，禁止使用 id 字段。\n"
+             "禁止输出 Markdown、禁止解释文字。"
+            ),
+            ("human",
+             "### 测试分析（供参考）:\n{test_point_analysis}\n\n"
+             "### 用户需求\n{user_context}\n\n"
+             "### 产品文档片段\n{product_docs}\n\n"
+             "### 关联模块产品文档\n{related_docs}\n\n"
+             "### 接口定义\n{api_definitions}\n\n"
+             "请根据以上信息，生成结构化的测试点列表："
+            )
+        ])
 
     def confirm_user_intent(self) -> ChatPromptTemplate:
         """Phase C 节点1：根据用户输入匹配候选模块名。"""
