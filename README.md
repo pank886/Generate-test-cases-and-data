@@ -64,11 +64,13 @@ Workflow（运行阶段）
 - **多跳检索（Multi-hop）** — 根据模块依赖关系自动追溯关联文档和接口定义
 - **测试点分析** — 深度思考模式分析业务场景，输出测试点和风险区域
 - **Excel 测试计划** — 生成含 Allure 标签、模块划分、步骤描述的标准化测试计划
-- **自动校验修复** — 文件层校验 + 自动修复循环 + 人工审查兜底
+- **自动校验修复** — Pydantic + 文件层双重校验 + 自动修复循环（最多 3 次）+ 人工审查兜底
 - **Python 测试脚本** — 生成 pytest + allure 测试类代码
 - **YAML 测试数据** — 结构化的请求/响应测试数据
 - **模块目录树** — 支持模块的增删改查、重命名级联更新向量库
 - **业务术语表** — LLM 提取产品文档术语，减少字段名/状态值幻觉
+- **Web + CLI 双模式** — FastAPI Web 界面 + 命令行交互式 REPL
+- **结构化日志** — JSON 格式日志 + ContextVar trace_id 全链路追踪
 
 ---
 
@@ -191,50 +193,84 @@ python web_app.py
 
 ```
 Generate-test-cases-and-data/
-├── config.py                       # 配置管理
-├── web_app.py                      # Web 服务 (FastAPI)
-├── ingest_file.py                  # 旧版文件摄取
+├── config.py                       # 配置兼容层（代理 settings.py）
+├── settings.py                     # Pydantic Settings 配置中心
+├── web_app.py                      # Web 服务入口（Uvicorn）
+├── main.py                         # CLI 交互式入口
 ├── ingest_v2.py                    # Phase A 智能摄取入口
+├── observability.py                # 结构化 JSON 日志
 ├── requirements.txt
 │
-├── agent_components/
+├── web/                            # FastAPI Web 应用包
+│   ├── app.py                      # 应用工厂 + 生命周期管理
+│   ├── tasks.py                    # 后台异步任务线程池
+│   ├── routes/
+│   │   ├── api_extract.py          # 接口提取 API
+│   │   ├── bindings.py             # 文档关联绑定
+│   │   ├── chat.py                 # 对话 / 工作流
+│   │   ├── docs.py                 # 文档管理
+│   │   ├── files.py                # 文件上传 / 删除
+│   │   └── modules.py              # 模块树管理
+│   └── services/
+│       └── doc_binding.py          # 文档绑定业务逻辑
+│
+├── agent_components/               # AI 代理核心组件
 │   ├── llm/
 │   │   ├── base.py                 # BaseCompatibleChatOpenAI
 │   │   └── deepseek.py             # DeepSeekChatOpenAI 适配器
 │   ├── nodes.py                    # LangGraph 节点方法
 │   ├── graph_builder.py            # 工作流图构建
 │   ├── state.py                    # 状态定义
-│   ├── dual_chroma.py             # DualChromaDB 双集合封装
-│   ├── module_tree.py             # 模块目录树管理
-│   ├── validator.py               # 只读校验节点
-│   ├── axure_parser.py            # Axure 原型解析器
-│   ├── generators.py              # PY/YAML 生成节点
-│   ├── retrievers.py              # 多跳检索节点
-│   └── ...
+│   ├── dual_chroma.py              # DualChromaDB 双集合封装
+│   ├── module_tree.py              # 模块目录树管理
+│   ├── validator.py                # 只读校验节点
+│   ├── axure_parser.py             # Axure 原型解析器
+│   ├── generators.py               # PY/YAML 生成节点
+│   └── retrievers.py               # 多跳检索节点
+│
+├── database/                       # SQLAlchemy ORM 层
+│   ├── models.py                   # 数据模型定义
+│   ├── operations.py               # CRUD 操作封装
+│   └── init_db.py                  # 数据库初始化脚本
 │
 ├── prompts/
-│   ├── definitions.py             # PromptFactory
-│   ├── extraction_prompts.py      # 提取/修复 prompt
-│   └── response_model.py          # Pydantic 模型
+│   ├── definitions.py              # PromptFactory
+│   ├── extraction_prompts.py       # 提取/修复 prompt
+│   └── response_model.py           # Pydantic 响应模型
 │
-├── docs/
-│   └── fixes_summary.md           # 修复总结报告
+├── data_factory/                   # 测试数据工厂
+│   ├── mock_data.py                # Mock 数据生成
+│   └── methods.yaml                # HTTP 方法配置
+│
+├── static/
+│   ├── app.js                      # 前端主逻辑
+│   └── style.css                   # 前端样式
 │
 ├── templates/
-│   └── index.html                 # 前端页面
+│   └── index.html                  # Jinja2 前端页面
 │
-├── tests/
-│   ├── test_key_flows.py          # 关键流程集成测试
-│   └── test_phase_a_flow.py       # Phase A 完整流程测试
+├── docs/                           # 内部文档
+│   ├── RULES_INDEX.md              # 规则索引
+│   ├── RULES_DETAIL.md             # 规则详情
+│   └── fixes_summary.md            # 架构修复总结报告
 │
-├── uploads/                        # 上传文件存储
-│   ├── pdf/
-│   ├── md/
-│   ├── docx/
-│   └── axure/
+├── tests/                          # Pytest 测试套件
+│   ├── conftest.py                 # 共享 fixtures
+│   ├── test_ingest_main_flow.py    # 主摄取流程集成测试
+│   ├── test_workflow_api.py        # 工作流 API 测试
+│   ├── test_workflow_init.py       # 工作流初始化测试
+│   ├── test_commit_api.py          # 提交 API 测试
+│   ├── test_delete_file.py         # 文件删除测试
+│   ├── test_doc_binding.py         # 文档绑定测试
+│   ├── test_key_flows.py           # 关键流程集成测试
+│   ├── test_phase_a_flow.py        # Phase A 完整流程测试
+│   └── test_llm_adapter.py         # LLM 适配器单元测试
 │
-└── data/
-    └── modules.json                # 模块树数据
+├── uploads/                        # 上传文件存储（gitignored）
+├── data/                           # 运行时数据（gitignored）
+│   └── modules.json                # 模块树持久化
+├── testcase_out/                   # 生成产物输出（gitignored）
+└── vector_store/                   # ChromaDB 向量库（gitignored）
 ```
 
 ---
@@ -244,15 +280,18 @@ Generate-test-cases-and-data/
 | 组件 | 技术 |
 |------|------|
 | Web 框架 | FastAPI + Uvicorn |
-| 前端 | Jinja2 + 原生 JavaScript |
+| 前端 | Jinja2 + 原生 JavaScript + CSS |
 | 工作流引擎 | LangGraph |
-| 向量数据库 | ChromaDB（双集合隔离） |
+| 向量数据库 | ChromaDB（双集合隔离：product_docs / api_defs） |
+| ORM | SQLAlchemy（SQLite） |
 | 嵌入模型 | bge-m3 (Ollama) |
-| LLM | DeepSeek V4 Pro |
-| 文档解析 | PyPDF / python-docx / BeautifulSoup |
-| 数据模型 | Pydantic |
+| LLM | DeepSeek V4 Pro（兼容 OpenAI 协议） |
+| 文档解析 | PyPDF / python-docx / BeautifulSoup / json5 |
+| 数据模型 | Pydantic v2（含 model_validator 防御性校验） |
 | Excel 处理 | openpyxl |
 | YAML 生成 | PyYAML |
+| 日志 | 结构化 JSON（ContextVar trace_id 追踪） |
+| 配置 | pydantic-settings (.env) |
 
 ---
 
@@ -281,14 +320,17 @@ Pydantic 层校验    ←     自动修复循环
 
 ## 最新变更
 
-详见 `docs/fixes_summary.md`（架构审查修复总结，覆盖 P0~P3 共 50+ 项问题）。
+详见 `docs/fixes_summary.md`（2026-07-10 架构审查修复总结，覆盖 P0~P3 共 50+ 项问题）。
 
 - **P0 — Phase C 工作流恢复断裂** — `_confirm_user_intent` 覆盖 CONFIRMED 状态已修复
 - **P0 — 路径遍历漏洞** — 所有文件上传入口加 basename 清洗 + UUID 前缀
-- **P0 — 向量库数据孤岛** — 废弃 ReadersChromadb，统一使用 DualChromaDB
+- **P0 — 向量库数据孤岛** — 废弃 ReadersChroma，统一使用 DualChromaDB
 - **P0 — DeepSeek thinking 兼容性** — METHOD_FEATURES 声明式配置表 + 自动降级
+- **P0 — API Key 脱敏** — 日志/序列化节点自动过滤 sk- 前缀的敏感字段
 - **P1 — 两阶段节点拆分** — analyze_scenarios (thinking) → generate_excel_plan (format)
-- **P1 — API Key 安全** — 模块级变量改为运行时函数，日志加脱敏
+- **P1 — 线程池** — ThreadPoolExecutor 统一管理后台异步任务
 - **P2 — 测试数据 Pydantic 化** — StepData/TestCase 模型，model_validator 字段漂移防御
 - **P2 — Session 统一管理** — `get_session_ctx()` 上下文管理器，22 处调用点迁移
-- **P3 — 全量代码清理** — 删除 4 个废弃方法、2 个废弃类、死代码、未使用导入
+- **P3 — 全量代码清理** — 删除废弃方法/类、死代码、未使用导入
+- **Web 模块化** — FastAPI 路由拆分到 `web/routes/`，服务逻辑抽取到 `web/services/`
+- **数据库 ORM** — SQLAlchemy 模型 + 操作层封装 `database/`

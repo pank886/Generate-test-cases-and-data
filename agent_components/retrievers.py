@@ -113,17 +113,21 @@ class RetrievalMixin:
                 "workflow_status": "WAITING",
             }
 
-        # LLM 语义匹配
+        # LLM 语义匹配（解析失败时降级为"未匹配"，不抛 500 中断流程）
         prompt = self.prompt_factory.confirm_user_intent()
-        result = self._invoke_structured(
-            prompt, IntentConfirmation,
-            method="json_mode", thinking=False,
-            user_input=state["user_input"],
-            module_list="\n".join(f"- {n}" for n in module_names),
-        )
-
-        candidates = result.matched_modules if result else []
-        confidence = result.confidence if result else "low"
+        try:
+            result = self._invoke_structured(
+                prompt, IntentConfirmation,
+                method="json_mode", thinking=False,
+                user_input=state["user_input"],
+                module_list="\n".join(f"- {n}" for n in module_names),
+            )
+            candidates = result.matched_modules if result else []
+            confidence = result.confidence if result else "low"
+        except Exception as e:
+            logger.warning("   ⚠️ LLM 意图识别解析失败，降级为未匹配: %s", e)
+            candidates = []
+            confidence = "low"
 
         # 过滤：只保留真实存在于模块树中的候选
         candidates = [c for c in candidates if c in module_names]
@@ -275,13 +279,16 @@ class RetrievalMixin:
                     api_defs.extend(apis)
                     logger.info(f"   + 接口: {mod} ({len(apis)} 个)")
 
-        # 接口去重（同一接口绑定到多个模块时只保留一份）
+        # 接口去重（同一接口绑定到多个模块时只保留一份，后出现的覆盖先出现的）
         seen_api = {}
+        dup_count = 0
         for a in api_defs:
             key = f"{a.get('method', '')} {a.get('url', '')}"
-            seen_api.setdefault(key, a)
-        if len(api_defs) != len(seen_api):
-            logger.info(f"   => 接口去重: {len(seen_api)} 个唯一（去重前 {len(api_defs)} 个）")
+            if key in seen_api:
+                dup_count += 1
+            seen_api[key] = a  # 后出现的覆盖先出现的，保留最新版本
+        if dup_count:
+            logger.info(f"   => 接口去重: 合并 {dup_count} 个重复，剩余 {len(seen_api)} 个唯一（去重前 {len(api_defs)} 个）")
             api_defs = list(seen_api.values())
 
         logger.info(f"   => 汇总: {len(all_docs)} 文档片段, {len(api_defs)} 个接口")

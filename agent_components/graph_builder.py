@@ -72,6 +72,7 @@ def build_and_run_agent():
 
     # 挂载 components 实例供外部调用（如 /confirm-plan 生成 .py 文件）
     chat.components = components
+    chat.graph = graph  # 挂载编译后的 graph，供 _run_chat_bg 流式执行
     return chat
 
 

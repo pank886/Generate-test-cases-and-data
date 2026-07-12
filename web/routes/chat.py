@@ -243,8 +243,6 @@ async def workflow_confirm(session_id: str = Form(...),
     task_id = await _create_task()
     from web.tasks import _resume_workflow_bg
     background_tasks.add_task(_resume_workflow_bg, task_id, session_id, state)
-    # 任务已入列，可安全清理 session
-    async with _workflow_sessions_lock:
-        _workflow_sessions.pop(session_id, None)
+    # session 由后台任务在完成/失败后清理；异常退出时靠 TTL（1800s）自动过期不泄漏
     return {"success": True, "task_id": task_id, "status": "running",
             "message": f"已确认模块 [{confirmed_module}]，正在生成测试计划..."}

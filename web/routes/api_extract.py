@@ -4,6 +4,7 @@ import os
 import uuid
 from datetime import datetime
 
+import config
 from fastapi import APIRouter, UploadFile, File, Form
 from fastapi.responses import JSONResponse
 
@@ -26,7 +27,7 @@ async def extract_api_doc(file: UploadFile = File(...),
         name_part, ext = os.path.splitext(raw_name)
         raw_name = name_part[:100] + ext
     safe_filename = f"{uuid.uuid4().hex[:8]}_{raw_name}"
-    file_path = os.path.join("uploads", "md", safe_filename)
+    file_path = os.path.join(config.BASE_DIR, "uploads", "md", safe_filename)
     os.makedirs(os.path.dirname(file_path), exist_ok=True)
     with open(file_path, "wb") as f:
         f.write(await file.read())
@@ -60,7 +61,7 @@ async def commit_api_endpoint(data: dict):
         return JSONResponse(status_code=400,
                             content={"success": False, "message": "缺少必要参数"})
     abs_path = os.path.abspath(file_path)
-    uploads_root = os.path.abspath("uploads")
+    uploads_root = os.path.join(config.BASE_DIR, "uploads")
     if not abs_path.startswith(uploads_root):
         return JSONResponse(status_code=403,
                             content={"success": False, "message": "非法路径"})

@@ -1,0 +1,508 @@
+# 架构规则详情
+
+<!-- RULE: M1 -->
+<!-- PRIORITY: P0 -->
+<!-- KEYWORDS: session.commit, get_session_ctx, add_product_doc_chunks, add_api_defs, _save_to_sqlite, _delete_sqlite_doc, _add_imported_file, BindingOps.delete_bindings_for_doc, DocOps.delete_document, os.remove, _remove_imported_file -->
+
+## M1：事务边界与数据一致性
+
+**核心定义**：跨存储介质写入必须保证数据一致性——SQLite 先写、ChromaDB 后写，失败时补偿回滚；删除操作必须同时清理 SQLite + ChromaDB + 内存三处。
+
+**涵盖原规则**：DC-1~26, CS-7, CS-8, CS-9, [Ref: 21~23], [Ref: 25], [Ref: 27]
+
+✅ **正确示例**：
+```python
+# SQLite 先写 → ChromaDB 后写 → 失败补偿
+_save_to_sqlite(doc_id=doc_id, ...)
+try:
+    db.add_product_doc_chunks(doc_id, chunks)
+except Exception:
+    _delete_sqlite_doc(doc_id)
+    raise
+
+# 删除三处清理
+DocOps.delete_document(session, doc_id)  # 1. SQLite
+_chroma_db.delete_by_doc_id(doc_id)       # 2. ChromaDB
+await _remove_imported_file(filename)      # 3. 内存
+
+# 数据库会话统一管理
+with get_session_ctx() as session:
+    ...
+# 自动 commit / rollback / close
+
+# 批量事务（多条记录一次提交）
+with get_session_ctx() as session:
+    for d in docs:
+        session.merge(d)
+```
+
+❌ **错误示例**：
+```python
+# 反序：ChromaDB 先写 → SQLite 失败则孤立
+db.add_product_doc_chunks(doc_id, chunks)
+_save_to_sqlite(...)
+
+# 半删除：漏 _remove_imported_file
+DocOps.delete_document(session, doc_id)
+# 文件仍在内存列表 → 刷新后仍显示
+
+# 循环内交替写入不同存储（半提交）
+for api in apis:
+    db.add_api_defs(doc_id, [api])
+    _save_to_sqlite(...)
+# 第 5 条失败 → 前 4 条已提交
+
+# lifespan 赋值无 global
+async def lifespan(app):
+    _phase_c_graph = build_new_workflow()  # 局部变量！
+```
+
+**边界情况**：
+- `_add_imported_file` 是内存缓存，失败时不应回滚 SQLite/ChromaDB（缓存可丢，数据不可丢）
+- 删除端点中磁盘文件不存在时，仍须清理 SQLite + 内存（不阻断流程）
+- `get_session_ctx()` 内部已处理 commit/rollback，不需要在业务代码中手动调用
+
+---
+
+<!-- RULE: M2 -->
+<!-- PRIORITY: P0 -->
+<!-- KEYWORDS: _invoke_structured, with_structured_output, METHOD_FEATURES, thinking, extra_body, model_validator, IntentConfirmation, ApiDefinition, TestCase, ChatPromptTemplate, prompt.input_variables -->
+
+## M2：LLM 交互规范
+
+**核心定义**：LLM 结构化输出必须用 Pydantic 模型 SSOT 约束；字段漂移用 `model_validator` 兼容；解析失败必须降级而非抛 500。thinking 与 json_mode/function_calling 互斥。ChatPromptTemplate 中 JSON 示例必须用双大括号转义 `{key}`。
+
+**涵盖原规则**：LLM-1~12, [Ref: 26], [Ref: 31]
+
+✅ **正确示例**：
+```python
+# thinking 兼容性声明式配置
+METHOD_FEATURES = {
+    "function_calling": {"supports_thinking": False},
+    "json_mode": {"supports_thinking": False},
+    "json_schema": {"supports_thinking": False},
+    "free_text": {"supports_thinking": True},
+}
+
+# 用 bind 而非 invoke 传 extra_body
+bound_llm = self.llm.bind(**llm_kwargs)
+result = bound_llm.invoke(prompt)
+
+# 结构化输出 + 异常降级
+try:
+    result = self._invoke_structured(prompt, IntentConfirmation, ...)
+    candidates = result.matched_modules
+except Exception:
+    candidates = []  # 降级而非抛 500
+
+# 字段漂移兼容
+@model_validator(mode="before")
+@classmethod
+def migrate(cls, data):
+    if "matches" in data and "matched_modules" not in data:
+        data["matched_modules"] = data.pop("matches")
+    return data
+
+# Pydantic SSOT（不在 prompt 中写 Schema）
+class TestCase(BaseModel):
+    request_body: Optional[Dict] = Field(
+        default=None, serialization_alias="json", validation_alias="json"
+    )
+
+# ChatPromptTemplate 变量转义
+prompt = ChatPromptTemplate.from_messages([
+    ("system",
+     "规则\n"
+     '1. **输出格式**：{{"matched_modules": ["模块名1"], "confidence": "high"}}'
+     # 双大括号 {{ → LangChain 渲染为字面量 {
+    ),
+    ("human", "用户输入: {user_input}"),
+])
+assert "matched_modules" not in prompt.input_variables  # 验证无泄漏
+```
+
+❌ **错误示例**：
+```python
+# if-elif 硬编码 thinking 兼容性
+if method == "function_calling":
+    thinking = False
+elif method == "json_mode":
+    thinking = False
+# 新增 method 需改多处
+
+# 用 invoke 而非 bind 传 extra_body
+self.llm.invoke(prompt, **llm_kwargs)  # kwargs 被路由到 RunnableConfig
+
+# 解析失败不降级 → 抛 500
+result = self._invoke_structured(...)
+# 直接崩溃，用户看到 500
+
+# Dict[str, Any] 接 LLM 输出
+testCase: List[Dict[str, Any]]  # 无结构约束
+
+# prompt 中写 JSON Schema（58 行字符串）
+
+# ChatPromptTemplate 中 {key} 未转义 → 变量泄漏
+prompt = ChatPromptTemplate.from_messages([
+    ("system",
+     '输出格式：{"matched_modules": [...], "confidence": "high"}'
+     # 单大括号 → LangChain 解析为模板变量！
+    ),
+    ("human", "用户输入: {user_input}"),
+])
+# prompt.input_variables = ["matched_modules", "confidence", "user_input"]
+# ↑ user_input 和 module_list 传参时缺少 matched_modules → 格式错误
+```
+
+**边界情况**：
+- private thinking（`free_text` 格式）可与 thinking 共存；仅 `function_calling`/`json_mode`/`json_schema` 需禁用
+- 字段漂移频率 > 5% 时应优化 prompt 而非增加 validator 逻辑
+- 节点函数中的 `_invoke_structured` 也必须包裹 try/except（如 `_format_test_points`）
+- ChatPromptTemplate 中 JSON 格式字符串的 `{key}` 须用 `{{key}}` 双大括号转义；新增或修改 prompt 后须通过 `prompt.input_variables` 确认无意外变量泄漏
+- `${{get_extract_data(...)}}` 等合法双括号引用不受影响（LangChain 将 `{{` 渲染为字面量 `{`）
+
+---
+
+<!-- RULE: M3 -->
+<!-- PRIORITY: P0 -->
+<!-- KEYWORDS: except:, except Exception:, except: pass, catch (e) {}, extract_text, or default_value -->
+
+## M3：异常处理与日志
+
+**核心定义**：禁止裸 except、禁止空 catch、禁止静默吞异常、禁止将可能为 None 的值直接传给下游。所有 except 块必须至少记录日志。
+
+**涵盖原规则**：EL-1~14, FP-9, FP-10
+
+✅ **正确示例**：
+```python
+# 精确异常捕获
+except (ValueError, json5.Json5Exception) as e:
+    logger.warning("解析失败: %s", e, exc_info=True)
+
+# None 防御
+text = page.extract_text() or ""
+# 而非 "\n\n".join(page.extract_text())
+
+# catch 记录日志
+except Exception:
+    logger.warning("操作失败", exc_info=True)
+
+# 前端 catch 显示错误
+catch (e) {
+    console.error("加载失败:", e);
+    el.innerHTML = '<div style="color:red">加载失败</div>';
+}
+
+# 外部服务异常包装
+try:
+    context = self.dual_chroma.search_context(...)
+except Exception as e:
+    context = f"【向量库异常】{e}，请检查 Ollama 服务"
+```
+
+❌ **错误示例**：
+```python
+# 裸 except → 吞 MemoryError/KeyboardInterrupt
+except Exception:
+    return {"error": "failed"}
+
+# 空 catch → 无法排查
+except Exception:
+    pass
+
+# 前端空 catch
+catch (e) {}  # 用户永远看不到错误
+
+# None 直接传递
+"\n\n".join(page.extract_text())  # None → TypeError
+```
+
+**边界情况**：
+- API 端点顶层 `except Exception` 返回 JSONResponse 是可接受的（最后一道防线），但必须记录日志
+- `finally` 块中不应 return/raise（会覆盖 try 块异常）
+
+---
+
+<!-- RULE: M4 -->
+<!-- PRIORITY: P1 -->
+<!-- KEYWORDS: threading.Lock, _lock, BoundedSemaphore, ThreadPoolExecutor, max_workers, max_queue, asyncio.Lock, run_coroutine_threadsafe -->
+
+## M4：并发安全
+
+**核心定义**：双检锁的副作用必须在锁内执行；所有模块级单例必须用 `threading.Lock` 保护；线程池必须有界阻塞。
+
+**涵盖原规则**：CS-1~6
+
+✅ **正确示例**：
+```python
+# 双检锁：检查 → 加锁 → 再检查 → 执行副作用 → 释放
+if _instance is None:
+    with _lock:
+        if _instance is None:
+            _instance = create()    # 副作用在锁内
+
+# 有界线程池 + 背压
+class _BoundedThreadPoolExecutor(ThreadPoolExecutor):
+    def __init__(self, max_workers=10, max_queue=30):
+        self._sem = BoundedSemaphore(max_queue)
+    def submit(self, fn, *args):
+        self._sem.acquire()
+        future = super().submit(fn, *args)
+        future.add_done_callback(lambda _: self._sem.release())
+        return future
+```
+
+❌ **错误示例**：
+```python
+# 双检锁：副作用在锁外
+if _instance is None:
+    with _lock:
+        if _instance is None:
+            pass
+    _instance = create()  # 锁外初始化 → 竞态
+
+# 标准线程池无界队列 → 突发流量 OOM
+executor = ThreadPoolExecutor(max_workers=10)
+```
+
+**边界情况**：
+- `asyncio.Lock` 跨线程访问需经 `run_coroutine_threadsafe` 调度回事件循环
+- 数据库引擎单例与 LLM 客户端单例保护模式相同
+
+---
+
+<!-- RULE: M5 -->
+<!-- PRIORITY: P0 -->
+<!-- KEYWORDS: os.path.join, BASE_DIR, os.path.basename, os.remove, os.rename, _win_remove, mkdtemp, tempfile, _images -->
+
+## M5：文件与路径安全
+
+**核心定义**：所有文件路径以 `config.BASE_DIR` 为根；用户输入必须经 `os.path.basename()` 清洗；文件写操作必须包裹 `try/except OSError`；临时资源必须有 finally 清理。
+
+**涵盖原规则**：FP-1~19, [Ref: 14~16], [Ref: 18], [Ref: 30]
+
+✅ **正确示例**：
+```python
+# BASE_DIR 统一路径
+file_path = os.path.join(config.BASE_DIR, "uploads", "md", safe_filename)
+
+# 路径遍历防护
+filename = os.path.basename(raw_filename)
+
+# 文件删除防御
+try:
+    os.remove(file_path)
+except OSError:
+    logger.warning("删除失败: %s", file_path, exc_info=True)
+
+# 临时目录 + try/finally
+tmp_dir = tempfile.mkdtemp()
+try:
+    ...
+finally:
+    shutil.rmtree(tmp_dir, ignore_errors=True)
+
+# 临时目录命名含文件名标识
+img_dir = os.path.join(base, f"_images_{file_stem}")
+
+# 外部资源不可用 → 延迟补偿
+if _chroma_db is None:
+    asyncio.create_task(_retry_delete(doc_id))
+```
+
+❌ **错误示例**：
+```python
+# 相对路径
+os.path.join("uploads", "md", filename)  # 依赖 CWD
+
+# 用户输入直接拼路径
+os.path.join("uploads", file.filename)   # 路径遍历！
+
+# os.remove 无保护
+os.remove(file_path)  # PermissionError → 500
+
+# 删除后访问文件元数据
+os.remove(fpath)
+age = os.path.getmtime(fpath)  # 文件已删除 → FileNotFoundError
+
+# 临时目录无 finally
+tmp_dir = mkdtemp()
+do_something()  # 抛异常 → 目录泄漏
+
+# 固定临时目录名 → 并发冲突
+img_dir = os.path.join(base, "_images")
+
+# 外部资源不可用时静默跳过
+if _chroma_db is None:
+    pass  # 脏数据残留
+```
+
+**边界情况**：
+- `_win_remove` 带重试（最多 3 次）用于 Windows Defender 锁定场景
+- 删除端点中磁盘文件不存在不应阻断流程，须继续清理 SQLite + 内存
+- `os.makedirs` 无需 try/except（已设 `exist_ok=True`）
+
+---
+
+<!-- RULE: M6 -->
+<!-- PRIORITY: P1 -->
+<!-- KEYWORDS: settings., config., Field(default=, global, lifespan, _phase_c_graph, _chroma_db, _chat_func, ThreadPoolExecutor, _BoundedThreadPoolExecutor, to_thread, heartbeat, _update_task, pollTask -->
+
+## M6：代码结构与配置
+
+**核心定义**：所有可变参数通过 `settings.py` 集中管理；`lifespan` 中赋值模块级变量必须 `global` 声明；全局单例在使用点必须判 None；长时间 `to_thread` 同步操作必须配套心跳协程更新前端进度。
+
+**涵盖原规则**：CSL-1~17, [Ref: 25], [Ref: 28], [Ref: 29], [Ref: 32]
+
+✅ **正确示例**：
+```python
+# 配置外化
+class Settings(BaseSettings):
+    chroma_retry_delay: int = Field(default=300, ge=10, le=3600)
+    task_max_workers: int = Field(default=10)
+
+# lifespan global 声明
+async def lifespan(app):
+    global _chroma_db, _chat_func, _components, _vector_ready
+    global _phase_c_graph, _phase_c_components
+
+# 全局单例判 None
+if _chroma_db is not None:
+    _chroma_db.delete_by_doc_id(doc_id)
+
+# 跨函数共享常量（模块级）
+const labels = { product: '产品文档', api: '接口定义' };
+
+# 有界线程池（配置化）
+executor = _BoundedThreadPoolExecutor(
+    max_workers=config.TASK_MAX_WORKERS,
+    max_queue=config.TASK_MAX_QUEUE,
+)
+
+# 长时间 to_thread 操作 + 心跳进度上报
+_heartbeat_stop = False
+async def _heartbeat():
+    nonlocal _heartbeat_stop
+    _t0 = time.time()
+    _messages = ["正在检索...", "正在分析...", "正在生成..."]
+    while not _heartbeat_stop:
+        await asyncio.sleep(10)
+        if _heartbeat_stop: break
+        elapsed = int(time.time() - _t0)
+        await _update_task(task_id, progress=15,
+                           message=f"{_messages[step]}（{elapsed}s）")
+
+hb_task = asyncio.create_task(_heartbeat())
+try:
+    result = await asyncio.to_thread(sync_blocking_call, state)
+finally:
+    _heartbeat_stop = True
+    hb_task.cancel()
+    try: await hb_task
+    except asyncio.CancelledError: pass
+```
+
+❌ **错误示例**：
+```python
+# 硬编码魔法数字
+executor = ThreadPoolExecutor(max_workers=10)
+
+# lifespan 缺 global
+async def lifespan(app):
+    _phase_c_graph = build_new_workflow()  # 局部变量 → 模块级仍是 None
+
+# 全局单例直接调用（不判 None）
+_chroma_db.delete_by_doc_id(doc_id)  # None 时 AttributeError → 500
+
+# 函数内定义常量期望跨函数可见
+function loadBoundDocs() {
+    const labels = {...};  // 仅本函数可见
+}
+function loadUnassociatedDocs() {
+    labels[dt]  // ReferenceError!
+}
+
+# to_thread 同步操作无心跳 → 前端进度卡死
+await _update_task(task_id, progress=10, message="处理中...")
+result = await asyncio.to_thread(long_blocking_call, data)
+# ↑ 如果 long_blocking_call 执行 2 分钟，前端 2 分钟看不到任何进度变化
+await _update_task(task_id, progress=80, message="处理完成")
+```
+
+**边界情况**：
+- `lifespan` 中创建的纯粹局部变量（如 `_cleanup_task`, `_meta`）无需 global 声明
+- `settings.py` 中 `Field(ge=..., le=...)` 约束用于启动时校验
+- 测试时可通过 `@patch("config.CHROMA_RETRY_DELAY", 0.1)` 缩短配置值
+
+---
+
+<!-- RULE: M7 -->
+<!-- PRIORITY: P0 -->
+<!-- KEYWORDS: {{, tojson, script src=, onclick=, onchange=, catch (e) {} -->
+
+## M7：前端安全与交互
+
+**核心定义**：静态 JS 文件禁止包含 Jinja2 模板语法；服务端数据必须通过 HTML `<script>` 块注入；异步操作 catch 禁止为空；页面初始化必须渲染首屏数据。
+
+**涵盖原规则**：EL-14, CSL-14, CSL-15, CSL-17, [Ref: 24]
+
+✅ **正确示例**：
+
+```html
+<!-- 模板注入变量 -->
+<script>
+    var VECTOR_READY = {
+    {
+        vector_ready | tojson | safe
+    }
+    }
+    ;
+    var INITIAL_FILES = {
+    {
+        imported_files | tojson | safe
+    }
+    }
+    ;
+</script>
+<script src="/static/app.js?v=20260711"></script>
+```
+```javascript
+// catch 非空
+catch (e) {
+    console.error("加载失败:", e);
+    el.innerHTML = '加载失败，请重试';
+}
+
+// init 加载首屏
+function init() {
+    if (typeof INITIAL_FILES !== 'undefined') {
+        renderFileList(INITIAL_FILES);
+    }
+    refreshFileList();
+}
+```
+
+❌ **错误示例**：
+```javascript
+// 静态 JS 写 Jinja2 → SyntaxError
+const INITIAL_FILES = {{ imported_files | tojson | safe }};
+// 浏览器看到字面量 { → 整个脚本崩溃
+
+// 空 catch → 静默吞所有错误
+catch (e) {}
+
+// init 不加载首屏 → 用户看到空白
+function init() {
+    // 不调 refreshFileList()
+}
+
+// 模板用 const 而非 var
+<script>
+  const VECTOR_READY = ...;  // 跨 <script> 块不可访问
+</script>
+```
+
+**边界情况**：
+- 模板中注入 JS 变量必须用 `var`（函数作用域可跨 `<script>` 块访问），不能用 `const`
+- cache-busting 参数（`?v=YYYYMMDD`）在每次更新前端文件时递增
+- `onclick=` / `onchange=` 内联事件绑定的函数必须在全局作用域可访问

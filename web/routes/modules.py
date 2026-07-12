@@ -36,11 +36,15 @@ async def get_module_docs(module_name: str):
                     "doc_type": d.doc_type, "type": d.doc_type,
                     "chunks": d.chunk_count, "file_name": d.file_name,
                 }
-                if d.doc_type == "api":
-                    apis = chroma.get_doc_apis(d.id)
-                    item["api_count"] = len(apis)
-                    item["api_names"] = [a["api_name"] for a in apis
-                                         if a.get("api_name")]
+                if d.doc_type == "api" and chroma is not None:
+                    try:
+                        apis = chroma.get_doc_apis(d.id)
+                        item["api_count"] = len(apis)
+                        item["api_names"] = [a["api_name"] for a in apis
+                                             if a.get("api_name")]
+                    except Exception:
+                        item["api_count"] = 0
+                        item["api_names"] = []
                 result.append(item)
             return {"success": True, "docs": result}
     except Exception as e:

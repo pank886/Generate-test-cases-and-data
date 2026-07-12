@@ -92,10 +92,15 @@ async def _cleanup_temp_files_loop():
                 fpath = os.path.join(md_dir, fname)
                 if not os.path.isfile(fpath):
                     continue
-                if now - os.path.getmtime(fpath) > _TEMP_FILE_MAX_AGE:
-                    os.remove(fpath)
+                age = now - os.path.getmtime(fpath)
+                if age > _TEMP_FILE_MAX_AGE:
+                    try:
+                        os.remove(fpath)
+                    except OSError:
+                        logger.warning("清理临时文件失败（可能被锁定）: %s", fpath, exc_info=True)
+                        continue
                     logger.info("已清理过期临时文件: %s (age=%.1fh)", fname,
-                                (now - os.path.getmtime(fpath)) / 3600)
+                                age / 3600)
         except asyncio.CancelledError:
             break
         except Exception:
@@ -231,6 +236,7 @@ from web.services.doc_binding import _cleanup_doc_to_doc_bindings  # noqa: F401
 async def lifespan(app: FastAPI):
     """应用生命周期：启动时一次性初始化所有重资源。"""
     global _chroma_db, _chat_func, _components, _vector_ready
+    global _phase_c_graph, _phase_c_components
     # _imported_files 通过辅助函数访问，不再需要 global 声明
     # 0. 前置校验：必填配置项
     if not config.EMBEDDING_MODEL:
@@ -307,7 +313,6 @@ async def lifespan(app: FastAPI):
         ("uploads/product", ".pdf"),
         ("uploads/product", ".docx"),
         ("uploads/axure", ".zip"),
-        ("uploads", ".pdf"),
     ]
     for scan_dir, ext in scan_dirs:
         dir_path = Path(config.BASE_DIR) / scan_dir
@@ -383,6 +388,11 @@ async def index():
         imported_files=files,
     ))
 
+
+@app.get("/favicon.ico")
+async def favicon():
+    from fastapi.responses import Response
+    return Response(status_code=204)
 
 @app.get("/.well-known/appspecific/com.chrome.devtools.json")
 async def chrome_devtools_probe():

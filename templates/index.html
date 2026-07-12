@@ -123,6 +123,10 @@
 </div>
 <div class="toast" id="toast"></div>
 
-<script src="/static/app.js"></script>
+<script>
+  var VECTOR_READY = {{ vector_ready | tojson | safe }};
+  var INITIAL_FILES = {{ imported_files | tojson | safe }};
+</script>
+<script src="/static/app.js?v=20260711"></script>
 </body>
 </html>

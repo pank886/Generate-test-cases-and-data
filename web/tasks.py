@@ -16,6 +16,77 @@ from observability import set_trace_id, get_logger
 logger = get_logger(__name__)
 
 
+# ========================================================================
+# 辅助函数：从 state dict 或 response 对象构建前端响应
+# ========================================================================
+
+def _build_response_from_state(state: dict, user_input: str = "") -> dict:
+    """从 LangGraph 最终 state dict 构建前端 task result。"""
+    plan = state.get("excel_plan")
+    api_defs = state.get("api_definition_list") or []
+    case_count = len(plan.rows) if plan and hasattr(plan, "rows") else 0
+
+    resp = {
+        "success": True,
+        "thinking": [f"已提取 {len(api_defs)} 个接口"],
+        "reply": f"Excel 测试计划已生成：共 {case_count} 条用例",
+        "user_ctx": user_input,
+    }
+    if state.get("excel_path"):
+        resp["excel_path"] = state["excel_path"]
+        resp["excel_name"] = os.path.basename(state["excel_path"])
+        resp["output_dir"] = state.get(
+            "output_dir", os.path.dirname(state["excel_path"]),
+        )
+    if state.get("requires_review"):
+        resp["requires_review"] = True
+        resp["error_info"] = state.get("error_info", [])
+    if api_defs:
+        resp["api_defs_json"] = _json.dumps(
+            [a.model_dump() if hasattr(a, "model_dump") else a
+             for a in api_defs],
+            indent=2, ensure_ascii=False,
+        )
+    else:
+        resp["api_defs_json"] = "[]"
+    return resp
+
+
+def _build_response_from_result(response, user_input: str = "") -> dict | None:
+    """从旧 _chat_func 的 response 对象构建前端 task result。"""
+    if response is None:
+        return None
+    from types import SimpleNamespace
+    if isinstance(response, SimpleNamespace):
+        response = response.__dict__
+    if isinstance(response, dict):
+        return _build_response_from_state(response, user_input)
+    # 对象模式
+    result = {
+        "success": True,
+        "thinking": getattr(response, "proper_thinking", []),
+        "reply": getattr(response, "final_response", ""),
+    }
+    if hasattr(response, "excel_path") and response.excel_path:
+        result["excel_path"] = response.excel_path
+        result["excel_name"] = os.path.basename(response.excel_path)
+        result["output_dir"] = getattr(
+            response, "output_dir", os.path.dirname(response.excel_path),
+        )
+    if hasattr(response, "requires_review") and response.requires_review:
+        result["requires_review"] = True
+        result["error_info"] = getattr(response, "error_info", [])
+    if hasattr(response, "api_definition_list"):
+        api_defs = response.api_definition_list
+        result["api_defs_json"] = _json.dumps(
+            [a.model_dump() if hasattr(a, "model_dump") else a
+             for a in api_defs],
+            indent=2, ensure_ascii=False,
+        ) if api_defs else "[]"
+    result["user_ctx"] = user_input
+    return result
+
+
 class _BoundedThreadPoolExecutor(ThreadPoolExecutor):
     """有界线程池：队列满时 submit 阻塞（默认 LinkedBlockingQueue 会无限制累积）。"""
 
@@ -90,6 +161,19 @@ async def _process_file_bg(task_id: str, file_path: str, ext: str,
                                    error="未提取到接口定义，请检查文档格式。")
                 return
 
+            # 将 MD 文件加入内存文件列表（即使未确认入库，也可在页面展示）
+            try:
+                await _add_imported_file({
+                    "name": filename,
+                    "size": f"{file_size / 1024:.1f} KB",
+                    "chunks": count,
+                    "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    "type": "api",
+                    "status": "pending",
+                })
+            except Exception:
+                logger.warning("MD 文件列表更新失败（数据已提取，不影响后续确认）", exc_info=True)
+
             resp = {
                 "success": True,
                 "message": f"已提取 {count} 个接口定义，请确认后入库",
@@ -129,8 +213,12 @@ async def _process_file_bg(task_id: str, file_path: str, ext: str,
             "chunks": count,
             "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "type": file_type,
+            "status": "ready",  # 数据已写入 SQLite + ChromaDB
         }
-        await _add_imported_file(file_info)
+        try:
+            await _add_imported_file(file_info)
+        except Exception:
+            logger.warning("内存状态更新失败（数据已持久化，下次启动自动恢复）: %s", filename, exc_info=True)
 
         logger.info("✅ %s 处理完成：%d 个文本块", source, count)
 
@@ -173,50 +261,73 @@ async def _process_file_bg(task_id: str, file_path: str, ext: str,
 # ========================================================================
 
 async def _run_chat_bg(task_id: str, user_input: str):
-    """后台执行聊天 -> 测试计划生成（Phase A 工作流）。"""
+    """后台执行聊天 -> 测试计划生成（Phase A 工作流）。
+
+    使用线程池执行 + 心跳进度上报。
+    """
     from web.app import _chat_func, _update_task
 
     set_trace_id(task_id)
 
     try:
         await _update_task(task_id, status="running", progress=5,
-                           message="正在检索知识库...")
+                           message="任务已提交，准备处理...")
 
-        # LangGraph 全流程 + LLM 调用 → 线程池
-        response = await asyncio.to_thread(_chat_func, user_input)
+        # 心跳协程：每 10s 更新进度，让前端不超时
+        import asyncio as _asyncio
+        import time as _time
 
-        await _update_task(task_id, progress=80,
+        _heartbeat_stop = False
+
+        async def _heartbeat():
+            nonlocal _heartbeat_stop
+            _t0 = _time.time()
+            _step = 1
+            _messages = [
+                "正在检索知识库...",
+                "正在提取接口定义...",
+                "正在分析测试场景...",
+                "正在生成 Excel 测试计划...",
+            ]
+            while not _heartbeat_stop:
+                await _asyncio.sleep(10)
+                if _heartbeat_stop:
+                    break
+                elapsed = int(_time.time() - _t0)
+                msg = _messages[min(_step, len(_messages) - 1)]
+                _step += 1
+                pct = min(10 + _step * 10, 70)
+                await _update_task(task_id, progress=pct, message=f"{msg}（{elapsed}s）")
+
+        hb_task = _asyncio.create_task(_heartbeat())
+
+        try:
+            response = await asyncio.to_thread(_chat_func, user_input)
+        finally:
+            _heartbeat_stop = True
+            hb_task.cancel()
+            try:
+                await hb_task
+            except _asyncio.CancelledError:
+                pass
+
+        # 从 response 构建结果
+        result = _build_response_from_result(response, user_input)
+
+        await _update_task(task_id, progress=85,
                            message="生成完成，正在保存结果...")
 
-        if response:
-            result = {
-                "success": True,
-                "thinking": response.proper_thinking,
-                "reply": response.final_response,
-            }
-            if hasattr(response, "excel_path") and response.excel_path:
-                result["excel_path"] = response.excel_path
-                result["excel_name"] = os.path.basename(response.excel_path)
-                result["output_dir"] = getattr(
-                    response, "output_dir",
-                    os.path.dirname(response.excel_path),
-                )
-            if hasattr(response, "requires_review") and response.requires_review:
-                result["requires_review"] = True
-                result["error_info"] = getattr(response, "error_info", [])
+        # 构建最终响应
+        if isinstance(result, dict):
+            # astream 模式 — result 是 state dict
+            resp = _build_response_from_state(result, user_input)
+        else:
+            # 旧模式 — result 是 response 对象
+            resp = _build_response_from_result(result, user_input)
 
-            # 存储 api_defs + user_input 到 task result，供 /confirm-plan 通过 task_id 查询
-            if hasattr(response, "api_definition_list"):
-                api_defs = response.api_definition_list
-                result["api_defs_json"] = _json.dumps(
-                    [a.model_dump() if hasattr(a, "model_dump") else a
-                     for a in api_defs],
-                    indent=2, ensure_ascii=False,
-                ) if api_defs else "[]"
-            result["user_ctx"] = user_input
-
+        if resp:
             await _update_task(task_id, status="completed", progress=100,
-                               message="测试计划生成完成", result=result)
+                               message="测试计划生成完成", result=resp)
         else:
             await _update_task(task_id, status="failed", error="模型无响应")
 
@@ -287,8 +398,11 @@ async def _confirm_plan_bg(task_id: str, excel_path: str | None,
             "success": True,
             "message": msg,
             "py_file": py_result["py_file_name"],
+            "py_path": py_result.get("py_path", ""),
             "yaml_success": yaml_result["success"],
             "yaml_total": yaml_result["total"],
+            "excel_path": excel_path,
+            "output_dir": os.path.dirname(excel_path),
         }
 
         await _update_task(task_id, status="completed", progress=100,
@@ -304,18 +418,60 @@ async def _confirm_plan_bg(task_id: str, excel_path: str | None,
 # ========================================================================
 
 async def _resume_workflow_bg(task_id: str, session_id: str, state: dict):
-    """Phase C 后台恢复执行：从节点2开始，完成产品文档检索→关联模块→接口→测试点→Excel。"""
+    """Phase C 后台恢复执行：从节点2开始，完成产品文档检索→关联模块→接口→测试点→Excel。
+
+    使用 _phase_c_graph.astream() 逐节点上报进度，前端实时可见。
+    """
     import os as _os
     from web.app import _phase_c_graph, _update_task
 
     set_trace_id(task_id)
 
+    # 节点 → 进度映射
     try:
         await _update_task(task_id, status="running", progress=10,
-                           message="正在精准检索产品文档...")
+                           message="正在检索产品文档...")
 
-        # LangGraph 全流程 → 线程池
-        result = await asyncio.to_thread(_phase_c_graph.invoke, state)
+        # LangGraph 在独立线程中执行（同步节点：ChromaDB、LLM 等），
+        # 主协程保持可响应，定期发心跳避免前端超时
+        import asyncio as _asyncio
+        import time as _time
+
+        _heartbeat_stop = False
+
+        async def _heartbeat():
+            nonlocal _heartbeat_stop
+            _t0 = _time.time()
+            _step = 1
+            _messages = [
+                "正在检索产品文档...",
+                "正在分析关联模块...",
+                "正在检索接口定义...",
+                "正在分析测试场景...",
+                "正在生成测试计划...",
+            ]
+            while not _heartbeat_stop:
+                await _asyncio.sleep(10)
+                if _heartbeat_stop:
+                    break
+                elapsed = int(_time.time() - _t0)
+                msg = _messages[min(_step, len(_messages) - 1)]
+                _step += 1
+                await _update_task(
+                    task_id, progress=15,
+                    message=f"{msg}（{elapsed}s）",
+                )
+
+        hb_task = _asyncio.create_task(_heartbeat())
+        try:
+            result = await asyncio.to_thread(_phase_c_graph.invoke, state)
+        finally:
+            _heartbeat_stop = True
+            hb_task.cancel()
+            try:
+                await hb_task
+            except _asyncio.CancelledError:
+                pass
 
         # 检查 NO_DATA 中断
         if result.get("workflow_status") == "NO_DATA":
@@ -324,7 +480,7 @@ async def _resume_workflow_bg(task_id: str, session_id: str, state: dict):
                                                 "未找到产品文档，请先导入数据"))
             return
 
-        await _update_task(task_id, progress=80,
+        await _update_task(task_id, progress=85,
                            message="生成完成，正在保存结果...")
 
         # 构建响应
@@ -354,3 +510,7 @@ async def _resume_workflow_bg(task_id: str, session_id: str, state: dict):
     except Exception as e:
         logger.error("❌ Phase C 工作流执行失败: %s", e)
         await _update_task(task_id, status="failed", error=str(e))
+    finally:
+        from web.app import _workflow_sessions, _workflow_sessions_lock
+        async with _workflow_sessions_lock:
+            _workflow_sessions.pop(session_id, None)

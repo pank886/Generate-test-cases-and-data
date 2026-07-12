@@ -92,10 +92,14 @@ class ClassCode(BaseModel):
 
 class TestCase(BaseModel):
     """单个测试用例 — testCase 数组中的一个元素"""
+    model_config = {"populate_by_name": True}
+
     case_name: str = Field(description="用例名，如 test_CarEntry_001")
-    json: Optional[Dict[str, Any]] = Field(
+    request_body: Optional[Dict[str, Any]] = Field(
         default=None,
         description="请求体 JSON 数据",
+        serialization_alias="json",  # YAML 输出时仍用 json 字段名
+        validation_alias="json",     # LLM 输入时接受 json 字段名
     )
     params: Optional[Dict[str, Any]] = Field(default=None, description="URL query 参数")
     validation: List[Dict[str, Any]] = Field(default=[], description="断言规则列表")
@@ -114,10 +118,11 @@ class TestCase(BaseModel):
         """
         global _drift_total, _drift_count
         if isinstance(data, dict):
+            # validation_alias 解析后字段名已是 request_body
             _drift_total += 1
-            if "data" in data and "json" not in data:
+            if "data" in data and "request_body" not in data:
                 _drift_count += 1
-                data["json"] = data.pop("data")
+                data["request_body"] = data.pop("data")
                 rate = _drift_count / _drift_total * 100
                 log_msg = f"LLM 字段漂移 data→json 累计 {_drift_count}/{_drift_total} ({rate:.1f}%)"
                 if rate > 5:
@@ -130,7 +135,7 @@ class TestCase(BaseModel):
 class StepData(BaseModel):
     """单步测试数据 — data 数组中的一个元素"""
     baseInfo: Dict[str, Any] = Field(description="接口基础信息（api_name, url, method, header 等）")
-    testCase: List[TestCase] = Field(description="测试用例列表（每个元素含 case_name, json, validation 等）")
+    testCase: List[TestCase] = Field(description="测试用例列表（每个元素含 case_name, request_body, validation 等）")
 
 
 class TestData(BaseModel):
@@ -194,6 +199,22 @@ class IntentConfirmation(BaseModel):
     """LLM 模块匹配结果（Phase C 节点1 意图识别）"""
     matched_modules: List[str] = Field(description="匹配到的模块名列表，最多3个，按相关性降序")
     confidence: str = Field(description="置信度: high / medium / low")
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_matches(cls, data: Any) -> Any:
+        """兼容 LLM 输出 matches 而非 matched_modules 的字段漂移。"""
+        if isinstance(data, dict):
+            # 字段名漂移：matches → matched_modules
+            if "matches" in data and "matched_modules" not in data:
+                raw = data.pop("matches")
+                # 值格式漂移：[{"module": "xxx"}] → ["xxx"]
+                if isinstance(raw, list):
+                    data["matched_modules"] = [
+                        m["module"] if isinstance(m, dict) else m for m in raw
+                    ]
+            # matches 和 matched_modules 同时存在时以 matched_modules 为准
+        return data
 
 
 class GlossaryExtract(BaseModel):

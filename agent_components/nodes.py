@@ -217,7 +217,7 @@ class ChatTestAgentGraph(RetrievalMixin, GenerationMixin):
                 output_dir = os.path.join(config.TESTCASE_BASE, project_name)
                 if os.path.exists(output_dir):
                     from datetime import datetime
-                    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+                    ts = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
                     candidate = f"{project_name}_{ts}"
                     output_dir = os.path.join(config.TESTCASE_BASE, candidate)
                     project_name = candidate
@@ -352,6 +352,8 @@ class ChatTestAgentGraph(RetrievalMixin, GenerationMixin):
             return {k: ChatTestAgentGraph._serialize_for_log(v) for k, v in obj.items()}
         elif isinstance(obj, (list, tuple)):
             return [ChatTestAgentGraph._serialize_for_log(v) for v in obj]
+        elif isinstance(obj, datetime):
+            return obj.isoformat()
         elif isinstance(obj, (str, int, float, bool, type(None))):
             return obj
         else:

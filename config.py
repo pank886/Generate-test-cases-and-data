@@ -68,6 +68,7 @@ COMMON_SERVICE_MODULE = settings.common_service_module
 MAX_RETRIES = settings.max_retries
 YAML_CONCURRENCY = settings.yaml_concurrency
 EXCEL_REPAIR_ATTEMPTS = settings.excel_repair_attempts
+CHROMA_RETRY_DELAY = settings.chroma_retry_delay
 TASK_TTL_SECONDS = settings.task_ttl_seconds
 TASK_MAX_WORKERS = settings.task_max_workers
 TASK_MAX_QUEUE = settings.task_max_queue

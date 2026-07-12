@@ -100,12 +100,12 @@ def _extract_docx(file_path: str) -> str:
 
     # 提取图片（先记录位置，内容暂用占位）
     from docx.opc.constants import RELATIONSHIP_TYPE as RT
+    img_dir = _docx_img_dir(file_path)
     for rel in doc.part.rels.values():
         if "image" in str(rel.reltype):
             img_index += 1
             # 保存图片到临时目录（供后续多模态模型使用）
             img_data = rel.target_part.blob
-            img_dir = os.path.join(os.path.dirname(file_path), "_images")
             os.makedirs(img_dir, exist_ok=True)
             img_path = os.path.join(img_dir, f"{os.path.basename(file_path)}_{img_index}.png")
             with open(img_path, "wb") as f:
@@ -114,8 +114,15 @@ def _extract_docx(file_path: str) -> str:
 
     result = "\n\n".join(parts)
     if img_index > 0:
-        result += f"\n\n[本文档包含 {img_index} 张图片，已保存至 {os.path.basename(os.path.dirname(file_path))}/_images/ 目录]"
+        result += f"\n\n[本文档包含 {img_index} 张图片，已保存至 {os.path.basename(img_dir)}/ 目录]"
     return result
+
+
+def _docx_img_dir(file_path: str) -> str:
+    """获取 docx 图片临时目录（含文件标识，防并发冲突）。"""
+    stem = os.path.splitext(os.path.basename(file_path))[0]
+    safe_stem = stem.replace(" ", "_").replace(".", "_")
+    return os.path.join(os.path.dirname(file_path), f"_images_{safe_stem}")
 
 
 def _safe_doc_id(prefix: str, *parts: str) -> str:
@@ -132,6 +139,7 @@ def _safe_doc_id(prefix: str, *parts: str) -> str:
     # 限制总长度 ≤ 180（String(200) 留余量给 ChromaDB 内部后缀）
     if len(raw) > 180:
         suffix = hashlib.md5(raw.encode()).hexdigest()[:8]
+        logger.warning("doc_id 超长截断（%d > 180）: %s… → …_%s", len(raw), raw[:60], suffix)
         return raw[:172] + "_" + suffix
     return raw
 
@@ -145,12 +153,25 @@ def _cascade_bind_to_module_docs(session, doc_type: str, doc_id: str, module_nam
             BindingOps.bind(session, doc_type, doc_id, other_doc.doc_type, other_doc.id)
 
 
+def _delete_sqlite_doc(doc_id: str):
+    """删除 SQLite 中的文档记录（作为 ChromaDB 写入失败的补偿动作）。"""
+    from database import get_session_ctx
+    from database.operations import DocOps
+    try:
+        with get_session_ctx() as session:
+            DocOps.delete_document(session, doc_id)
+            logger.info("   [补偿] 已回滚 SQLite 记录: %s", doc_id)
+    except Exception as e:
+        logger.error("   [补偿] SQLite 回滚失败（需人工清理）: %s - %s", doc_id, e, exc_info=True)
+
+
 def _save_to_sqlite(doc_id: str, file_name: str, file_type: str, doc_type: str,
                     chunk_count: int, module_name: str = "",
                     glossary_terms: list = None):
     """写入 SQLite：文档记录 + 术语。
 
-    在 ChromaDB 写入后调用，保证双库数据一致。
+    必须在 ChromaDB 写入**之前**调用。若后续 ChromaDB 写入失败，
+    由调用方通过 _delete_sqlite_doc() 执行补偿回滚。
     module_name 仅用于日志，不做自动绑定（由用户在前端手动关联）。
     """
     from database import get_session_ctx
@@ -205,7 +226,7 @@ def process_product_doc(file_path: str, progress_cb=None) -> dict:
     logger.info(f"   => 提取文本 {len(full_text)} 字符")
 
     # _extract_text 可能产生临时图片目录，统一在 finally 中清理
-    _img_dir = os.path.join(os.path.dirname(file_path), "_images")
+    _img_dir = _docx_img_dir(file_path) if os.path.splitext(file_path)[1].lower() == ".docx" else None
     try:
         # 2. 切块（前置，后续 LLM 提取和 ChromaDB 入库共用同一批块）
         cb(15, "文本切分中...")
@@ -292,15 +313,9 @@ def process_product_doc(file_path: str, progress_cb=None) -> dict:
         except Exception as e:
             logger.warning("术语表提取跳过: %s", e, exc_info=True)
 
-        # 5. 写入 ChromaDB（纯向量，不含 module/related_modules）
-        cb(85, "向量化入库中...")
+        # 5. 写入 SQLite（先写关系库，成功后写向量库）
+        cb(85, "写入业务数据...")
         doc_id = _safe_doc_id("prod", file_name, module_name)
-        db.delete_by_doc_id(doc_id)
-        db.add_product_doc_chunks(doc_id, chunks)
-        logger.info(f"   [ChromaDB] 入库完成 (doc_id={doc_id})")
-
-        # 6. 写入 SQLite（文档元数据 + 绑定关系 + 术语）
-        cb(90, "写入业务数据...")
         _save_to_sqlite(
             doc_id=doc_id,
             file_name=file_name,
@@ -310,7 +325,18 @@ def process_product_doc(file_path: str, progress_cb=None) -> dict:
             module_name=module_name,
             glossary_terms=terms,
         )
-        logger.info(f"   [SQLite] 入库完成")
+        logger.info(f"   [SQLite] 入库完成 (doc_id={doc_id})")
+
+        # 6. 写入 ChromaDB（纯向量，失败时补偿回滚 SQLite）
+        cb(90, "向量化入库中...")
+        try:
+            db.delete_by_doc_id(doc_id)
+            db.add_product_doc_chunks(doc_id, chunks)
+            logger.info(f"   [ChromaDB] 入库完成 (doc_id={doc_id})")
+        except Exception:
+            logger.error("   [ChromaDB] 写入失败，启动补偿回滚 SQLite", exc_info=True)
+            _delete_sqlite_doc(doc_id)
+            raise
 
         cb(95, "入库完成")
         return {
@@ -320,7 +346,7 @@ def process_product_doc(file_path: str, progress_cb=None) -> dict:
             "chunks": len(chunks),
         }
     finally:
-        if os.path.isdir(_img_dir):
+        if _img_dir and os.path.isdir(_img_dir):
             import shutil as _su
             _su.rmtree(_img_dir, ignore_errors=True)
             logger.debug("已清理临时图片目录: %s", _img_dir)
@@ -355,96 +381,29 @@ def _split_text_by_headers(text: str, max_chars: int) -> list:
 
 
 def process_api_doc(file_path: str, default_module: str = None, progress_cb=None) -> dict:
-    """处理接口文档：提取文本 -> 分批 LLM 提取接口 -> 合并去重 -> 存入 api_defs + SQLite。
+    """处理接口文档：提取 → 入库（委托给新版函数）。
 
-    Args:
-        default_module: 调用方指定的默认模块（如从产品文档继承）
-        progress_cb: 可选，进度回调 (0~100, message)
+    .. deprecated::
+       使用 ``process_api_doc_extract()`` + ``commit_api_docs()`` 替代。
+       当前保留仅用于 CLI 兼容，内部已委托新版函数。
     """
+    logger.warning("process_api_doc() 已弃用，请使用 process_api_doc_extract() + commit_api_docs()")
     cb = progress_cb or (lambda p, m: None)
-    logger.info(f"\n{'=' * 60}")
-    logger.info(f"[Phase A] 处理接口文档: {os.path.basename(file_path)}")
 
-    db = get_chroma_db()
-    graph = ChatTestAgentGraph()
-    file_name = os.path.basename(file_path)
-    file_type = os.path.splitext(file_path)[1].lstrip(".")
+    # 委托新版提取
+    cb(5, "提取接口定义...")
+    extracted = process_api_doc_extract(file_path, default_module=default_module)
+    apis = extracted.get("apis", [])
+    module = extracted.get("module_name") or default_module or "Unknown"
+    if not apis:
+        logger.warning("未提取到接口定义")
+        return {"doc_id": "", "module_name": module, "api_count": 0}
 
-    cb(5, "读取文档...")
-    full_text = _extract_text(file_path).strip()
-    if not full_text:
-        raise ValueError("文档内容为空")
-    logger.info(f"   => 提取文本 {len(full_text)} 字符")
-
-    # 大文档分批处理
-    batch_limit = config.MAX_INGEST_CHARS_PER_BATCH
-    batches = _split_text_by_headers(full_text, batch_limit) if len(full_text) > batch_limit else [full_text]
-    logger.info(f"   => 分为 {len(batches)} 批处理（每批 ≤ {batch_limit} 字符）")
-
-    all_apis = []
-    module = default_module
-
-    for bi, batch_text in enumerate(batches, 1):
-        pct = int(10 + (bi / len(batches)) * 70)  # 10%~80% 按批次比例
-        cb(pct, f"AI 提取接口定义 ({bi}/{len(batches)})...")
-        prompt = api_def_extract_prompt()
-        logger.info(f"   [{bi}/{len(batches)}] LLM 提取接口...")
-        result = graph._invoke_structured(
-            prompt, ApiDefExtract,
-            method="json_mode",
-            doc_text=batch_text,
-        )
-        if not module:
-            module = result.module_name
-        apis_raw = result.apis if hasattr(result, "apis") else []
-        # Pydantic 对象转 dict
-        apis = [a.model_dump() if hasattr(a, "model_dump") else a for a in apis_raw]
-        logger.info(f"   [{bi}/{len(batches)}] 提取到 {len(apis)} 个接口")
-        all_apis.extend(apis)
-
-    # 合并去重：method+url 相同时合并参数和返回值，而非简单覆盖
-    # TODO(多用户): 在前端展示两个版本的 diff，让用户选择保留哪个
-    cb(85, "去重合并...")
-    merged = {}
-    dup_count = 0
-    for api in all_apis:
-        key = f"{api.get('method', '')} {api.get('url', '')}"
-        if key in merged:
-            dup_count += 1
-            merged[key] = _merge_api_defs(merged[key], api)
-        else:
-            merged[key] = api
-    if dup_count:
-        logger.warning("检测到 %d 个重复接口（method+url 相同），已合并参数/返回值/描述", dup_count)
-    apis = list(merged.values())
-
-    module = module or "Unknown"
-    logger.info(f"   => 汇总: 模块={module}, 接口数={len(apis)}（去重后）")
-
-    for a in apis:
-        logger.info(f"      - {a.get('method', '?')} {a.get('url', '')}")
-
-    # 写入 ChromaDB（纯向量，不含 module）
-    cb(90, "向量化入库中...")
-    doc_id = _safe_doc_id("api", file_name, module)
-    db.delete_by_doc_id(doc_id)
-    db.add_api_defs(doc_id, apis)
-    logger.info(f"   [ChromaDB] 入库完成 (doc_id={doc_id})")
-
-    # 写入 SQLite（文档元数据 + 绑定关系）
-    cb(92, "写入业务数据...")
-    _save_to_sqlite(
-        doc_id=doc_id,
-        file_name=file_name,
-        file_type=file_type,
-        doc_type="api",
-        chunk_count=len(apis),
-        module_name=module,
-    )
-    logger.info(f"   [SQLite] 入库完成")
-
-    cb(95, "入库完成")
-    return {"doc_id": doc_id, "module_name": module, "api_count": len(apis)}
+    # 委托新版入库（已含 SQLite 先写 + ChromaDB 补偿逻辑）
+    cb(80, "入库中...")
+    result = commit_api_docs(file_path, module, apis)
+    logger.info("   => 委托入库完成: %d 个接口", result["api_count"])
+    return result
 
 
 def process_api_doc_extract(file_path: str, default_module: str = None,
@@ -504,9 +463,10 @@ def process_api_doc_extract(file_path: str, default_module: str = None,
 
 def commit_api_docs(file_path: str, module_name: str, apis: list[dict],
                     progress_cb=None, delete_original: bool = False) -> dict:
-    """Phase 2: 用户确认后，每个接口独立入库 + 级联关联。
+    """Phase 2: 用户确认后，接口批量入库。
 
-    为每个 API 创建独立的 documents 行和 ChromaDB 向量。
+    所有 API 先批量写入 SQLite（同一事务），再逐条写入 ChromaDB。
+    ChromaDB 任一条失败时补偿回滚所有 SQLite 记录。
     仅 delete_original=True 时删除原文件。
     """
     cb = progress_cb or (lambda p, m: None)
@@ -517,30 +477,57 @@ def commit_api_docs(file_path: str, module_name: str, apis: list[dict],
     file_type = os.path.splitext(file_path)[1].lstrip(".")
     doc_ids = []
 
+    # ---- Phase 1: 批量写入 SQLite（同一事务）----
+    from database import get_session_ctx
+    from database.models import Document
+    from datetime import datetime, timezone
+
+    cb(10, "写入业务数据...")
+    docs_to_insert = []
     for i, api in enumerate(apis):
         api_name = api.get("name", f"api_{i}")
-        # doc_id 必须包含 method+url 才能保证唯一性，纯用 name 会导致
-        # 同名接口（如多个 GET 接口都叫"查询"）后写入的覆盖前面的
         url = api.get("url", "")
         method = api.get("method", "?")
         doc_id = _safe_doc_id("api", file_name, module_name, method, url, api_name)
-
-        cb(int(10 + (i / len(apis)) * 80), f"入库 {api.get('method', '?')} {api.get('url', '')}")
-
-        # ChromaDB: 每个接口一个文档
-        db.delete_by_doc_id(doc_id)
-        db.add_api_defs(doc_id, [api])
-
-        # SQLite: 每个接口一条记录
-        _save_to_sqlite(
-            doc_id=doc_id,
+        doc_ids.append(doc_id)
+        docs_to_insert.append(Document(
+            id=doc_id,
             file_name=f"{api.get('method', '?')} {api.get('url', '')}",
             file_type=file_type,
             doc_type="api",
             chunk_count=1,
-            module_name=module_name,
-        )
-        doc_ids.append(doc_id)
+            status="pending",
+            upload_time=datetime.now(timezone.utc),
+        ))
+
+    try:
+        with get_session_ctx() as session:
+            for d in docs_to_insert:
+                session.merge(d)
+    except Exception:
+        logger.error("   [SQLite] 批量写入失败，无数据需要补偿", exc_info=True)
+        raise
+
+    logger.info(f"   [SQLite] 批量入库完成: {len(doc_ids)} 条")
+
+    # ---- Phase 2: 逐条写入 ChromaDB（失败时补偿回滚 SQLite）----
+    cb(50, "向量化入库中...")
+    try:
+        for i, api in enumerate(apis):
+            api_name = api.get("name", f"api_{i}")
+            url = api.get("url", "")
+            method = api.get("method", "?")
+            doc_id = doc_ids[i]
+            cb(int(50 + (i / len(apis)) * 40), f"入库 {method} {url}")
+            db.delete_by_doc_id(doc_id)
+            db.add_api_defs(doc_id, [api])
+    except Exception:
+        logger.error("   [ChromaDB] 写入失败，启动补偿回滚所有 SQLite 记录", exc_info=True)
+        for did in doc_ids:
+            _delete_sqlite_doc(did)
+        raise
+
+    logger.info(f"   [ChromaDB] 入库完成: {len(doc_ids)} 条")
 
     # 仅当全部接口选中时才废弃原文件
     if delete_original:
@@ -625,15 +612,9 @@ def process_axure_zip(file_path: str, module_name: str = None, progress_cb=None)
             logger.error("   => 关联模块分析失败: %s", e, exc_info=True)
         related.discard(module)
 
-        # 写入 ChromaDB（纯向量，不含 module/related_modules）
-        cb(85, "向量化入库中...")
+        # 写入 SQLite（先写关系库，成功后写向量库）
+        cb(85, "写入业务数据...")
         doc_id = _safe_doc_id("axure", file_name, module)
-        db.delete_by_doc_id(doc_id)
-        db.add_product_doc_chunks(doc_id, chunks)
-        logger.info(f"   [ChromaDB] 入库完成 (doc_id={doc_id}), {len(chunks)} 块")
-
-        # 写入 SQLite（文档元数据 + 绑定关系）
-        cb(90, "写入业务数据...")
         _save_to_sqlite(
             doc_id=doc_id,
             file_name=file_name,
@@ -642,7 +623,18 @@ def process_axure_zip(file_path: str, module_name: str = None, progress_cb=None)
             chunk_count=len(chunks),
             module_name=module,
         )
-        logger.info(f"   [SQLite] 入库完成")
+        logger.info(f"   [SQLite] 入库完成 (doc_id={doc_id})")
+
+        # 写入 ChromaDB（纯向量，失败时补偿回滚 SQLite）
+        cb(90, "向量化入库中...")
+        try:
+            db.delete_by_doc_id(doc_id)
+            db.add_product_doc_chunks(doc_id, chunks)
+            logger.info(f"   [ChromaDB] 入库完成 (doc_id={doc_id}), {len(chunks)} 块")
+        except Exception:
+            logger.error("   [ChromaDB] 写入失败，启动补偿回滚 SQLite", exc_info=True)
+            _delete_sqlite_doc(doc_id)
+            raise
 
         cb(95, "入库完成")
         return {"doc_id": doc_id, "module_name": module, "chunks": len(chunks)}

@@ -105,11 +105,15 @@ async def upload_file(file: UploadFile = File(...),
 
 @router.post("/delete-file")
 async def delete_file(filename: str = Form(...)):
-    """删除文件：清理 SQLite + ChromaDB + 物理文件 + 内存状态。"""
+    """删除文件：清理 SQLite + ChromaDB + 物理文件 + 内存状态。
+
+    文件不存在于磁盘时仍会清理数据库和内存记录。
+    """
     from web.app import _get_imported_files, _remove_imported_file, _chroma_db
 
     # 防路径遍历：只取纯文件名
     safe_filename = _os.path.basename(filename)
+    # 查找物理文件（不存在也不阻断流程，仅跳过磁盘删除）
     file_path = None
     for scan_dir_raw in ["uploads/pdf", "uploads/md", "uploads/docx",
                       "uploads/axure", "uploads/product", "uploads"]:
@@ -117,11 +121,6 @@ async def delete_file(filename: str = Form(...)):
         if _os.path.exists(candidate):
             file_path = candidate
             break
-
-    if not file_path:
-        return JSONResponse(status_code=404,
-                            content={"success": False,
-                                     "message": f"文件 '{filename}' 不存在"})
 
     try:
         from database import get_session_ctx
@@ -135,14 +134,17 @@ async def delete_file(filename: str = Form(...)):
             doc_id = doc.id if doc else None
 
         if not doc:
-            try:
-                _win_remove(file_path)
-            except (FileNotFoundError, PermissionError):
-                pass
+            # 仅清理内存状态+物理文件
+            if file_path:
+                try:
+                    _win_remove(file_path)
+                except (FileNotFoundError, PermissionError):
+                    pass
+            await _remove_imported_file(filename)
             return {"success": True,
-                    "message": f"已删除 '{filename}'（无数据库记录）"}
+                    "message": f"已删除 '{filename}'"}
 
-        sql_ok = True
+        # 清理 SQLite
         try:
             with get_session_ctx() as session:
                 _cleanup_doc_to_doc_bindings(session, doc_id)
@@ -151,27 +153,43 @@ async def delete_file(filename: str = Form(...)):
         except Exception as e:
             from observability import get_logger
             get_logger(__name__).error("SQLite 清理失败: %s", e)
-            sql_ok = False
-
-        if not sql_ok:
             return JSONResponse(status_code=500,
                                 content={"success": False,
                                          "message": "数据库清理失败，文件未删除"})
 
-        _chroma_db.delete_by_doc_id(doc_id)
-        try:
-            _win_remove(file_path)
-        except (FileNotFoundError, PermissionError):
-            pass
-        meta_path = file_path + ".meta.json"
-        if _os.path.exists(meta_path):
+        # 清理 ChromaDB（不可用时创建延迟重试任务）
+        if _chroma_db is not None:
+            _chroma_db.delete_by_doc_id(doc_id)
+        else:
+            import asyncio
+            async def _retry_chroma_delete(did: str):
+                await asyncio.sleep(config.CHROMA_RETRY_DELAY)
+                try:
+                    from agent_components.dual_chroma import get_chroma_db
+                    db = get_chroma_db()
+                    db.delete_by_doc_id(did)
+                    print(f"[delete-file] ChromaDB 延迟删除成功: {did}")
+                except Exception as e:
+                    print(f"[delete-file] ❌ ChromaDB 延迟删除失败（Ollama 可能未启动）: {did} - {e}")
+                    logger.error("ChromaDB 延迟删除失败: %s - %s", did, e)
+            asyncio.create_task(_retry_chroma_delete(doc_id))
+            print(f"[delete-file] ChromaDB 不可用，5 分钟后将尝试延迟删除: {doc_id}")
+            logger.info("ChromaDB 不可用，已创建延迟删除任务: %s", doc_id)
+
+        # 清理物理文件（不存在时静默跳过）
+        if file_path:
             try:
-                _win_remove(meta_path)
+                _win_remove(file_path)
             except (FileNotFoundError, PermissionError):
                 pass
+            meta_path = file_path + ".meta.json"
+            if _os.path.exists(meta_path):
+                try:
+                    _win_remove(meta_path)
+                except (FileNotFoundError, PermissionError):
+                    pass
 
         await _remove_imported_file(filename)
-
         return {"success": True, "message": f"已删除 '{filename}'"}
     except Exception as e:
         from observability import get_logger
@@ -238,6 +256,26 @@ async def open_file(file_path: str = Form(...)):
     except Exception as e:
         return JSONResponse(status_code=500,
                             content={"success": False, "message": str(e)})
+
+
+@router.get("/api/download-file")
+async def download_file(path: str = ""):
+    """下载生成的文件（Excel / PY / YAML）。"""
+    import config
+    from fastapi.responses import FileResponse
+    if not path or not _os.path.exists(path):
+        return JSONResponse(status_code=404,
+                            content={"success": False, "message": "文件不存在"})
+    abs_path = _os.path.abspath(path)
+    allowed_dirs = [
+        _os.path.abspath(config.TESTCASE_BASE),
+        _os.path.abspath("uploads"),
+    ]
+    if not any(abs_path.startswith(d) for d in allowed_dirs):
+        return JSONResponse(status_code=403,
+                            content={"success": False, "message": "无权访问该路径"})
+    filename = _os.path.basename(abs_path)
+    return FileResponse(abs_path, filename=filename)
 
 
 @router.get("/api/file-content")

@@ -8,8 +8,9 @@
 各模型特有逻辑在各子类中实现（如 DeepSeek 的 tool_calls 归一化）。
 """
 
-from typing import Optional
+from typing import Optional, Union
 
+import openai
 from langchain_openai import ChatOpenAI
 
 
@@ -34,10 +35,14 @@ class BaseCompatibleChatOpenAI(ChatOpenAI):
 
     def _create_chat_result(
         self,
-        response: dict,
+        response: Union[dict, openai.BaseModel],
         generation_info: Optional[dict] = None,
     ):
-        """覆写父类：在标准解析前执行通用防御逻辑。"""
+        """覆写父类：在标准解析前执行通用防御逻辑。
+
+        接收 dict（DeepSeek 归一化后）或 openai.BaseModel（标准 SDK 路径），
+        isinstance 检查确保两种路径都安全。
+        """
         if isinstance(response, dict):
             self._guard_empty_content(response)
         return super()._create_chat_result(response, generation_info)
