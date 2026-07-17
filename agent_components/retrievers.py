@@ -1,4 +1,4 @@
-"""Phase C 多跳检索节点 Mixin"""
+"""Phase B 多跳检索节点 Mixin"""
 import json
 import os
 from datetime import datetime
@@ -7,7 +7,7 @@ import config
 from observability import get_logger, get_error_snapshot_logger
 from agent_components.dual_chroma import get_chroma_db
 from agent_components.state import State
-from prompts.response_model import TestPointList, IntentConfirmation, ApiDefinition
+from prompts.response_model import IntentConfirmation
 
 logger = get_logger(__name__)
 
@@ -24,10 +24,10 @@ def _mod_exists_in_tree(module_name: str, session) -> bool:
 
 
 class RetrievalMixin:
-    """Phase C 多跳检索 + 测试点分析节点"""
+    """Phase B 多跳检索 + 测试点分析节点"""
     # ==================== 图外方法（确认后执行） ====================
 
-    # ==================== Phase C 多跳检索 + 测试点分析 ====================
+    # ==================== Phase B 多跳检索 + 测试点分析 ====================
 
     # ---- 辅助：从 ChromaDB 检索结果中提取文本 ----
 
@@ -297,7 +297,9 @@ class RetrievalMixin:
     # ---- 节点 5：测试点分析 ----
 
     def _analyze_test_points_raw(self, state: State):
-        """Phase C — 测试点原始分析（thinking 节点）：输出自由文本分析报告。"""
+        """Phase B — 测试点原始分析（thinking 节点）：输出自由文本分析报告。"""
+        from observability import log_phase_header
+        log_phase_header("Phase B — 测试点分析")
         logger.info("\n🧠 分析测试场景（深度思考）...")
         prompt = self.prompt_factory.analyze_test_points_raw()
 
@@ -328,61 +330,7 @@ class RetrievalMixin:
         )
         analysis = result.content if hasattr(result, "content") else str(result)
         logger.info(f"   => 测试场景分析完成（{len(analysis)} 字符）")
+        from observability import log_thinking
+        log_thinking("analyze_test_points_raw", state["original_input"], analysis, prompt_label="analyze_test_points_raw_prompt")
         return {"test_point_analysis": analysis}
-
-    def _format_test_points(self, state: State):
-        """Phase C — 格式化测试点为 JSON（thinking off + json_mode）。"""
-        logger.info("\n--- 格式化测试点 ---")
-        prompt = self.prompt_factory.format_test_points()
-
-        docs_text = "\n\n".join(
-            f"[{d.get('module', d.get('source', '?'))}] {d.get('content', '')}"
-            for d in state.get("product_docs", [])
-        )
-        related_text = ", ".join(state.get("related_modules", [])) or "无"
-        apis_text = "\n".join(
-            f"  - {a.get('name', '?')} ({a.get('method', 'GET')} {a.get('url', '')})"
-            for a in state.get("api_definitions", [])
-        )
-
-        result = self._invoke_structured(prompt, TestPointList,
-            method="json_mode",
-            user_context=state["original_input"],
-            product_docs=docs_text,
-            related_docs=related_text,
-            api_definitions=apis_text,
-            test_point_analysis=state.get("test_point_analysis") or "（无）",
-        )
-
-        if isinstance(result, list):
-            result = TestPointList(test_points=result, project_name="Unknown", summary="")
-
-        count = len(result.test_points)
-        logger.info(f"   => 完成: {count} 个测试点")
-        if result.risk_areas:
-            areas_str = "; ".join(
-                f"{r.area}({r.reason})" if hasattr(r, 'reason') else str(r)
-                for r in result.risk_areas
-            )
-            logger.info(f"   => 风险区域: {areas_str}")
-
-        return {"test_points": result.model_dump()}
-
-    # ---- 节点 6：桥接（不变） ----
-
-    def _prepare_excel_plan_data(self, state: State):
-        """桥接：将 api_definitions (dicts) 转换为 api_definition_list (ApiDefinition 列表)。"""
-        raw = state.get("api_definitions", [])
-        api_definition_list = []
-        for d in raw:
-            api_definition_list.append(ApiDefinition(
-                name=d.get("name", "未命名"),
-                url=d.get("url", ""),
-                method=d.get("method", "GET"),
-                description=d.get("description", d.get("name", "")),
-                parameters=d.get("parameters", d.get("params", {})),
-                returns=d.get("returns", {}),
-            ))
-        logger.info(f"   => 桥接: {len(api_definition_list)} 个接口 -> api_definition_list")
-        return {"api_definition_list": api_definition_list}
 

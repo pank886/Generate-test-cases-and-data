@@ -257,87 +257,8 @@ async def _process_file_bg(task_id: str, file_path: str, ext: str,
 
 
 # ========================================================================
-# Phase A: 聊天 → 测试计划生成
 # ========================================================================
-
-async def _run_chat_bg(task_id: str, user_input: str):
-    """后台执行聊天 -> 测试计划生成（Phase A 工作流）。
-
-    使用线程池执行 + 心跳进度上报。
-    """
-    from web.app import _chat_func, _update_task
-
-    set_trace_id(task_id)
-
-    try:
-        await _update_task(task_id, status="running", progress=5,
-                           message="任务已提交，准备处理...")
-
-        # 心跳协程：每 10s 更新进度，让前端不超时
-        import asyncio as _asyncio
-        import time as _time
-
-        _heartbeat_stop = False
-
-        async def _heartbeat():
-            nonlocal _heartbeat_stop
-            _t0 = _time.time()
-            _step = 1
-            _messages = [
-                "正在检索知识库...",
-                "正在提取接口定义...",
-                "正在分析测试场景...",
-                "正在生成 Excel 测试计划...",
-            ]
-            while not _heartbeat_stop:
-                await _asyncio.sleep(10)
-                if _heartbeat_stop:
-                    break
-                elapsed = int(_time.time() - _t0)
-                msg = _messages[min(_step, len(_messages) - 1)]
-                _step += 1
-                pct = min(10 + _step * 10, 70)
-                await _update_task(task_id, progress=pct, message=f"{msg}（{elapsed}s）")
-
-        hb_task = _asyncio.create_task(_heartbeat())
-
-        try:
-            response = await asyncio.to_thread(_chat_func, user_input)
-        finally:
-            _heartbeat_stop = True
-            hb_task.cancel()
-            try:
-                await hb_task
-            except _asyncio.CancelledError:
-                pass
-
-        # 从 response 构建结果
-        result = _build_response_from_result(response, user_input)
-
-        await _update_task(task_id, progress=85,
-                           message="生成完成，正在保存结果...")
-
-        # 构建最终响应
-        if isinstance(result, dict):
-            # astream 模式 — result 是 state dict
-            resp = _build_response_from_state(result, user_input)
-        else:
-            # 旧模式 — result 是 response 对象
-            resp = _build_response_from_result(result, user_input)
-
-        if resp:
-            await _update_task(task_id, status="completed", progress=100,
-                               message="测试计划生成完成", result=resp)
-        else:
-            await _update_task(task_id, status="failed", error="模型无响应")
-
-    except Exception as e:
-        logger.error("❌ 聊天处理失败: %s", e)
-        await _update_task(task_id, status="failed", error=str(e))
-
-
-# ========================================================================
-# Phase A: 确认计划 → 生成 .py + .yaml
+# Phase C: 确认计划 → 生成 .py + .yaml
 # ========================================================================
 
 async def _confirm_plan_bg(task_id: str, excel_path: str | None,
@@ -350,9 +271,13 @@ async def _confirm_plan_bg(task_id: str, excel_path: str | None,
     import glob
     import config
 
-    from web.app import _components, _update_task
+    from web.app import _phase_b_components, _update_task
 
     set_trace_id(task_id)
+
+    # 重建 LLM 客户端，避免复用上一个工作流残留的僵死连接池
+    from agent_components.nodes import reload_llm
+    reload_llm()
 
     try:
         if not excel_path:
@@ -368,7 +293,7 @@ async def _confirm_plan_bg(task_id: str, excel_path: str | None,
                                error="未找到测试计划 Excel 文件")
             return
 
-        if not _components:
+        if not _phase_b_components:
             await _update_task(task_id, status="failed",
                                error="组件未初始化")
             return
@@ -378,7 +303,7 @@ async def _confirm_plan_bg(task_id: str, excel_path: str | None,
 
         # LLM 调用 → 线程池
         py_result = await asyncio.to_thread(
-            _components._generate_py_file, excel_path,
+            _phase_b_components._generate_py_file, excel_path,
         )
 
         await _update_task(task_id, progress=50,
@@ -386,7 +311,7 @@ async def _confirm_plan_bg(task_id: str, excel_path: str | None,
 
         # LLM 调用 → 线程池
         yaml_result = await asyncio.to_thread(
-            _components._generate_all_yamls,
+            _phase_b_components._generate_all_yamls,
             excel_path, api_defs_json, user_ctx,
         )
 
@@ -414,16 +339,17 @@ async def _confirm_plan_bg(task_id: str, excel_path: str | None,
 
 
 # ========================================================================
-# Phase C: 多轮工作流恢复执行
+# Phase B: 多轮工作流恢复执行
 # ========================================================================
 
 async def _resume_workflow_bg(task_id: str, session_id: str, state: dict):
-    """Phase C 后台恢复执行：从节点2开始，完成产品文档检索→关联模块→接口→测试点→Excel。
+    """Phase B 后台恢复执行：从节点2开始，完成产品文档检索→关联模块→接口→测试点→Excel。
 
-    使用 _phase_c_graph.astream() 逐节点上报进度，前端实时可见。
+    使用 _phase_b_graph.astream() 逐节点上报进度，前端实时可见。
     """
     import os as _os
-    from web.app import _phase_c_graph, _update_task
+    import config
+    from web.app import _phase_b_graph, _update_task
 
     set_trace_id(task_id)
 
@@ -464,7 +390,7 @@ async def _resume_workflow_bg(task_id: str, session_id: str, state: dict):
 
         hb_task = _asyncio.create_task(_heartbeat())
         try:
-            result = await asyncio.to_thread(_phase_c_graph.invoke, state)
+            result = await asyncio.to_thread(_phase_b_graph.invoke, state)
         finally:
             _heartbeat_stop = True
             hb_task.cancel()
@@ -485,14 +411,32 @@ async def _resume_workflow_bg(task_id: str, session_id: str, state: dict):
 
         # 构建响应
         plan = result.get("excel_plan")
-        case_count = len(plan.rows) if plan and hasattr(plan, "rows") else 0
-        tps = (result.get("test_points") or {}).get("test_points", [])
-        tp_count = len(tps) if isinstance(tps, list) else 0
+        case_count = len(plan.test_cases) if plan and hasattr(plan, "test_cases") else 0
 
+        # 从 thinking_trace.log 检查是否有校验失败的行
+        fail_warn = ""
+        failed_tc_ids = []
+        try:
+            with open(_os.path.join(config.LOG_DIR, "thinking_trace.log"), "r", encoding="utf-8") as _lf:
+                content = _lf.read()
+                if "generate_excel_plan_FAILED" in content:
+                    fail_warn = "（部分用例校验失败，详见 logs/thinking_trace.log）"
+                    # 提取失败用例编号
+                    import re
+                    failed_tc_ids = list(set(re.findall(
+                        r"\| (TC-\d+) \|", content)))
+        except Exception:
+            pass
+
+        thinking_parts = [f"Excel 计划 {case_count} 条用例"]
+        if failed_tc_ids:
+            thinking_parts.append(
+                f"⚠️ {len(failed_tc_ids)} 行校验失败需人工审查: {', '.join(sorted(failed_tc_ids))}"
+            )
         resp = {
             "success": True,
-            "thinking": [f"分析出 {tp_count} 个测试点"],
-            "reply": f"测试分析完成：{tp_count} 个测试点, Excel 计划 {case_count} 条用例",
+            "thinking": thinking_parts,
+            "reply": f"Excel 测试计划已生成：共 {case_count} 条用例{fail_warn}",
         }
         if result.get("excel_path"):
             resp["excel_path"] = result["excel_path"]
@@ -508,7 +452,7 @@ async def _resume_workflow_bg(task_id: str, session_id: str, state: dict):
                            message="测试计划生成完成", result=resp)
 
     except Exception as e:
-        logger.error("❌ Phase C 工作流执行失败: %s", e)
+        logger.error("❌ Phase B 工作流执行失败: %s", e)
         await _update_task(task_id, status="failed", error=str(e))
     finally:
         from web.app import _workflow_sessions, _workflow_sessions_lock

@@ -34,7 +34,7 @@
       <input type="file" accept=".zip" onchange="uploadFile(this,'axure')">
     </label>
   </div></div>
-  <div class="card hidden" id="upload-progress-card"><h3>⏳ 处理中</h3><div class="progress-bar"><div class="progress-fill" id="up-progress" style="width:0%"></div></div><div id="up-progress-text" style="font-size:12px;color:var(--text-dim);margin-top:6px"></div></div>
+  <div id="upload-progress-container"></div>
   <div class="card" id="files-card">
     <div class="files-header">
       <h3>📋 已入库文档</h3>
@@ -77,14 +77,22 @@
   <div class="col-right">
     <div class="card" style="height:100%"><h3>📎 可关联文件（按类型）</h3>
       <div id="unassociated-by-type"></div>
+      <div id="related-modules-rt" class="hidden">
+        <h4 style="font-size:12px;color:var(--text-dim);margin:12px 0 4px">🔗 模块关联</h4>
+        <div id="related-modules-rt-content"></div>
+        <div style="display:flex;gap:4px;margin-top:6px">
+          <select id="link-module-select" style="flex:1;padding:4px;border:1px solid var(--border);border-radius:4px;font-size:12px"><option value="">-- 选择模块 --</option></select>
+          <button class="btn btn-sm" onclick="linkModuleToModule()">🔗</button>
+        </div>
+      </div>
       <div id="glossary-content" class="hidden">
         <div class="search-box"><input type="text" placeholder="🔍 搜索术语..." id="glossary-search"></div>
         <h4 style="font-size:12px;color:var(--text-dim);margin-bottom:8px">📝 术语表</h4>
         <div class="scroll-list" id="glossary-terms" style="max-height:300px;overflow-y:auto"></div>
         <div class="new-term-row">
-          <input type="text" id="new-term-input" placeholder="术语名">
-          <input type="text" id="new-term-def" placeholder="解释">
-          <button class="btn btn-sm" onclick="addGlossaryTerm()">+</button>
+          <div class="new-term-line"><input type="text" id="new-term-input" placeholder="术语名（最长32字）" maxlength="32"></div>
+          <div class="new-term-line"><textarea id="new-term-def" placeholder="解释说明（最长256字）" maxlength="256" rows="2"></textarea></div>
+          <button class="btn btn-sm" onclick="addGlossaryTerm()" style="margin-top:4px;width:100%">+ 添加术语</button>
         </div>
       </div>
     </div>

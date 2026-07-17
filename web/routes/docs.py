@@ -17,6 +17,7 @@ async def get_unassociated_docs():
             docs = DocOps.get_unassociated_docs(session)
             return {"success": True, "docs": [
                 {"doc_id": d.id, "module": "", "type": d.doc_type,
+                 "doc_type": d.doc_type,
                  "chunks": d.chunk_count, "file_name": d.file_name}
                 for d in docs
             ]}

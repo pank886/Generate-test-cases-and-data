@@ -1,4 +1,4 @@
-"""测试生成路由：聊天、确认计划、任务状态轮询。"""
+"""测试生成路由：确认计划、任务状态轮询。"""
 
 import os
 
@@ -8,24 +8,6 @@ from fastapi.responses import JSONResponse
 router = APIRouter(tags=["chat"])
 
 
-@router.post("/chat")
-async def chat(user_input: str = Form(...),
-                background_tasks: BackgroundTasks = None):
-    """接收用户需求 → 立即返回 task_id，后台异步生成测试计划。"""
-    from web.app import _get_imported_files, _create_task
-
-    files = await _get_imported_files()
-    if not files:
-        return JSONResponse(status_code=400,
-                            content={"success": False,
-                                     "message": "请先上传 PDF 文档"})
-
-    task_id = await _create_task()
-    from web.tasks import _run_chat_bg
-    background_tasks.add_task(_run_chat_bg, task_id, user_input)
-    return {"success": True, "task_id": task_id, "message": "任务已提交，后台处理中"}
-
-
 @router.post("/confirm-plan")
 async def confirm_plan(excel_path: str = Form(None),
                        api_defs_json: str = Form(""),
@@ -33,7 +15,7 @@ async def confirm_plan(excel_path: str = Form(None),
                        background_tasks: BackgroundTasks = None):
     """确认测试计划 → 立即返回 task_id，后台异步生成 .py + .yaml。"""
     import config
-    from web.app import _components, _create_task
+    from web.app import _phase_b_components, _create_task
     from observability import get_logger
 
     logger = get_logger(__name__)
@@ -53,7 +35,7 @@ async def confirm_plan(excel_path: str = Form(None),
                             content={"success": False,
                                      "message": "未找到测试计划 Excel 文件"})
 
-    if not _components:
+    if not _phase_b_components:
         return JSONResponse(status_code=500,
                             content={"success": False,
                                      "message": "组件未初始化"})
@@ -82,13 +64,13 @@ async def get_task_status(task_id: str):
 
 
 # ----------------------------------------------------------------
-# Phase C 多轮工作流端点
+# Phase B 多轮工作流端点
 # ----------------------------------------------------------------
 
 @router.post("/workflow/start")
 async def workflow_start(user_input: str = Form(...),
                          background_tasks: BackgroundTasks = None):
-    """Phase C 工作流入口：执行节点1（意图识别）→ 挂起 → 返回候选模块。
+    """Phase B 工作流入口：执行节点1（意图识别）→ 挂起 → 返回候选模块。
 
     前端应渲染 candidate_modules 为可点击按钮，用户选择后调用 /workflow/confirm。
     """
@@ -96,10 +78,14 @@ async def workflow_start(user_input: str = Form(...),
     import uuid
     from agent_components.graph_builder import _make_initial_state
     from web.app import (
-        _get_imported_files, _phase_c_graph, _phase_c_components,
+        _get_imported_files, _phase_b_graph, _phase_b_components,
         _vector_ready,
         _workflow_sessions, _workflow_sessions_lock, _cleanup_expired_sessions,
     )
+
+    # 重建 LLM 客户端，避免复用上一个工作流残留的僵死连接池
+    from agent_components.nodes import reload_llm
+    reload_llm()
 
     if not user_input.strip():
         return JSONResponse(status_code=400,
@@ -117,10 +103,10 @@ async def workflow_start(user_input: str = Form(...),
                             content={"success": False,
                                      "message": "请先上传文档并创建模块"})
 
-    if not _phase_c_graph:
+    if not _phase_b_graph:
         return JSONResponse(status_code=500,
                             content={"success": False,
-                                     "message": "Phase C 工作流未初始化"})
+                                     "message": "Phase B 工作流未初始化"})
 
     # 清理过期会话
     await _cleanup_expired_sessions()
@@ -130,7 +116,7 @@ async def workflow_start(user_input: str = Form(...),
 
     import asyncio
     try:
-        result = await asyncio.to_thread(_phase_c_graph.invoke, initial_state)
+        result = await asyncio.to_thread(_phase_b_graph.invoke, initial_state)
     except Exception as e:
         return JSONResponse(status_code=500,
                             content={"success": False, "message": f"意图识别失败: {e}"})
@@ -167,7 +153,7 @@ async def workflow_start(user_input: str = Form(...),
 async def workflow_confirm(session_id: str = Form(...),
                            choice: str = Form(...),
                            background_tasks: BackgroundTasks = None):
-    """Phase C 工作流恢复：用户确认模块 → 执行节点2-6 → 返回 task_id。
+    """Phase B 工作流恢复：用户确认模块 → 执行节点2-6 → 返回 task_id。
 
     用户 choice 解析策略（前端应渲染按钮，点击直接传模块名）:
       1. 纯数字 → 按 candidate_modules 序号匹配
@@ -176,7 +162,7 @@ async def workflow_confirm(session_id: str = Form(...),
     """
     import time
     from web.app import (
-        _phase_c_graph, _workflow_sessions, _workflow_sessions_lock,
+        _phase_b_graph, _workflow_sessions, _workflow_sessions_lock,
         _cleanup_expired_sessions, _create_task,
     )
 
@@ -215,7 +201,7 @@ async def workflow_confirm(session_id: str = Form(...),
         new_state = _make_initial_state(stripped)
         import asyncio
         try:
-            result = await asyncio.to_thread(_phase_c_graph.invoke, new_state)
+            result = await asyncio.to_thread(_phase_b_graph.invoke, new_state)
         except Exception as e:
             return JSONResponse(status_code=500,
                                 content={"success": False, "message": f"意图识别失败: {e}"})

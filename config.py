@@ -13,8 +13,14 @@ from settings import settings
 # 项目根目录绝对路径（供文件路径拼接使用，不受运行时 os.chdir() 影响）
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
+# 辅助：相对路径 → 基于 BASE_DIR 的绝对路径（空字符串拒绝处理，防止静默指向根目录）
+def _resolve_path(path: str) -> str:
+    if not path:
+        raise ValueError("路径配置不能为空，请检查 .env 文件中的对应配置项")
+    return os.path.normpath(path if os.path.isabs(path) else os.path.join(BASE_DIR, path))
+
 # ====== 向量数据库 ======
-CHROMA_DB_DIR = settings.chroma_db_dir
+CHROMA_DB_DIR = _resolve_path(settings.chroma_db_dir)
 
 # ====== Embedding 模型 ======
 EMBEDDING_MODEL = settings.embedding_model
@@ -55,11 +61,16 @@ ENABLE_THINKING = settings.enable_thinking
 WEB_HOST = settings.web_host
 WEB_PORT = settings.web_port
 
-# ====== 目标项目路径 ======
-TESTCASE_BASE = settings.testcase_base
+# ====== 输出路径 ======
+PYCHARM_MISC = _resolve_path(settings.pycharm_misc) if settings.pycharm_misc else ""
+TESTCASE_SUBDIR = settings.testcase_base  # 来自 PYTEST_DATA_DIR 别名
+if not PYCHARM_MISC or not TESTCASE_SUBDIR:
+    TESTCASE_BASE = ""
+else:
+    TESTCASE_BASE = _resolve_path(os.path.join(PYCHARM_MISC, TESTCASE_SUBDIR))
 
 # ====== 日志 ======
-LOG_DIR = settings.log_dir
+LOG_DIR = _resolve_path(settings.log_dir)
 LOG_LEVEL = settings.log_level
 
 # ====== 节点可调参数（供各节点读取，替换硬编码） ======

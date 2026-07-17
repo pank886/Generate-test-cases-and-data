@@ -139,7 +139,7 @@ class TestNormalCommit:
             "all_selected": True,
         })
 
-        files = client.get("/uploaded-files").json()["files"]
+        files = client.get("/api/files/uploaded-files").json()["files"]
         api_files = [f for f in files if f["type"] == "api"]
         assert len(api_files) == 3
 
@@ -241,7 +241,7 @@ class TestEdgeCases:
         resp2 = client.post("/api/upload/commit-api", json=payload)
         assert resp2.status_code == 200
         # 验证文档数量：相同 API 再次提交不应产生重复
-        files = client.get("/uploaded-files").json()["files"]
+        files = client.get("/api/files/uploaded-files").json()["files"]
         login_apis = [f for f in files if "login" in f["name"].lower()]
         assert len(login_apis) == 1, "幂等性：相同 API 不应重复"
 
@@ -348,7 +348,7 @@ class TestConcurrentCommit:
         assert resp1.status_code == 200
         assert resp2.status_code == 200
 
-        files = client.get("/uploaded-files").json()["files"]
+        files = client.get("/api/files/uploaded-files").json()["files"]
         api_names = [f["name"] for f in files if f["type"] == "api"]
         assert len(api_names) == 2, "两个 API 都应入库"
 
@@ -380,6 +380,6 @@ class TestSpecialCharModuleName:
         assert resp.json()["api_count"] == 1
 
         # 验证文件列表中有该记录
-        files = client.get("/uploaded-files").json()["files"]
+        files = client.get("/api/files/uploaded-files").json()["files"]
         api_files = [f for f in files if f["type"] == "api"]
         assert len(api_files) >= 1

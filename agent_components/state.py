@@ -30,14 +30,14 @@ class State(TypedDict):
     scenario_analysis: Optional[str]         # analyze_scenarios 输出的自由文本分析
     all_apis_json: Optional[str]             # api_definition_list 的 JSON 序列化缓存，避免两节点重复序列化
 
-    # --- Phase C 多跳检索 + 测试点分析 ---
+    # --- Phase B 多跳检索 + 测试点分析 ---
     product_docs: Optional[List[dict]]       # Hop 1: 产品文档检索结果
     related_modules: Optional[List[str]]     # 提取出的关联模块列表
     api_definitions: Optional[List[dict]]    # Hop 2b: 接口定义检索结果
     test_point_analysis: Optional[str]       # analyze_test_points_raw 输出的自由文本分析
-    test_points: Optional[dict]              # format_test_points 输出的 TestPointList.model_dump() 结果
+    test_point_analysis: Optional[str]       # analyze_test_points_raw 输出的自由文本分析报告
 
-    # --- Phase C 多轮对话 ---
+    # --- Phase B 多轮对话 ---
     candidate_modules: Optional[List[str]]    # 节点1 LLM 匹配的候选模块名
     confirmation_question: Optional[str]      # 给用户看的确认提示文本
     workflow_status: str                      # "PENDING" → "WAITING" → "CONFIRMED"

@@ -16,6 +16,10 @@ function toast(m) {
 function esc(s) {
   return String(s).replace(/\\/g, '\\\\').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 }
+// 轻量版：用于 HTML 文本内容展示（不转义反斜杠，保持路径可读）
+function escText(s) {
+  return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 function showModal(html) {
   document.getElementById('modal-content').innerHTML = html;
@@ -30,14 +34,14 @@ function excelActionButtons(path, name) {
   const showEdit = !binaryExts.includes(ext);
   return '<div class="btn-row" style="margin-top:8px">'
     + '<button class="btn btn-sm btn-outline" onclick="openLocalFile(\'' + esc(path) + '\')">📂 打开</button>'
-    + '<a class="btn btn-sm btn-outline" href="/api/download-file?path=' + encPath + '" download="' + esc(name || '') + '">📥 下载</a>'
+    + '<a class="btn btn-sm btn-outline" href="/api/files/download-file?path=' + encPath + '" download="' + esc(name || '') + '">📥 下载</a>'
     + (showEdit ? '<button class="btn btn-sm btn-outline" onclick="openFileEditor(\'' + esc(path) + '\')">✏️ 编辑</button>' : '')
     + '</div>';
 }
 async function openLocalFile(path) {
   const fd = new FormData(); fd.append('file_path', path);
   try {
-    const r = await fetch('/open-file', { method: 'POST', body: fd });
+    const r = await fetch('/api/files/open-file', { method: 'POST', body: fd });
     const d = await r.json();
     toast(d.success ? '✅ 已打开文件' : '❌ ' + (d.message || '打开失败'));
   } catch (e) { toast('❌ 打开失败: ' + e.message); }
@@ -99,7 +103,15 @@ document.addEventListener('click', function(e) {
   const confirmBtn = target.closest('.js-confirm-plan');
   if (confirmBtn) { confirmPlan(confirmBtn.dataset.path); return; }
 
-  // 术语删除
+  // 模块关联 — 解除
+  const unlinkModBtn = target.closest('.js-unlink-module');
+  if (unlinkModBtn) { unlinkModuleFromModule(unlinkModBtn.dataset.moduleName); return; }
+
+  // 术语删除（文档详情视图）
+  const docTermDelBtn = target.closest('.js-delete-term-doc');
+  if (docTermDelBtn) { deleteDocGlossaryTerm(parseInt(docTermDelBtn.dataset.termId)); return; }
+
+  // 术语删除（模块视图）
   const termDelBtn = target.closest('.js-delete-term');
   if (termDelBtn) { deleteGlossaryTerm(parseInt(termDelBtn.dataset.termId)); return; }
 });
@@ -128,27 +140,42 @@ function setNavStatus(ok) {
 // ===== 文件上传 =====
 function handleDrop(e, type) { e.preventDefault(); e.target.classList.remove('dragover'); if (e.dataTransfer.files[0]) uploadWithFile(e.dataTransfer.files[0], type); }
 function uploadFile(input, type) { if (input.files[0]) { uploadWithFile(input.files[0], type); input.value = ''; } }
+function _makeProgressCard(icon, name, id) {
+  return '<div class="card upload-progress-card" id="' + id + '">'
+    + '<h3>' + icon + ' ' + escText(name) + '</h3>'
+    + '<div class="progress-bar"><div class="progress-fill" style="width:0%"></div></div>'
+    + '<div class="progress-text" style="font-size:12px;color:var(--text-dim);margin-top:6px"></div>'
+    + '</div>';
+}
+
 async function uploadWithFile(file, type) {
   const fd = new FormData(); fd.append('file', file);
-  const card = document.getElementById('upload-progress-card'); card.classList.remove('hidden');
-  const bar = document.getElementById('up-progress'); const txt = document.getElementById('up-progress-text');
-  txt.textContent = '正在上传 ' + file.name + ' ...';
+  const uid = 'up-' + Date.now() + '-' + Math.random().toString(36).slice(2, 6);
+  const container = document.getElementById('upload-progress-container');
+  const icons = { product: '📄', api: '📡', axure: '🎨' };
+  container.insertAdjacentHTML('afterbegin', _makeProgressCard(icons[type] || '📄', file.name, uid));
+  const card = document.getElementById(uid);
+  const bar = card.querySelector('.progress-fill');
+  const txt = card.querySelector('.progress-text');
+  let _uploadDone = false;
+  txt.textContent = '正在上传...';
   try {
-    const r = await fetch('/upload-file', { method: 'POST', body: fd });
-    if (!r.ok) { txt.textContent = '❌ ' + file.name + ' 上传失败 (HTTP ' + r.status + ')'; toast('❌ 上传失败 (HTTP ' + r.status + ')'); return; }
+    const r = await fetch('/api/files/upload-file', { method: 'POST', body: fd });
+    if (!r.ok) { card.querySelector('h3').innerHTML = '❌ ' + escText(file.name); txt.textContent = '上传失败 (HTTP ' + r.status + ')'; _uploadDone = true; return; }
     const d = await r.json();
-    if (!d.task_id) { txt.textContent = '❌ ' + (d.message || '上传失败'); toast('❌ ' + (d.message || '上传失败')); return; }
+    if (!d.task_id) { card.querySelector('h3').innerHTML = '❌ ' + escText(file.name); txt.textContent = d.message || '上传失败'; _uploadDone = true; return; }
     await pollTask(d.task_id,
-      (p, m) => { bar.style.width = p + '%'; txt.textContent = file.name + ': ' + m; },
+      (p, m) => { bar.style.width = p + '%'; txt.textContent = m; },
       async result => {
+        _uploadDone = true;
         bar.style.width = '100%';
-        if (type === 'api' && result && result.apis) { txt.textContent = file.name + ' 提取完成'; showApiConfirmModal(result, file.name); }
-        else if (result && !result.error) { txt.textContent = '✅ ' + file.name + ' 处理完成'; toast('✅ ' + file.name + ' 处理完成'); showUploadResult(result); }
-        else if (result && result.error) { txt.textContent = '❌ ' + file.name + ': ' + result.error; toast('❌ ' + file.name + ': ' + result.error); }
+        if (type === 'api' && result && result.apis) { txt.textContent = '提取完成'; showApiConfirmModal(result, file.name); }
+        else if (result && !result.error) { txt.textContent = '✅ 处理完成'; toast('✅ ' + file.name + ' 处理完成'); showUploadResult(result); }
+        else { card.querySelector('h3').innerHTML = '❌ ' + escText(file.name); txt.textContent = result.error || '处理失败'; }
         refreshFileList();
       });
-  } catch (e) { txt.textContent = '❌ 上传失败: ' + e.message; toast('❌ 上传失败: ' + e.message); }
-  finally { setTimeout(() => { if (txt.textContent.includes('处理完成') || txt.textContent.includes('失败')) card.classList.add('hidden'); }, 5000); }
+  } catch (e) { txt.textContent = '❌ ' + e.message; _uploadDone = true; }
+  finally { setTimeout(() => { if (_uploadDone) { card.style.opacity = '0'; card.style.transition = 'opacity 0.5s'; setTimeout(() => card.remove(), 500); } }, 3000); }
 }
 function showApiConfirmModal(result, fileName) {
   const apis = result.apis || [], mod = result.module_name || '';
@@ -174,18 +201,18 @@ function showApiConfirmModal(result, fileName) {
 function showUploadResult(result) {
   const m = result.module_name || '?';
   const chunks = result.file ? result.file.chunks : (result.chunks || 0);
-  let html = `<p>${esc(result.message || '处理完成')}</p>`;
-  if (m !== '?') html += `<p>识别模块: <b>${esc(m)}</b></p>`;
+  let html = `<p>${escText(result.message || '处理完成')}</p>`;
+  if (m !== '?') html += `<p>识别模块: <b>${escText(m)}</b></p>`;
   if (chunks) html += `<p>文本块: ${chunks}</p>`;
   if (result.api_count) html += `<p>接口数: ${result.api_count}</p>`;
-  if (result.doc_id) html += `<p style="font-size:11px;color:var(--text-dim)">doc_id: ${esc(result.doc_id)}</p>`;
+  if (result.doc_id) html += `<p style="font-size:11px;color:var(--text-dim)">doc_id: ${escText(result.doc_id)}</p>`;
   showModal(`<h3>✅ 处理完成</h3>${html}<div class="btn-row"><button class="btn js-close-modal">确定</button></div>`);
 }
 
 // ===== 文件列表 =====
 async function refreshFileList() {
   try {
-    const r = await fetch('/uploaded-files');
+    const r = await fetch('/api/files/uploaded-files');
     if (!r.ok) { console.error('文件列表加载失败:', r.status); return; }
     const d = await r.json();
     if (!d.files) { console.error('文件列表响应异常:', d); return; }
@@ -253,13 +280,13 @@ function viewFile(name) {
 async function deleteFile(name) {
   if (!confirm('确定删除 "' + name + '"？')) return;
   const fd = new FormData(); fd.append('filename', name);
-  const r = await fetch('/delete-file', { method: 'POST', body: fd });
+  const r = await fetch('/api/files/delete-file', { method: 'POST', body: fd });
   const d = await r.json(); toast(d.message); refreshFileList();
 }
 
 // ===== 模块树 =====
 async function refreshModuleTree() {
-  try { const r = await fetch('/api/modules'); const d = await r.json(); allModules = d.tree || []; renderModuleTree(allModules); } catch (e) {}
+  try { const r = await fetch('/api/modules'); const d = await r.json(); allModules = d.tree || []; renderModuleTree(allModules); } catch (e) { console.error('模块树加载失败:', e); document.getElementById('module-tree').innerHTML = '<div class="empty-hint" style="color:var(--danger)">模块加载失败，请刷新重试</div>'; }
 }
 function renderModuleTree(tree) {
   const el = document.getElementById('module-tree');
@@ -291,14 +318,21 @@ function selectModule(id, name) {
   loadUnassociatedDocs();
   loadRelatedModules(name);
 }
+function flattenTree(tree) {
+  let out = [];
+  for (const n of tree) { out.push(n); if (n.children) out = out.concat(flattenTree(n.children)); }
+  return out;
+}
+
 function showUnassociatedPanel() {
   document.getElementById('unassociated-by-type').classList.remove('hidden');
   document.getElementById('related-modules-section').classList.remove('hidden');
+  document.getElementById('related-modules-rt').classList.remove('hidden');
   document.getElementById('glossary-content').classList.add('hidden');
 }
 function showGlossaryPanel() {
   document.getElementById('unassociated-by-type').classList.add('hidden');
-  document.getElementById('related-modules-section').classList.add('hidden');
+  document.getElementById('related-modules-rt').classList.add('hidden');
   document.getElementById('glossary-content').classList.remove('hidden');
 }
 async function createModule() {
@@ -380,12 +414,30 @@ async function loadUnassociatedDocs() {
   } catch (e) { document.getElementById('unassociated-by-type').innerHTML = '<div class="empty-hint">加载失败</div>'; }
 }
 function showDocDetail(docId, docType) {
+  selectedDocId = docId; selectedDocType = docType;
+  // 加载文档块
   fetch('/api/docs/' + encodeURIComponent(docId) + '/chunks').then(r => r.json()).then(d => {
     currentChunks = d.chunks || []; currentChunkIdx = 0;
     const el = document.getElementById('chunk-viewer');
     el.classList.remove('hidden');
     renderCurrentChunk();
-  }).catch(() => toast('加载文档详情失败'));
+  }).catch(() => toast('加载文档块失败'));
+  // 产品文档额外加载术语表
+  if (docType === 'product') {
+    showGlossaryPanel();
+    document.getElementById('glossary-content').classList.remove('hidden');
+    loadDocGlossary(docId);
+  }
+}
+async function loadDocGlossary(docId) {
+  try {
+    const r = await fetch('/api/docs/' + encodeURIComponent(docId) + '/glossary');
+    const d = await r.json();
+    const terms = d.terms || [];
+    const el = document.getElementById('glossary-terms');
+    if (!terms.length) { el.innerHTML = '<div class="empty-hint">该文档暂无术语</div>'; return; }
+    el.innerHTML = terms.map(t => '<div class="glossary-item"><span class="remove js-delete-term-doc" data-term-id="' + t.id + '">✕</span><div class="term-name">' + esc(t.term) + '</div><div class="term-def">' + esc(t.definition || '') + '</div></div>').join('');
+  } catch (e) { document.getElementById('glossary-terms').innerHTML = '<div class="empty-hint">加载失败</div>'; }
 }
 function renderCurrentChunk() {
   const c = currentChunks[currentChunkIdx];
@@ -419,10 +471,59 @@ async function loadRelatedModules(modName) {
   try {
     const r = await fetch('/api/modules/' + encodeURIComponent(modName) + '/related'); const d = await r.json();
     const mods = d.related || [];
-    const el = document.getElementById('related-modules-content');
-    if (!mods.length) { el.innerHTML = '<div class="empty-hint">无关联模块</div>'; return; }
-    el.innerHTML = mods.map(m => '<div class="doc-assoc-item"><span class="name">📁 ' + esc(m.name) + '</span></div>').join('');
-  } catch (e) { document.getElementById('related-modules-content').innerHTML = '<div class="empty-hint">加载失败</div>'; }
+    // 中栏展示：已关联模块列表
+    const ctr = document.getElementById('related-modules-content');
+    if (!mods.length) { ctr.innerHTML = '<div class="empty-hint">暂无模块关联</div>'; }
+    else {
+      ctr.innerHTML = '<div style="margin-top:8px"><div style="font-size:12px;color:var(--text-dim);margin-bottom:4px">🔗 已关联模块</div>'
+        + mods.map(m => '<div class="doc-assoc-item"><span class="name">📁 ' + esc(m.name) + '</span> <span class="actions"><button class="btn btn-sm btn-danger-outline js-unlink-module" data-module-name="' + esc(m.name) + '">解除</button></span></div>').join('')
+        + '</div>';
+    }
+    // 右侧栏：显示已关联数量，下方为添加入口
+    const el = document.getElementById('related-modules-rt-content');
+    if (!mods.length) { el.innerHTML = '<div class="empty-hint">暂无关联</div>'; }
+    else { el.innerHTML = '<div class="empty-hint">已关联 ' + mods.length + ' 个模块，可在中栏管理</div>'; }
+    // 下拉框：树形展示所有模块（排除自身和已关联的）
+    const sel = document.getElementById('link-module-select');
+    sel.innerHTML = '<option value="">-- 选择模块 --</option>';
+    const linkedNames = new Set(mods.map(m => m.name));
+    function _addTreeOpts(nodes, depth) {
+      const prefix = '    '.repeat(depth);  // &nbsp; x4
+      for (const n of nodes) {
+        if (n.name !== modName && !linkedNames.has(n.name)) {
+          sel.innerHTML += '<option value="' + esc(n.name) + '">' + prefix + esc(n.name) + '</option>';
+        }
+        if (n.children) _addTreeOpts(n.children, depth + 1);
+      }
+    }
+    _addTreeOpts(allModules, 0);
+  } catch (e) {
+    document.getElementById('related-modules-content').innerHTML = '<div class="empty-hint">加载失败</div>';
+    document.getElementById('related-modules-rt-content').innerHTML = '<div class="empty-hint">加载失败</div>';
+  }
+}
+
+async function linkModuleToModule() {
+  if (!selectedModuleName) return;
+  const sel = document.getElementById('link-module-select');
+  const targetName = sel.value;
+  if (!targetName) return;
+  try {
+    const r = await fetch('/api/bindings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ source_type: 'module', source_id: selectedModuleName, target_type: 'module', target_id: targetName }) });
+    const d = await r.json();
+    if (d.success) { toast('✅ 已关联模块: ' + targetName); loadRelatedModules(selectedModuleName); }
+    else toast('❌ ' + d.message);
+  } catch (e) { toast('❌ 关联失败'); }
+}
+
+async function unlinkModuleFromModule(targetName) {
+  if (!selectedModuleName) return;
+  try {
+    const r = await fetch('/api/bindings', { method: 'DELETE', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ a_type: 'module', a_id: selectedModuleName, b_type: 'module', b_id: targetName }) });
+    const d = await r.json();
+    if (d.success) { toast('✅ 已解除关联: ' + targetName); loadRelatedModules(selectedModuleName); }
+    else toast('❌ ' + d.message);
+  } catch (e) { toast('❌ 解除失败'); }
 }
 
 // ===== 模块关联弹窗（审核确认） =====
@@ -465,6 +566,15 @@ async function addGlossaryTerm() {
     const d = await r.json(); if (d.success) { document.getElementById('new-term-input').value = ''; document.getElementById('new-term-def').value = ''; loadGlossary(selectedModuleName); toast('✅ 术语已添加'); } else toast('❌ ' + d.message);
   } catch (e) { toast('❌ 添加失败'); }
 }
+async function deleteDocGlossaryTerm(termId) {
+  if (!selectedDocId) return;
+  try {
+    const r = await fetch('/api/docs/' + encodeURIComponent(selectedDocId) + '/glossary/' + termId, { method: 'DELETE' });
+    const d = await r.json();
+    if (d.success) { loadDocGlossary(selectedDocId); toast('✅ 已删除'); } else toast('❌ ' + d.message);
+  } catch (e) { toast('❌ 删除失败'); }
+}
+
 async function deleteGlossaryTerm(termId) {
   if (!selectedModuleName) return;
   try {
@@ -498,9 +608,9 @@ async function sendChat() {
         (p, m) => { msgDiv.querySelector('.body').textContent = '⏳ ' + m + ' (' + p + '%)'; },
         result => {
           if (result && !result.error) {
-            let html = '<div class="chat-msg"><div class="who ai">🤖 AI</div><div class="body">' + esc(result.reply || result.summary || JSON.stringify(result)) + '</div></div>';
+            let html = '<div class="chat-msg"><div class="who ai">🤖 AI</div><div class="body">' + escText(result.reply || result.summary || JSON.stringify(result)) + '</div></div>';
             if (result.excel_path) {
-              html += '<div class="result-panel"><h4>📊 测试计划</h4><p>Excel: ' + esc(result.excel_path) + '</p>'
+              html += '<div class="result-panel"><h4>📊 测试计划</h4><p>Excel: ' + escText(result.excel_path) + '</p>'
                 + '<button class="btn btn-sm btn-success js-confirm-plan" data-path="' + esc(result.excel_path) + '">确认并生成 PY+YAML</button>'
                 + excelActionButtons(result.excel_path, result.excel_name)
                 + '</div>';
@@ -508,8 +618,8 @@ async function sendChat() {
             }
             msgDiv.outerHTML = html;
           } else if (result && result.requires_review && result.excel_path) {
-            let html = '<div class="chat-msg"><div class="who ai" style="color:#e37400">⚠️ 需人工审查</div><div class="body">' + esc(result.reply || '') + '</div></div>';
-            html += '<div class="result-panel"><h4>📊 测试计划</h4><p>Excel: ' + esc(result.excel_path) + '</p>'
+            let html = '<div class="chat-msg"><div class="who ai" style="color:#e37400">⚠️ 需人工审查</div><div class="body">' + escText(result.reply || '') + '</div></div>';
+            html += '<div class="result-panel"><h4>📊 测试计划</h4><p>Excel: ' + escText(result.excel_path) + '</p>'
               + '<button class="btn btn-sm btn-success js-confirm-plan" data-path="' + esc(result.excel_path) + '">仍然生成 PY+YAML</button>'
               + excelActionButtons(result.excel_path, result.excel_name)
               + '</div>';
@@ -573,7 +683,7 @@ async function sendWorkflowChat() {
           if (result && !result.error) {
             let html = '<div class="chat-msg"><div class="who ai">🤖 AI</div><div class="body">' + esc(result.reply || JSON.stringify(result)) + '</div></div>';
             if (result.excel_path) {
-              html += '<div class="result-panel"><h4>📊 测试计划</h4><p>Excel: ' + esc(result.excel_path) + '</p>'
+              html += '<div class="result-panel"><h4>📊 测试计划</h4><p>Excel: ' + escText(result.excel_path) + '</p>'
                 + '<button class="btn btn-sm btn-success js-confirm-plan" data-path="' + esc(result.excel_path) + '">确认并生成 PY+YAML</button>'
                 + excelActionButtons(result.excel_path, result.excel_name)
                 + '</div>';
@@ -612,7 +722,7 @@ async function confirmWorkflowModule(sessionId, moduleName) {
           if (result && !result.error) {
             let html = '<div class="chat-msg"><div class="who ai">🤖 AI</div><div class="body">' + esc(result.reply || JSON.stringify(result)) + '</div></div>';
             if (result.excel_path) {
-              html += '<div class="result-panel"><h4>📊 测试计划</h4><p>Excel: ' + esc(result.excel_path) + '</p>'
+              html += '<div class="result-panel"><h4>📊 测试计划</h4><p>Excel: ' + escText(result.excel_path) + '</p>'
                 + '<button class="btn btn-sm btn-success js-confirm-plan" data-path="' + esc(result.excel_path) + '">确认并生成 PY+YAML</button>'
                 + excelActionButtons(result.excel_path, result.excel_name)
                 + '</div>';
@@ -632,39 +742,40 @@ async function confirmWorkflowModule(sessionId, moduleName) {
 
 // ---- 确认计划（PY+YAML 生成） ----
 async function confirmPlan(excelPath) {
+  const box = document.getElementById('chat-box');
+  const msgDiv = document.createElement('div'); msgDiv.className = 'chat-msg';
+  msgDiv.innerHTML = '<div class="who ai">🤖 AI</div><div class="body">⏳ 正在生成 PY+YAML...（0%）</div>';
+  box.appendChild(msgDiv); box.scrollTop = box.scrollHeight;
   const fd = new FormData(); fd.append('excel_path', excelPath);
   try {
     const r = await fetch('/confirm-plan', { method: 'POST', body: fd }); const d = await r.json();
     if (d.success && d.task_id) {
-      toast('⏳ 正在生成 PY+YAML...');
-      const msgDiv = document.getElementById('chat-box').querySelector('.chat-msg:last-child');
       await pollTask(d.task_id,
-        (p, m) => { if (msgDiv) msgDiv.querySelector('.body').textContent = '⏳ ' + m + ' (' + p + '%)'; },
+        (p, m) => { msgDiv.querySelector('.body').textContent = '⏳ ' + m + '（' + p + '%）'; },
         result => {
           if (result && !result.error) {
-            let html = '<div class="chat-msg"><div class="who ai">🤖 AI</div><div class="body">✅ ' + esc(result.message) + '</div></div>';
+            let html = '<div class="chat-msg"><div class="who ai">🤖 AI</div><div class="body">✅ ' + escText(result.message) + '</div></div>';
             if (result.py_path) {
-              html += '<div class="result-panel"><h4>🐍 测试文件</h4><p>PY: ' + esc(result.py_path) + '</p>'
+              html += '<div class="result-panel"><h4>🐍 测试文件</h4><p>PY: ' + escText(result.py_path) + '</p>'
                 + excelActionButtons(result.py_path, result.py_file) + '</div>';
             }
             if (result.excel_path) {
-              html += '<div class="result-panel"><h4>📊 Excel 测试计划</h4><p>Excel: ' + esc(result.excel_path) + '</p>'
+              html += '<div class="result-panel"><h4>📊 Excel 测试计划</h4><p>Excel: ' + escText(result.excel_path) + '</p>'
                 + excelActionButtons(result.excel_path, 'test_plan.xlsx') + '</div>';
             }
-            const box = document.getElementById('chat-box');
-            box.innerHTML += html;
-            box.scrollTop = box.scrollHeight;
-            toast('✅ ' + result.message);
-          } else toast('❌ ' + (result ? result.error : '生成失败'));
+            box.innerHTML += html; box.scrollTop = box.scrollHeight;
+          } else {
+            msgDiv.querySelector('.body').innerHTML = '<span style="color:var(--danger)">❌ ' + escText(result ? result.error : '生成失败') + '</span>';
+          }
         });
-    } else toast('❌ ' + (d.message || '提交失败'));
-  } catch (e) { toast('❌ ' + e.message); }
+    } else { msgDiv.querySelector('.body').innerHTML = '<span style="color:var(--danger)">❌ ' + escText(d.message || '提交失败') + '</span>'; }
+  } catch (e) { msgDiv.querySelector('.body').innerHTML = '<span style="color:var(--danger)">❌ ' + escText(e.message) + '</span>'; }
 }
 
 // ---- 文件编辑器 ----
 async function openFileEditor(path) {
   try {
-    const r = await fetch('/api/file-content?path=' + encodeURIComponent(path)); const d = await r.json();
+    const r = await fetch('/api/files/file-content?path=' + encodeURIComponent(path)); const d = await r.json();
     if (!d.success) { toast('❌ ' + (d.message || '读取失败')); return; }
     if (d.binary) { toast('二进制文件无法编辑'); return; }
     editorPath = path; editorDirty = false;
@@ -678,7 +789,7 @@ async function saveFileEditor() {
   if (!editorPath) return;
   try {
     const content = document.getElementById('file-editor-textarea').value;
-    const r = await fetch('/api/file-save', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path: editorPath, content }) });
+    const r = await fetch('/api/files/file-save', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path: editorPath, content }) });
     const d = await r.json(); if (d.success) { editorDirty = false; toast('✅ 已保存'); } else toast('❌ ' + d.message);
   } catch (e) { toast('❌ 保存失败'); }
 }

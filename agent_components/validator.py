@@ -19,15 +19,17 @@ ValidationResult = Tuple[bool, List[str]]
 # ==================== Excel 校验 ====================
 
 VALID_ENABLED = {"Y", "N"}
-EXPECTED_HEADERS = [
-    "项目名称", "Allure Epic", "模块名称", "Allure Feature",
-    "Allure Story", "fixture等级",
-    "用例名称", "执行步骤", "测试数据YAML", "是否启用",
+EXPECTED_HEADERS_SHEET1 = [
+    "@allure.epic", "@allure.feature", "@allure.story", "@allure.title",
+    "fixture等级", "用例编号", "前置步骤", "执行步骤", "预期结果",
+]
+EXPECTED_HEADERS_SHEET2 = [
+    "前置编号", "前置名称", "详细步骤", "预期结果", "关联用例",
 ]
 
 
 def validate_excel_file(excel_path: str) -> ValidationResult:
-    """校验 Excel 测试计划文件。"""
+    """校验 Excel 测试计划文件（双 Sheet）。"""
     errors = []
 
     if not os.path.exists(excel_path):
@@ -39,43 +41,39 @@ def validate_excel_file(excel_path: str) -> ValidationResult:
     except Exception as e:
         return False, [f"无法打开 Excel 文件: {e}"]
 
-    ws = wb.active
-    if ws is None:
+    # Sheet 1
+    ws1 = wb.active
+    if ws1 is None:
         return False, ["Excel 文件为空"]
-
-    # 1. 检查表头
-    headers = [cell.value for cell in ws[1]]
-    for i, expected in enumerate(EXPECTED_HEADERS):
-        if i >= len(headers) or headers[i] != expected:
-            errors.append(f"表头第{i+1}列应为'{expected}'，实际为'{headers[i] if i < len(headers) else '缺失'}'")
-
-    # 2. 逐行校验
-    for row_idx, row in enumerate(ws.iter_rows(min_row=2, values_only=True), start=2):
+    h1 = [cell.value for cell in ws1[1]]
+    for i, expected in enumerate(EXPECTED_HEADERS_SHEET1):
+        if i >= len(h1) or h1[i] != expected:
+            errors.append(f"Sheet1 表头第{i+1}列应为'{expected}'，实际为'{h1[i] if i < len(h1) else '缺失'}'")
+    for row_idx, row in enumerate(ws1.iter_rows(min_row=2, values_only=True), start=2):
         if row[0] is None:
-            continue  # 跳过空行
+            continue
+        if not str(row[4] or "").strip():
+            errors.append(f"Sheet1 第{row_idx}行: fixture等级为空")
+        for ci, cn in [(0, "epic"), (1, "feature"), (2, "story"), (3, "title"),
+                        (7, "执行步骤")]:
+            v = row[ci]
+            if v is None or (isinstance(v, str) and not v.strip()):
+                errors.append(f"Sheet1 第{row_idx}行: {cn}为空")
 
-        # case_name: 必须以 test_ 开头
-        case_name = str(row[6] or "")
-        if not case_name.startswith("test_"):
-            errors.append(f"第{row_idx}行: case_name '{case_name}' 必须以 test_ 开头")
-
-        # enabled: 只能是 Y/N
-        enabled = str(row[9] or "")
-        if enabled not in VALID_ENABLED:
-            errors.append(f"第{row_idx}行: enabled '{enabled}' 必须为 Y 或 N")
-
-        # fixture_level: 不为空
-        fixture = str(row[5] or "")
-        if not fixture.strip():
-            errors.append(f"第{row_idx}行: fixture_level 为空")
-
-        # 必填字段
-        for col_idx, col_name in [(0, "项目名称"), (1, "Allure Epic"), (2, "模块名称"),
-                                   (3, "Allure Feature"), (4, "Allure Story"), (7, "执行步骤"),
-                                   (8, "测试数据YAML")]:
-            val = row[col_idx]
-            if val is None or (isinstance(val, str) and not val.strip()):
-                errors.append(f"第{row_idx}行: {col_name} 为空")
+    # Sheet 2
+    if "共享前置" in wb.sheetnames:
+        ws2 = wb["共享前置"]
+        h2 = [cell.value for cell in ws2[1]]
+        for i, expected in enumerate(EXPECTED_HEADERS_SHEET2):
+            if i >= len(h2) or h2[i] != expected:
+                errors.append(f"Sheet2 表头第{i+1}列应为'{expected}'，实际为'{h2[i] if i < len(h2) else '缺失'}'")
+        for row_idx, row in enumerate(ws2.iter_rows(min_row=2, values_only=True), start=2):
+            if row[0] is None:
+                continue
+            for ci, cn in [(0, "前置编号"), (1, "前置名称"), (2, "详细步骤"), (3, "预期结果")]:
+                v = row[ci]
+                if v is None or (isinstance(v, str) and not v.strip()):
+                    errors.append(f"Sheet2 第{row_idx}行: {cn}为空")
 
     wb.close()
     return len(errors) == 0, errors

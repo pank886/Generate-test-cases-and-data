@@ -105,14 +105,19 @@ def api_def_extract_prompt() -> ChatPromptTemplate:
 
 
 def repair_excel_plan_prompt() -> ChatPromptTemplate:
-    """Excel 计划修复 prompt：基于错误上下文重新生成"""
+    """Excel 计划修复 prompt：基于原始思考文本重新生成失败行。"""
     return ChatPromptTemplate.from_messages([
         ("system",
-         "你正在修复一个 Excel 测试计划。\n\n"
+         "你正在修复一个 Excel 测试计划。已通过校验的行不需要修改，你只需要重新填写失败的行。\n\n"
          "### 原始任务说明\n{original_system}\n\n"
-         "### 用户输入\n{user_vars}\n\n"
-         "### 之前的错误输出\n{bad_output}\n\n"
-         "### 校验失败原因\n{repair_errors}\n\n"
-         "请修复以上错误，输出修正后的完整 JSON。禁止 Markdown。"),
-        ("human", "请输出修正后的 Excel 测试计划 JSON：")
+         "### 原始测试分析报告（供补全缺失信息）\n{original_test_analysis}\n\n"
+         "### 已通过的行（无需修改，仅作参考）\n{passed_rows_summary}\n\n"
+         "### 失败的行及错误（仅需修复这些行）\n{failed_rows_detail}\n\n"
+         "### 修复指南\n"
+         "1. 仔细阅读原始测试分析报告，找到失败行对应的用例，补全缺失的步骤或预期\n"
+         "2. 如果步骤和预期条数不一致，根据原始报告补齐缺失的条目\n"
+         "3. 如果前置引用不存在，检查原始报告中的 PRE 编号，修正为正确编号\n"
+         "4. 只修复失败的行，已通过的行原样保留\n"
+         "5. 输出完整的 JSON（shared_preconditions + test_cases），禁止 Markdown。"),
+        ("human", "请输出修正后的完整 Excel 测试计划 JSON：")
     ])

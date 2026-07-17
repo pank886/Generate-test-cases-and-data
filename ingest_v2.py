@@ -65,7 +65,10 @@ def _extract_text(file_path: str) -> str:
     if ext == ".pdf":
         from pypdf import PdfReader
         reader = PdfReader(file_path)
-        texts = [p.extract_text() for p in reader.pages if p.extract_text()]
+        texts = []
+        for p in reader.pages:
+            t = p.extract_text()
+            if t: texts.append(t)
         return "\n\n".join(texts)
     elif ext in (".md", ".txt"):
         with open(file_path, "r", encoding="utf-8") as f:
@@ -210,6 +213,8 @@ def process_product_doc(file_path: str, progress_cb=None) -> dict:
         progress_cb: 可选，进度回调 (0~100, message)
     """
     cb = progress_cb or (lambda p, m: None)
+    from observability import log_phase_header
+    log_phase_header("Phase A — 文档摄入与向量化")
     logger.info(f"\n{'=' * 60}")
     logger.info(f"[Phase A] 处理产品文档: {os.path.basename(file_path)}")
 

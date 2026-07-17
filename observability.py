@@ -203,3 +203,81 @@ def get_error_snapshot_logger() -> logging.Logger:
 
     _repair_logger = logger
     return logger
+
+
+# ====== Thinking 节点日志（提示词调优专用） ======
+
+_thinking_logger: logging.Logger | None = None
+
+
+def get_thinking_logger() -> logging.Logger:
+    """返回专用于记录 thinking 节点输出的 RotatingFileHandler logger。
+
+    文件: {LOG_DIR}/thinking_trace.log，超过 5MB 自动轮转，保留 10 个归档。
+    """
+    global _thinking_logger
+    if _thinking_logger is not None:
+        return _thinking_logger
+
+    if not _initialized:
+        init_logging()
+
+    tlog = logging.getLogger("thinking_trace")
+    tlog.propagate = False
+    if not tlog.handlers:
+        h = logging.handlers.RotatingFileHandler(
+            os.path.join(LOG_DIR, "thinking_trace.log"),
+            maxBytes=5 * 1024 * 1024,
+            backupCount=10,
+            encoding="utf-8",
+        )
+        h.setLevel(logging.DEBUG)
+        h.setFormatter(logging.Formatter("%(asctime)s | %(message)s"))
+        tlog.addHandler(h)
+        tlog.setLevel(logging.DEBUG)
+
+    _thinking_logger = tlog
+    return tlog
+
+
+def log_phase_header(phase: str) -> None:
+    """在 thinking 日志中写入醒目的阶段分隔线。
+
+    格式: ==================== Phase A ========================
+
+    Args:
+        phase: 阶段名（如 Phase A / Phase B / Phase C）
+    """
+    tlog = get_thinking_logger()
+    sep = "=" * 25
+    tlog.info("\n%s %s %s", sep, phase, sep)
+
+
+def log_thinking(node: str, user_input: str, output: str, prompt_label: str = "") -> None:
+    """记录 thinking 节点的输入输出到专属日志。
+
+    Args:
+        node: 节点名（如 analyze_scenarios / analyze_test_points_raw / analyze_data_deps）
+        user_input: 用户原始输入
+        output: LLM 完整非结构化输出文本
+        prompt_label: Prompt 标识（如 analyze_scenarios_prompt），方便定位使用的提示词模板
+    """
+    tlog = get_thinking_logger()
+
+    # 构造分段日志，每个节点用醒目的 *** 分隔
+    header = f"*** {node} ***"
+    if prompt_label:
+        header += f"  [prompt: {prompt_label}]"
+
+    tlog.info(
+        "%s\n"
+        "用户输入: %s\n"
+        "--- LLM 输出 (%d 字符) ---\n"
+        "%s\n"
+        "=== END %s ===\n\n\n",
+        header,
+        user_input[:500] if user_input else "（无）",
+        len(output),
+        output,
+        node,
+    )

@@ -52,7 +52,43 @@ class ApiDefinition(BaseModel):
 
 
 # ============================================================
-# Excel 测试计划（Phase A 最终产出）
+# Excel V2 — 双 Sheet（共享前置 + 测试用例）
+# ============================================================
+
+class SharedPrecondition(BaseModel):
+    """共享前置条件 — Excel Sheet 2 的一行"""
+    id: str = Field(description="全局唯一编号，如 PRE-001")
+    name: str = Field(description="前置名称，如「已创建测试跑步机」")
+    steps: str = Field(description="详细步骤文本，\\n 分隔")
+    expected: str = Field(description="预期结果文本")
+
+
+class TestCaseRow(BaseModel):
+    """测试用例 — Excel Sheet 1 的一行。epic/feature 由代码从模块树填入，不走 LLM。"""
+    id: str = Field(description="全局唯一编号，如 TC-001")
+    story: str = Field(description="子模块名（对应 @allure.story），从产品文档中提取的模块名称，如「设施管理」，嵌套时用 A-a 格式")
+    title: str = Field(description="用例名称（对应 @allure.title），如「设施管理-新增设施-正向」")
+    preconditions: list[str] = Field(
+        default_factory=list,
+        description="引用的前置编号列表，如 ['PRE-001', 'PRE-002']"
+    )
+    steps: str = Field(description="执行步骤文本，\\n 分隔")
+    expected: str = Field(description="预期结果文本，\\n 分隔")
+
+
+class ExcelPlanV2(BaseModel):
+    """Excel 测试计划 V2（双 Sheet）"""
+    shared_preconditions: list[SharedPrecondition] = Field(
+        description="共享前置列表 — 写入 Sheet 2"
+    )
+    test_cases: list[TestCaseRow] = Field(
+        description="测试用例列表 — 写入 Sheet 1"
+    )
+    file_name: str = Field(default="test_plan.xlsx", description="输出的 Excel 文件名")
+
+
+# ============================================================
+# Excel 测试计划 V1（保留兼容）
 # ============================================================
 
 class ExcelRow(BaseModel):

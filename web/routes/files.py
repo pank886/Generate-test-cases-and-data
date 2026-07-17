@@ -25,7 +25,7 @@ def _win_remove(path: str, max_retries: int = 3):
                 raise
 
 
-router = APIRouter(tags=["files"])
+router = APIRouter(prefix="/api/files", tags=["files"])
 
 
 @router.post("/upload-file")
@@ -134,12 +134,31 @@ async def delete_file(filename: str = Form(...)):
             doc_id = doc.id if doc else None
 
         if not doc:
-            # 仅清理内存状态+物理文件
+            # SQLite 无记录，仍须尝试清理 ChromaDB + .meta.json（防孤儿向量数据）
             if file_path:
+                meta_path = file_path + ".meta.json"
+                _doc_id = None
+                if _os.path.exists(meta_path):
+                    try:
+                        import json as _json
+                        with open(meta_path, "r", encoding="utf-8") as _mf:
+                            _doc_id = _json.load(_mf).get("doc_id")
+                    except Exception:
+                        pass
+                if _doc_id and _chroma_db is not None:
+                    try:
+                        _chroma_db.delete_by_doc_id(_doc_id)
+                        logger.info("已清理 ChromaDB 孤儿数据: doc_id=%s (来自 meta.json)", _doc_id)
+                    except Exception:
+                        logger.warning("ChromaDB 孤儿数据清理失败: doc_id=%s", _doc_id, exc_info=True)
+                # 物理文件 + meta.json
                 try:
                     _win_remove(file_path)
                 except (FileNotFoundError, PermissionError):
                     pass
+                if _os.path.exists(meta_path):
+                    try: _win_remove(meta_path)
+                    except (FileNotFoundError, PermissionError): pass
             await _remove_imported_file(filename)
             return {"success": True,
                     "message": f"已删除 '{filename}'"}
@@ -258,7 +277,7 @@ async def open_file(file_path: str = Form(...)):
                             content={"success": False, "message": str(e)})
 
 
-@router.get("/api/download-file")
+@router.get("/download-file")
 async def download_file(path: str = ""):
     """下载生成的文件（Excel / PY / YAML）。"""
     import config
@@ -269,16 +288,24 @@ async def download_file(path: str = ""):
     abs_path = _os.path.abspath(path)
     allowed_dirs = [
         _os.path.abspath(config.TESTCASE_BASE),
-        _os.path.abspath("uploads"),
+        _os.path.abspath(_os.path.join(config.BASE_DIR, "uploads")),
     ]
-    if not any(abs_path.startswith(d) for d in allowed_dirs):
+    # 路径包含检查（commonpath 防 sibling 绕过 + try/except 防跨盘符 ValueError）
+    _safe = False
+    for d in allowed_dirs:
+        try:
+            _safe = _os.path.commonpath([abs_path, d]) == d
+        except ValueError:
+            continue  # 跨盘符路径 → 拒绝
+        if _safe: break
+    if not _safe:
         return JSONResponse(status_code=403,
                             content={"success": False, "message": "无权访问该路径"})
     filename = _os.path.basename(abs_path)
     return FileResponse(abs_path, filename=filename)
 
 
-@router.get("/api/file-content")
+@router.get("/file-content")
 async def get_file_content(path: str = ""):
     """读取文件内容（供前端查看/编辑）。"""
     import config
@@ -320,7 +347,7 @@ async def get_file_content(path: str = ""):
                             content={"success": False, "message": str(e)})
 
 
-@router.post("/api/file-save")
+@router.post("/file-save")
 async def save_file_content(data: dict):
     """保存修改后的文件内容。"""
     import config

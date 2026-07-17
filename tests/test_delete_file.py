@@ -79,7 +79,7 @@ def _add_to_memory(file_name, file_type="product"):
 # 删除测试使用的前端工具方法
 def _delete_file(client, filename):
     """通过 POST /delete-file 发送删除请求（模拟前端 FormData）。"""
-    return client.post("/delete-file", data={"filename": filename})
+    return client.post("/api/files/delete-file", data={"filename": filename})
 
 
 # ============================================================
@@ -93,7 +93,7 @@ class TestNormalDelete:
         """删除后文件列表不再包含该文件。"""
         _create_doc("test.pdf")
         # 删除前列表应有 1 个文件
-        before = client.get("/uploaded-files").json()
+        before = client.get("/api/files/uploaded-files").json()
         assert len(before["files"]) == 1
 
         # 执行删除
@@ -102,7 +102,7 @@ class TestNormalDelete:
         assert resp.json()["success"] is True
 
         # 删除后列表应空
-        after = client.get("/uploaded-files").json()
+        after = client.get("/api/files/uploaded-files").json()
         assert len(after["files"]) == 0
 
     def test_delete_multiple_files(self, client):
@@ -118,7 +118,7 @@ class TestNormalDelete:
         assert resp2.json()["success"] is True
         assert resp3.json()["success"] is True
 
-        after = client.get("/uploaded-files").json()
+        after = client.get("/api/files/uploaded-files").json()
         assert len(after["files"]) == 0
 
     def test_delete_unknown_file_returns_success(self, client):
@@ -148,7 +148,7 @@ class TestNoLocalFile:
         assert resp.json()["success"] is True
 
         # 文件不应再出现在列表中
-        after = client.get("/uploaded-files").json()
+        after = client.get("/api/files/uploaded-files").json()
         assert len(after["files"]) == 0
 
     def test_delete_after_physical_file_removed(self, client):
@@ -168,7 +168,7 @@ class TestNoLocalFile:
         resp = _delete_file(client, "cleanup.pdf")
         assert resp.status_code == 200
 
-        after = client.get("/uploaded-files").json()
+        after = client.get("/api/files/uploaded-files").json()
         assert len(after["files"]) == 0
 
 

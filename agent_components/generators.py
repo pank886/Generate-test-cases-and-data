@@ -1,4 +1,4 @@
-"""PY/YAML 生成节点 Mixin"""
+"""Phase C: PY/YAML 生成节点 Mixin"""
 import os
 import json
 
@@ -23,6 +23,8 @@ class GenerationMixin:
         """数据依赖分析（thinking on，自由文本）。"""
         from prompts.extraction_prompts import analyze_data_deps_prompt
 
+        from observability import log_phase_header
+        log_phase_header("Phase C — 数据依赖分析")
         logger.info("\n🧠 分析数据依赖（深度思考）...")
         prompt = analyze_data_deps_prompt()
         llm_kwargs = {}
@@ -38,6 +40,8 @@ class GenerationMixin:
         ))
         analysis = result.content if hasattr(result, "content") else str(result)
         logger.info(f"   => 数据依赖分析完成（{len(analysis)} 字符）")
+        from observability import log_thinking
+        log_thinking("analyze_data_deps", user_ctx, analysis, prompt_label="analyze_data_deps_prompt")
         return analysis
 
     def _format_data_plan(self, data_analysis: str, case_steps: str,
@@ -69,21 +73,24 @@ class GenerationMixin:
         """
         from openpyxl import load_workbook
         wb = load_workbook(excel_path)
-        ws = wb.active
-        rows = []
-        for row in ws.iter_rows(min_row=2, values_only=True):
-            if row[0] is None:
-                continue
-            if enabled_only and row[9] != "Y":
-                continue
-            rows.append({
-                "project_name": row[0], "allure_epic": row[1],
-                "module_name": row[2], "allure_feature": row[3],
-                "allure_story": row[4], "fixture_level": row[5],
-                "case_name": row[6], "steps": row[7],
-                "test_data_yaml": row[8], "enabled": row[9],
-            })
-        return rows
+        try:
+            ws = wb.active
+            rows = []
+            for row in ws.iter_rows(min_row=2, values_only=True):
+                if row[0] is None:
+                    continue
+                if enabled_only and row[9] != "Y":
+                    continue
+                rows.append({
+                    "project_name": row[0], "allure_epic": row[1],
+                    "module_name": row[2], "allure_feature": row[3],
+                    "allure_story": row[4], "fixture_level": row[5],
+                    "case_name": row[6], "steps": row[7],
+                    "test_data_yaml": row[8], "enabled": row[9],
+                })
+            return rows
+        finally:
+            wb.close()
 
     def _generate_py_file(self, excel_path: str, project_name: str = None) -> dict:
         """逐模块生成 .py 测试文件（外层循环 I/O，内层 LLM 单 class 生成）"""

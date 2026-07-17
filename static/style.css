@@ -65,8 +65,7 @@ nav a:hover,nav a.active{color:#fff;border-bottom-color:#fff}
 .glossary-item .term-name{font-weight:600;color:var(--primary)}
 .glossary-item .term-def{color:var(--text-dim);margin-top:2px}
 .glossary-item .remove{float:right;color:var(--danger);cursor:pointer}
-.new-term-row{display:flex;gap:4px;margin-top:8px}
-.new-term-row input{flex:1;padding:5px 8px;border:1px solid var(--border);border-radius:4px;font-size:11px}
+.new-term-row{margin-top:8px}.new-term-line{margin-bottom:4px}.new-term-line input,.new-term-line textarea{width:100%;padding:5px 8px;border:1px solid var(--border);border-radius:4px;font-size:11px;font-family:inherit;box-sizing:border-box}.new-term-line textarea{resize:vertical;min-height:48px;overflow-y:auto}
 .search-box input{width:100%;padding:7px 10px;border:1px solid var(--border);border-radius:4px;font-size:12px;margin-bottom:10px}
 .scroll-list{scrollbar-width:thin;scrollbar-color:var(--border) transparent}
 .scroll-list::-webkit-scrollbar{width:5px}.scroll-list::-webkit-scrollbar-thumb{background:var(--border);border-radius:3px}
@@ -84,6 +83,7 @@ nav a:hover,nav a.active{color:#fff;border-bottom-color:#fff}
 
 /* 弹窗 */
 .progress-wrap{margin-top:12px}.progress-bar{width:100%;height:6px;background:#eee;border-radius:3px;overflow:hidden}.progress-fill{height:100%;background:var(--primary);border-radius:3px;transition:width .3s}
+#upload-progress-container{display:flex;flex-direction:column;gap:12px}.upload-progress-card{animation:fadeIn .3s ease}@keyframes fadeIn{from{opacity:0;transform:translateY(-8px)}to{opacity:1;transform:translateY(0)}}
 .toast{position:fixed;bottom:24px;right:24px;z-index:9999;background:#333;color:#fff;padding:12px 20px;border-radius:6px;font-size:13px;opacity:0;transform:translateY(16px);transition:.3s;pointer-events:none}
 .toast.show{opacity:1;transform:translateY(0)}
 .modal-overlay{position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,.4);z-index:1000;display:flex;align-items:center;justify-content:center}

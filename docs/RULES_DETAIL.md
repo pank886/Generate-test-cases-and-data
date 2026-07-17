@@ -1,5 +1,7 @@
 # 架构规则详情
 
+> 最后编译: 2026-07-14 | 覆盖问题: 67 项 (P0×24, P1×26, P2×15, 架构改进×2) | [Ref: 42~47]
+
 <!-- RULE: M1 -->
 <!-- PRIORITY: P0 -->
 <!-- KEYWORDS: session.commit, get_session_ctx, add_product_doc_chunks, add_api_defs, _save_to_sqlite, _delete_sqlite_doc, _add_imported_file, BindingOps.delete_bindings_for_doc, DocOps.delete_document, os.remove, _remove_imported_file -->
@@ -60,13 +62,15 @@ async def lifespan(app):
 **边界情况**：
 - `_add_imported_file` 是内存缓存，失败时不应回滚 SQLite/ChromaDB（缓存可丢，数据不可丢）
 - 删除端点中磁盘文件不存在时，仍须清理 SQLite + 内存（不阻断流程）
+- **新增**：删除端点中 SQLite 记录缺失时，须从 `.meta.json` 读取 doc_id 尝试清理 ChromaDB，防止检索污染
+- **新增**：补偿函数必须返回 bool 或抛出异常，调用方必须检查返回值并记录失败
 - `get_session_ctx()` 内部已处理 commit/rollback，不需要在业务代码中手动调用
 
 ---
 
 <!-- RULE: M2 -->
 <!-- PRIORITY: P0 -->
-<!-- KEYWORDS: _invoke_structured, with_structured_output, METHOD_FEATURES, thinking, extra_body, model_validator, IntentConfirmation, ApiDefinition, TestCase, ChatPromptTemplate, prompt.input_variables -->
+<!-- KEYWORDS: _invoke_structured, with_structured_output, METHOD_FEATURES, thinking, extra_body, model_validator, IntentConfirmation, ApiDefinition, TestCase, ChatPromptTemplate, prompt.input_variables, FallbackOllamaEmbeddings, _embed_via_old_api, /api/embed, /api/embeddings, _should_use_old_api -->
 
 ## M2：LLM 交互规范
 
@@ -160,6 +164,7 @@ prompt = ChatPromptTemplate.from_messages([
 - 节点函数中的 `_invoke_structured` 也必须包裹 try/except（如 `_format_test_points`）
 - ChatPromptTemplate 中 JSON 格式字符串的 `{key}` 须用 `{{key}}` 双大括号转义；新增或修改 prompt 后须通过 `prompt.input_variables` 确认无意外变量泄漏
 - `${{get_extract_data(...)}}` 等合法双括号引用不受影响（LangChain 将 `{{` 渲染为字面量 `{`）
+- Embedding API 端点版本不匹配时必须降级：Ollama 服务端 v0.1.x 仅支持 `/api/embeddings`，Python 客户端 v0.6+ 调 `/api/embed` 返回 404 时，调用方必须自动降级到 `/api/embeddings`；降级状态按 URL 缓存至模块级存储（非 Pydantic 字段），避免同服务端重复探测
 
 ---
 
@@ -171,7 +176,7 @@ prompt = ChatPromptTemplate.from_messages([
 
 **核心定义**：禁止裸 except、禁止空 catch、禁止静默吞异常、禁止将可能为 None 的值直接传给下游。所有 except 块必须至少记录日志。
 
-**涵盖原规则**：EL-1~14, FP-9, FP-10
+**涵盖原规则**：EL-1~14, FP-9, FP-10, [Ref: 34], [Ref: 35], [Ref: 36], [Ref: 39], [Ref: 40]
 
 ✅ **正确示例**：
 ```python
@@ -225,11 +230,11 @@ catch (e) {}  # 用户永远看不到错误
 
 <!-- RULE: M4 -->
 <!-- PRIORITY: P1 -->
-<!-- KEYWORDS: threading.Lock, _lock, BoundedSemaphore, ThreadPoolExecutor, max_workers, max_queue, asyncio.Lock, run_coroutine_threadsafe -->
+<!-- KEYWORDS: threading.Lock, _lock, BoundedSemaphore, ThreadPoolExecutor, max_workers, max_queue, asyncio.Lock, run_coroutine_threadsafe, reload_llm, _llm_instance, @property llm, httpx.Client, asyncio.to_thread -->
 
 ## M4：并发安全
 
-**核心定义**：双检锁的副作用必须在锁内执行；所有模块级单例必须用 `threading.Lock` 保护；线程池必须有界阻塞。
+**核心定义**：双检锁的副作用必须在锁内执行；所有模块级单例必须用 `threading.Lock` 保护；线程池必须有界阻塞；跨工作流共享的 HTTP 客户端（LLM/Embedding）必须在每轮工作流启动时重建连接池。
 
 **涵盖原规则**：CS-1~6
 
@@ -263,11 +268,30 @@ if _instance is None:
 
 # 标准线程池无界队列 → 突发流量 OOM
 executor = ThreadPoolExecutor(max_workers=10)
+
+# LLM 单例 httpx.Client 跨工作流复用 → 僵死连接导致 Connection error
+_llm_instance = DeepSeekChatOpenAI(...)  # 全局单例，永不重建
+# Phase B 大量调用后连接池残留僵死连接，Phase C 复用即崩溃
+```
+
+✅ **更多正确示例**：
+```python
+# LLM 客户端惰性属性 + 热重载机制
+@property
+def llm(self):
+    return _get_llm()  # 惰性获取，reload_llm() 后自动拿新实例
+
+# 工作流入口显式重建 HTTP 客户端
+def _run_chat_bg(task_id, user_input):
+    reload_llm()  # 销毁旧客户端 → 下一行 self.llm 重建 → 新连接池
+    response = await asyncio.to_thread(_chat_func, user_input)
 ```
 
 **边界情况**：
 - `asyncio.Lock` 跨线程访问需经 `run_coroutine_threadsafe` 调度回事件循环
 - 数据库引擎单例与 LLM 客户端单例保护模式相同
+- `httpx.Client` 非线程安全，`asyncio.to_thread` 中使用的 HTTP 客户端必须独立于事件循环线程的生命周期；跨工作流复用时必须在入口处重建，关键路径：`reload_llm()` → `_llm_instance = None` → 下次 `@property llm` 惰性创建
+- LLM 客户端的 `@property` 惰性获取模式可推广至所有需要热重载的模块级单例
 
 ---
 
@@ -433,6 +457,7 @@ await _update_task(task_id, progress=80, message="处理完成")
 - `lifespan` 中创建的纯粹局部变量（如 `_cleanup_task`, `_meta`）无需 global 声明
 - `settings.py` 中 `Field(ge=..., le=...)` 约束用于启动时校验
 - 测试时可通过 `@patch("config.CHROMA_RETRY_DELAY", 0.1)` 缩短配置值
+- **新增**：所有后台任务（`confirmPlan`、`_confirm_plan_bg` 等）必须配套实时进度更新，禁止仅用 toast 做首尾通知；前端须用 `pollTask` + 内嵌进度消息模式
 
 ---
 
@@ -506,3 +531,8 @@ function init() {
 - 模板中注入 JS 变量必须用 `var`（函数作用域可跨 `<script>` 块访问），不能用 `const`
 - cache-busting 参数（`?v=YYYYMMDD`）在每次更新前端文件时递增
 - `onclick=` / `onchange=` 内联事件绑定的函数必须在全局作用域可访问
+- **新增**：`try/catch/finally` 之间共享的标志变量必须声明在函数作用域顶层，禁止在 `try{}` 块内用 `let/const` 声明（块作用域导致 `catch`/`finally` 无法访问）
+- **新增**：动态文件路径传递给按钮时，必须用 `data-*` 属性 + 全局事件委托模式，禁止在 HTML 字符串中 `'...' + esc(path) + '...'` 拼入 JS 字面量（`esc()` 的 `&#39;` 会被 HTML 解码为 `'` 破坏 JS 语法）
+- **新增**：上传等异步操作的完成状态用 JS 闭包变量追踪，不依赖 UI 文本内容匹配
+- **新增**：并发文件上传必须为每个文件创建独立进度卡片（`up-{timestamp}-{random}` ID），禁止多文件共享全局单例进度指示器
+- **新增**：HTML 文本内容展示用轻量 `escText()`（仅转义 `&` `<` `>`），HTML 属性值用完整 `esc()`（含 `\` `'` `"`），禁止混用导致反斜杠双重转义

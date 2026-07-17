@@ -103,6 +103,8 @@ Workflow（运行阶段）
 - Python 3.10+
 - [Ollama](https://ollama.ai/)（本地嵌入模型，必需）
 - 安装嵌入模型：`ollama pull bge-m3`
+- 启动前运行 `.\infra\start_ollama.bat` 自动检测并启动 Ollama
+- **GPU 显存 < 4GB 建议用 CPU 模式**（见下方 [GPU 显存不足？](#gpu-显存不足)）
 - LLM：DeepSeek API（推荐）或本地模型
 
 ### 安装
@@ -291,6 +293,24 @@ Generate-test-cases-and-data/
 | Excel 处理 | openpyxl |
 | YAML 生成 | PyYAML |
 | 日志 | 结构化 JSON（ContextVar trace_id 追踪） |
+
+---
+
+## GPU 显存不足？
+
+bge-m3 模型（567M 参数，F16 精度）需要约 1.1GB 显存。若 GPU 显存 < 4GB，建议强制使用 CPU 运行，避免模型卡死或超时。
+
+```powershell
+# 1. 创建 CPU-only 版本（项目根目录已包含 Modelfile）
+ollama create bge-m3-cpu -f ./infra/Modelfile
+
+# 2. 修改 .env 中的 EMBEDDING_MODEL
+EMBEDDING_MODEL=bge-m3-cpu
+```
+
+CPU 模式下，bge-m3 处理短文本耗时 5-15 秒，完全满足 RAG 入库和检索的性能需求。
+
+> `./infra/Modelfile` 已在项目中管理，内容为 `FROM bge-m3:latest` + `PARAMETER num_gpu 0`，可放心使用。
 | 配置 | pydantic-settings (.env) |
 
 ---

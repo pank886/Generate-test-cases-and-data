@@ -7,7 +7,7 @@
 启动时自动校验必填项（EMBEDDING_MODEL 等）。
 """
 
-from pydantic import Field
+from pydantic import Field, AliasChoices
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -164,10 +164,15 @@ class Settings(BaseSettings):
         description="Phase C 会话超时时间（秒）。超时后用户需重新开始对话",
     )
 
-    # -- 输出路径 --
+    # -- 输出路径（必须配置！未配置则启动报错） --
     testcase_base: str = Field(
-        default="./testcase_out",
-        description="测试用例（Excel / .py / .yaml）输出根目录",
+        default="",
+        validation_alias=AliasChoices("PYTEST_DATA_DIR", "testcase_base"),
+        description="测试用例输出子目录名（相对于 PYCHARM_MISC），必填，如 pytest_test_data",
+    )
+    pycharm_misc: str = Field(
+        default="",
+        description="目标 PyCharm 项目根路径，必填，如 C:\\Users\\damai\\PycharmMiscProject",
     )
 
     # -- 任务状态过期 --

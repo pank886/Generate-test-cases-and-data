@@ -25,9 +25,9 @@ from prompts.response_model import (
     TestData,
     ExcelPlan,
     ExcelRow,
+    ExcelPlanV2,
     PyFile,
     ClassCode,
-    TestPointList,
     IntentConfirmation,
 )
 from prompts.definitions import PromptFactory
@@ -78,8 +78,8 @@ class ChatTestAgentGraph(RetrievalMixin, GenerationMixin):
     """智能测试助手——LangGraph 节点方法的容器类
 
     Phase A 节点 + 核心工具方法（本文件）
-    Phase C 检索节点 → RetrievalMixin (retrievers.py)
-    PY/YAML 生成节点 → GenerationMixin (generators.py)
+    Phase B 检索节点 → RetrievalMixin (retrievers.py)
+    Phase C PY/YAML 生成节点 → GenerationMixin (generators.py)
     """
 
     def __init__(self):
@@ -168,145 +168,246 @@ class ChatTestAgentGraph(RetrievalMixin, GenerationMixin):
         return {"scenario_analysis": analysis, "all_apis_json": all_apis_json}
 
     def _generate_excel_plan_node(self, state: State):
-        """生成 Excel 测试计划（format 节点：thinking off + json_mode，含自动校验修复循环）"""
+        """生成 Excel 测试计划 V2（双 Sheet：测试计划 + 共享前置）。"""
         logger.info("\n📊 正在生成 Excel 测试计划...")
 
         from prompts.extraction_prompts import repair_excel_plan_prompt
         from agent_components.validator import validate_excel_file
+        from prompts.response_model import ApiDefinition
 
         prompt = self.prompt_factory.generate_excel_plan_node()
-        all_apis_dict = [api.model_dump() for api in state["api_definition_list"]]
+        api_list = state.get("api_definition_list")
+        if api_list is None:
+            api_list = [
+                ApiDefinition(
+                    name=d.get("name", "?"), url=d.get("url", ""),
+                    method=d.get("method", "GET"), description=d.get("description", ""),
+                    parameters=d.get("parameters", {}), returns=d.get("returns", {}),
+                )
+                for d in (state.get("api_definitions") or [])
+            ]
+        all_apis_dict = [api.model_dump() for api in api_list]
         all_apis_json = state.get("all_apis_json")
         if not all_apis_json:
             all_apis_json = json.dumps(all_apis_dict, indent=2, ensure_ascii=False)
+        import agent_components.module_tree as mt
+        from database import get_session_ctx
+        with get_session_ctx() as session:
+            tree = mt.get_tree(session)
+        module_tree_json = json.dumps(tree, indent=2, ensure_ascii=False)
+        test_analysis = state.get("test_point_analysis") or state.get("scenario_analysis") or "（无）"
         prompt_vars = {
+            "module_tree": module_tree_json,
+            "test_analysis": test_analysis,
             "all_apis_info": all_apis_json,
             "user_context": state["original_input"],
-            "scenario_analysis": state.get("scenario_analysis") or "（无）",
         }
 
-        bad_output_text = ""
-        repair_errors = []
         output_dir = None
+        plan = None
+        failed_details: list[tuple[int, dict, list[str]]] = []
+        confirmed_rows: list = []
+
         for attempt in range(config.EXCEL_REPAIR_ATTEMPTS):
             if attempt == 0:
-                plan = self._invoke_structured(prompt, ExcelPlan,
+                plan = self._invoke_structured(prompt, ExcelPlanV2,
                     method="json_mode", **prompt_vars)
             else:
-                plan = self._invoke_structured(repair_excel_plan_prompt(), ExcelPlan,
+                plan = self._invoke_structured(repair_excel_plan_prompt(), ExcelPlanV2,
                     method="json_mode",
-                    original_system=str(prompt), user_vars=str(prompt_vars),
-                    bad_output=bad_output_text,
-                    repair_errors="\n".join(repair_errors),
+                    original_system=str(prompt),
+                    original_test_analysis=test_analysis,
+                    passed_rows_summary="（已通过的行仍保留在 JSON 中）",
+                    failed_rows_detail="\n".join(
+                        f"第{f[0]}个用例 ({f[1].get('id','?')}): {'; '.join(f[2])}"
+                        for f in failed_details
+                    ),
                 )
 
             if isinstance(plan, list):
-                plan = ExcelPlan(rows=plan)
+                plan = ExcelPlanV2(shared_preconditions=[], test_cases=plan)
 
-            pydantic_errors = self._validate_excel_plan(plan)
-            if pydantic_errors:
-                repair_errors = pydantic_errors
-                bad_output_text = str(plan.model_dump())
-                logger.warning(f"   ⚠️ 校验失败 (第{attempt+1}次): {len(pydantic_errors)} 个错误")
-                continue
+            # 校验
+            pre_ids = {p.id for p in plan.shared_preconditions}
+            _new_failed: list = []
 
-            # 成功 → 写 Excel
-            project_name = plan.rows[0].project_name if plan.rows else "Unknown"
-            output_dir = state.get("output_dir")
-            if not output_dir:
-                output_dir = os.path.join(config.TESTCASE_BASE, project_name)
-                if os.path.exists(output_dir):
+            for i, tc in enumerate(plan.test_cases, 1):
+                errs = []
+                for fld, lbl in [("id", "编号"), ("story", "子模块"), ("title", "标题"),
+                                 ("steps", "步骤"), ("expected", "预期")]:
+                    if not getattr(tc, fld, ""):
+                        errs.append(f"{lbl}为空")
+                for pid in tc.preconditions:
+                    if pid not in pre_ids:
+                        errs.append(f"引用前置 {pid} 不存在")
+                if tc.steps and tc.expected:
+                    ns = tc.steps.count("\n") + 1
+                    ne = tc.expected.count("\n") + 1
+                    if ns != ne:
+                        errs.append(f"步骤({ns}条)与预期({ne}条)数量不一致")
+                if errs:
+                    _new_failed.append((i, tc.model_dump(), errs))
+                else:
+                    confirmed_rows.append(tc)
+
+            failed_details = _new_failed
+            if not failed_details:
+                break
+            attempt_label = f"第{attempt+1}次" if attempt == 0 else f"第{attempt+1}次重试"
+            logger.warning(
+                f"   ⚠️ 校验: {len(confirmed_rows)} 用例通过, "
+                f"{len(failed_details)} 失败 ({attempt_label})"
+            )
+
+        # 最终校验 + 引用完整性
+        if failed_details:
+            pre_ids = {p.id for p in plan.shared_preconditions} if plan else set()
+            valid_cases = [tc for tc in confirmed_rows]
+            for f_idx, f_dict, f_errs in failed_details:
+                orphan = [p for p in (f_dict.get("preconditions") or []) if p not in pre_ids]
+                if orphan:
+                    continue
+                valid_cases.append(TestCaseRow(
+                    id=f_dict.get("id","?"), story=f_dict.get("story",""),
+                    title=f_dict.get("title","?"),
+                    preconditions=f_dict.get("preconditions") or [],
+                    steps=f_dict.get("steps",""), expected=f_dict.get("expected",""),
+                ))
+        else:
+            valid_cases = confirmed_rows
+
+        if failed_details:
+            from observability import log_thinking
+            error_parts = []
+            for f_idx, f_dict, f_errs in failed_details:
+                error_parts.append(
+                    f"第{f_idx}行 | {f_dict.get('id','?')} | " + "; ".join(f_errs))
+            fail_text = "\n".join(error_parts)
+            log_thinking("generate_excel_plan_FAILED",
+                         state.get("original_input", "?"),
+                         f"校验失败 {len(failed_details)} 行\n"
+                         f"--- 通过: {len(valid_cases)} 行 ---\n"
+                         f"--- 失败详情 ---\n{fail_text}",
+                         prompt_label="generate_excel_plan_node")
+
+        if not valid_cases:
+            return {
+                "excel_plan": None, "excel_path": "",
+                "output_dir": output_dir, "error_info": ["所有行均未通过校验"],
+                "response_obj": ProperResponse(
+                    proper_thinking=[], worth_to_remember=False,
+                    final_response="Excel 测试计划生成失败：所有用例均未通过校验，请重试",
+                ),
+            }
+
+        # 模块树路径
+        tree_module = state.get("confirmed_module") or ""
+        def _find_node_path(nodes, target, parts=None):
+            if parts is None: parts = []
+            for n in (nodes or []):
+                if n.get("name") == target and n.get("name") != "全部模块":
+                    return parts + [n.get("name")]
+                found = _find_node_path(n.get("children") or [], target,
+                                         parts + ([n.get("name")] if n.get("name") != "全部模块" else []))
+                if found: return found
+            return None
+        path_parts = _find_node_path(tree, tree_module)
+        if path_parts:
+            dir_prefix = os.path.join(config.TESTCASE_BASE, *path_parts)
+            _project = path_parts[0]
+            _feature = path_parts[-1]
+        else:
+            _project = tree_module or valid_cases[0].story
+            _feature = tree_module or valid_cases[0].story
+            dir_prefix = os.path.join(config.TESTCASE_BASE, _project, _feature)
+
+        output_dir = state.get("output_dir")
+        if not output_dir:
+            base_path = dir_prefix
+            def _is_dir_empty(d):
+                if not os.path.exists(d): return True
+                try: return not any(os.path.isfile(os.path.join(d,f)) for f in os.listdir(d))
+                except OSError: return True
+            if os.path.exists(base_path) and not _is_dir_empty(base_path):
+                for n in range(2, 1000):
+                    alt = f"{dir_prefix}_{n}"
+                    if not os.path.exists(alt) or _is_dir_empty(alt):
+                        output_dir = alt; break
+                else:
                     from datetime import datetime
-                    ts = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-                    candidate = f"{project_name}_{ts}"
-                    output_dir = os.path.join(config.TESTCASE_BASE, candidate)
-                    project_name = candidate
-            os.makedirs(output_dir, exist_ok=True)
-            excel_path = os.path.join(output_dir, plan.file_name)
-
-            wb = Workbook()
-            ws = wb.active
-            ws.title = "测试计划"
-            header_font = Font(bold=True, color="FFFFFF", size=11)
-            header_fill = PatternFill(start_color="1A73E8", end_color="1A73E8", fill_type="solid")
-            thin_border = Border(left=Side(style="thin"), right=Side(style="thin"),
-                                 top=Side(style="thin"), bottom=Side(style="thin"))
-            wrap_align = Alignment(wrap_text=True, vertical="center")
-            headers = ["项目名称", "Allure Epic", "模块名称", "Allure Feature",
-                       "Allure Story", "fixture等级", "用例名称", "执行步骤", "测试数据YAML", "是否启用"]
-            for col, h in enumerate(headers, 1):
-                c = ws.cell(row=1, column=col, value=h)
-                c.font, c.fill, c.border, c.alignment = header_font, header_fill, thin_border, Alignment(horizontal="center", vertical="center")
-            for i, row in enumerate(plan.rows, 2):
-                for col, val in enumerate([row.project_name, row.allure_epic, row.module_name,
-                    row.allure_feature, row.allure_story, row.fixture_level,
-                    row.case_name, "; ".join(row.steps), row.test_data_yaml, row.enabled], 1):
-                    c = ws.cell(row=i, column=col, value=val)
-                    c.border, c.alignment = thin_border, wrap_align
-            # 根据内容自动计算列宽（取表头和数据中较长者，封顶 55 避免单列过宽）
-            col_values: list[list[str]] = [[] for _ in headers]
-            for row in plan.rows:
-                vals = [row.project_name, row.allure_epic, row.module_name,
-                        row.allure_feature, row.allure_story, row.fixture_level,
-                        row.case_name, "; ".join(row.steps), row.test_data_yaml, row.enabled]
-                for ci, v in enumerate(vals):
-                    col_values[ci].append(str(v) if v else "")
-            for ci, h in enumerate(headers):
-                max_data = max((len(v) for v in col_values[ci]), default=0)
-                width = max(len(h) + 2, min(max_data + 2, 55))
-                ws.column_dimensions[get_column_letter(ci + 1)].width = width
-            wb.save(excel_path)
-            wb.close()
-            logger.info(f"   📄 Excel 已保存: {excel_path} ({len(plan.rows)}条/{len(set(r.module_name for r in plan.rows))}模块)")
-
-            # 文件层校验（Windows 需先 close 释放文件锁）
-            file_ok, file_errors = validate_excel_file(excel_path)
-            if file_ok:
-                self._log_node_output("generate_excel_plan", {"excel_plan": plan, "excel_path": excel_path, "output_dir": output_dir})
-                return {
-                    "excel_plan": plan,
-                    "excel_path": excel_path,
-                    "output_dir": output_dir,
-                    "response_obj": ProperResponse(
-                        proper_thinking=[f"已提取 {len(all_apis_dict)} 个接口，分析 {len(plan.rows)} 条用例"],
-                        final_response=f"Excel 测试计划已生成：共 {len(plan.rows)} 条用例",
-                        worth_to_remember=False,
-                    ),
-                }
+                    output_dir = f"{dir_prefix}_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}"
             else:
-                repair_errors = file_errors
-                bad_output_text = str(plan.model_dump())
-                logger.warning(f"   ⚠️ 文件校验失败 (第{attempt+1}次): {len(file_errors)} 个错误")
-                continue
+                output_dir = base_path
+        os.makedirs(output_dir, exist_ok=True)
+        excel_path = os.path.join(output_dir, "test_plan.xlsx")
 
-        # 所有重试耗尽
-        logger.error(f"   ❌ 校验失败（已重试 {config.EXCEL_REPAIR_ATTEMPTS} 次），标记需人工审查")
+        # 写双 Sheet
+        n_confirmed = len(valid_cases)
+        wb = Workbook()
+        hf = Font(bold=True, color="FFFFFF", size=11)
+        hfill = PatternFill(start_color="1A73E8", end_color="1A73E8", fill_type="solid")
+        tb = Border(left=Side(style="thin"), right=Side(style="thin"),
+                    top=Side(style="thin"), bottom=Side(style="thin"))
+        wa = Alignment(wrap_text=True, vertical="center")
 
-        # 构建 fallback 目录
-        fallback_dir = os.path.join(config.TESTCASE_BASE, "manual_review")
-        os.makedirs(fallback_dir, exist_ok=True)
+        # Sheet 1: 测试计划（9列）
+        ws1 = wb.active
+        ws1.title = "测试计划"
+        h1 = ["@allure.epic", "@allure.feature", "@allure.story", "@allure.title",
+              "fixture等级", "用例编号", "前置步骤", "执行步骤", "预期结果"]
+        for col, h in enumerate(h1, 1):
+            c = ws1.cell(row=1, column=col, value=h)
+            c.font, c.fill, c.border, c.alignment = hf, hfill, tb, Alignment(horizontal="center", vertical="center")
+        for i, tc in enumerate(valid_cases, 2):
+            vals = [_project, _feature, tc.story, tc.title, "danyuan", tc.id,
+                    ", ".join(tc.preconditions) if tc.preconditions else "无",
+                    tc.steps, tc.expected]
+            for col, val in enumerate(vals, 1):
+                c = ws1.cell(row=i, column=col, value=val); c.border, c.alignment = tb, wa
 
-        # 写入错误快照（RotatingFileHandler 自动轮转，5MB/10个归档）
-        error_logger = get_error_snapshot_logger()
-        error_logger.error(
-            f"=== LLM 结构化输出修复失败 ===\n"
-            f"原始输入: {state.get('original_input', 'unknown')}\n"
-            f"重试次数: {config.EXCEL_REPAIR_ATTEMPTS}\n"
-            f"Pydantic/文件校验报错:\n{chr(10).join(repair_errors) if repair_errors else '无'}\n"
-            f"--- LLM 最后一次原始返回 ---\n"
-            f"{bad_output_text or '无返回内容'}\n"
-            f"=== 报告结束 ===\n"
-        )
-        logger.info(f"   📝 错误快照已保存至: {config.LOG_DIR}/repair_failures.log")
+        # Sheet 2: 共享前置
+        ws2 = wb.create_sheet("共享前置")
+        h2 = ["前置编号", "前置名称", "详细步骤", "预期结果", "关联用例"]
+        for col, h in enumerate(h2, 1):
+            c = ws2.cell(row=1, column=col, value=h)
+            c.font, c.fill, c.border, c.alignment = hf, hfill, tb, Alignment(horizontal="center", vertical="center")
+        pre_to_cases = {}
+        for tc in valid_cases:
+            for pid in tc.preconditions:
+                pre_to_cases.setdefault(pid, []).append(tc.id)
+        for i, pre in enumerate((plan.shared_preconditions if plan else []), 2):
+            linked = ", ".join(pre_to_cases.get(pre.id, []))
+            vals = [pre.id, pre.name, pre.steps, pre.expected, linked or "（无引用）"]
+            for col, val in enumerate(vals, 1):
+                c = ws2.cell(row=i, column=col, value=val); c.border, c.alignment = tb, wa
 
+        for ws in (ws1, ws2):
+            for ci, h in enumerate([c.value for c in ws[1]], 1):
+                mx = max((len(str(ws.cell(r, ci).value or "")) for r in range(2, ws.max_row + 1)), default=0)
+                ws.column_dimensions[get_column_letter(ci)].width = max(len(str(h)) + 2, min(mx + 2, 55))
+        wb.save(excel_path); wb.close()
+
+        fail_warn = f"（{len(failed_details)} 行未通过校验，需人工审查）" if failed_details else ""
+        n_modules = len(set(tc.story for tc in valid_cases))
+        n_pres = len(plan.shared_preconditions) if plan else 0
+        logger.info(f"   📄 Excel 已保存: {excel_path} ({n_confirmed}条/{n_modules}模块, {n_pres}共享前置){fail_warn}")
+
+        self._log_node_output("generate_excel_plan",
+                              {"excel_plan": plan, "excel_path": excel_path, "output_dir": output_dir})
+        file_ok, file_errors = validate_excel_file(excel_path)
+        if not file_ok:
+            logger.warning(f"   ⚠️ 文件校验失败: {len(file_errors)} 个错误")
+            from observability import log_thinking
+            log_thinking("generate_excel_plan_FILE_FAIL",
+                         state.get("original_input", "?"),
+                         f"文件层校验失败（{n_confirmed} 行通过）\n文件: {excel_path}\n错误: {'; '.join(file_errors)}",
+                         prompt_label="generate_excel_plan_node")
         return {
-            "requires_review": True,
-            "error_info": repair_errors,
-            "output_dir": fallback_dir,
+            "excel_plan": plan, "excel_path": excel_path, "output_dir": output_dir,
             "response_obj": ProperResponse(
-                proper_thinking=[f"⚠️ 校验失败（已重试 {config.EXCEL_REPAIR_ATTEMPTS} 次），请人工审查"],
-                final_response="Excel 测试计划生成中遇到校验问题，请查看日志人工审核。",
-                worth_to_remember=True,
+                proper_thinking=[f"已提取 {len(all_apis_dict)} 个接口，分析 {n_confirmed} 条用例"],
+                final_response=f"Excel 测试计划已生成：共 {n_confirmed} 条用例{fail_warn}",
+                worth_to_remember=False,
             ),
         }
 

@@ -38,10 +38,8 @@ _env = Environment(
 # 全局状态
 # ----------------------------------------------------------------
 # 只读（lifespan 初始化后不变）
-_chat_func = None
-_components = None
-_phase_c_graph = None
-_phase_c_components = None
+_phase_b_graph = None
+_phase_b_components = None
 _chroma_db = None
 
 # 读写共享状态（_state_lock 保护）
@@ -55,7 +53,7 @@ _state_lock = asyncio.Lock()
 _task_store: dict = {}
 _task_store_lock = asyncio.Lock()
 
-# Phase C 多轮工作流会话存储
+# Phase B 多轮工作流会话存储
 # {session_id: {"state": dict, "created_at": float, "user_id": str}}
 _workflow_sessions: dict = {}
 _workflow_sessions_lock = asyncio.Lock()
@@ -105,6 +103,33 @@ async def _cleanup_temp_files_loop():
             break
         except Exception:
             logger.warning("临时文件清理异常", exc_info=True)
+
+
+def _scan_orphan_files(known_names: set, base_dir: str) -> list[dict]:
+    """扫描上传目录中的孤儿文件（磁盘有但 SQLite 无记录）。"""
+    import time as _time
+    orphans = []
+    _scan_specs = [
+        ("uploads/pdf", ".pdf"), ("uploads/docx", ".docx"),
+        ("uploads/product", ".pdf"), ("uploads/product", ".docx"),
+        ("uploads/axure", ".zip"), ("uploads/md", ".md"),
+    ]
+    for scan_dir, ext in _scan_specs:
+        dp = Path(base_dir) / scan_dir
+        if not dp.is_dir():
+            continue
+        for f in dp.glob(f"*{ext}"):
+            if f.name not in known_names:
+                try:
+                    st = f.stat()
+                except OSError:
+                    continue
+                orphans.append({
+                    "path": str(f),
+                    "age_days": (_time.time() - st.st_mtime) / 86400,
+                    "meta_exists": os.path.exists(str(f) + ".meta.json"),
+                })
+    return orphans
 
 
 # ====== 文件列表辅助函数（user-scoped） ======
@@ -213,7 +238,7 @@ async def _update_task(task_id: str, **kwargs):
 
 
 async def _cleanup_expired_sessions():
-    """清理超过 WORKFLOW_SESSION_TTL 的 Phase C 工作流会话。"""
+    """清理超过 WORKFLOW_SESSION_TTL 的 Phase B 工作流会话。"""
     import time
     now = time.time()
     async with _workflow_sessions_lock:
@@ -235,8 +260,8 @@ from web.services.doc_binding import _cleanup_doc_to_doc_bindings  # noqa: F401
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """应用生命周期：启动时一次性初始化所有重资源。"""
-    global _chroma_db, _chat_func, _components, _vector_ready
-    global _phase_c_graph, _phase_c_components
+    global _chroma_db, _vector_ready
+    global _phase_b_graph, _phase_b_components
     # _imported_files 通过辅助函数访问，不再需要 global 声明
     # 0. 前置校验：必填配置项
     if not config.EMBEDDING_MODEL:
@@ -248,6 +273,16 @@ async def lifespan(app: FastAPI):
         print("=" * 60)
         raise RuntimeError("EMBEDDING_MODEL 未配置，请在 .env 中设置后重启")
 
+    if not config.TESTCASE_BASE:
+        missing = []
+        if not config.PYCHARM_MISC: missing.append("PYCHARM_MISC=C:\\path\\to\\your\\pycharm\\project")
+        if not config.TESTCASE_SUBDIR: missing.append("PYTEST_DATA_DIR=./pytest_test_data")
+        print("=" * 60)
+        print("❌ 缺少必填的输出路径配置，请在 .env 中设置：")
+        for m in missing: print(f"   {m}")
+        print("=" * 60)
+        raise RuntimeError("输出路径未配置，请在 .env 中设置 PYCHARM_MISC 和 PYTEST_DATA_DIR 后重启")
+
     # 1. SQLite
     try:
         init_db()
@@ -255,7 +290,39 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         print(f"[startup] WARNING: init_db failed: {e}")
 
-    # 2. Ollama + ChromaDB（带重试）
+    # 2. Ollama 启动检查（CPU 模式，GTX 1050 显存不足）
+    import httpx as _httpx
+    _ollama_url = config.EMBEDDING_URL or "http://localhost:11434"
+    try:
+        _resp = _httpx.get(f"{_ollama_url}/", timeout=3)
+        _resp.raise_for_status()
+        print(f"[startup] Ollama 已在运行: {_ollama_url}")
+    except Exception:
+        print(f"[startup] Ollama 未响应，尝试自动启动（CPU 模式）...")
+        import subprocess as _sp, os as _os
+        _env = {**_os.environ, "CUDA_VISIBLE_DEVICES": ""}
+        try:
+            if _os.name == "nt":
+                _sp.Popen(["ollama", "serve"], env=_env,
+                          creationflags=_sp.CREATE_NO_WINDOW)
+            else:
+                _sp.Popen(["ollama", "serve"], env=_env,
+                          stdout=_sp.DEVNULL, stderr=_sp.DEVNULL)
+            print("[startup] 已触发 Ollama 启动，等待就绪...")
+            for _ in range(8):
+                await asyncio.sleep(2)
+                try:
+                    _httpx.get(f"{_ollama_url}/", timeout=3)
+                    print("[startup] Ollama 启动成功")
+                    break
+                except Exception:
+                    pass
+            else:
+                print("[startup] ⚠️ Ollama 启动超时，继续尝试连接...")
+        except FileNotFoundError:
+            print("[startup] ⚠️ 未找到 ollama 命令，请确认 Ollama 已安装")
+
+    # 3. ChromaDB + Ollama（带重试）
     for attempt in (1, 2, 3):
         try:
             from agent_components.dual_chroma import get_chroma_db
@@ -263,36 +330,38 @@ async def lifespan(app: FastAPI):
             print("[startup] DualChromaDB + Ollama 连接已就绪")
             break
         except Exception as e:
-            print(f"[startup] Ollama 连接失败 (第{attempt}次): {e}")
+            print(f"[startup] ChromaDB/Ollama 连接失败 (第{attempt}次): {e}")
             if attempt < 3:
                 print("[startup] 等待 3 秒后重试...")
                 await asyncio.sleep(3)
             else:
                 print("=" * 60)
                 print("❌ Ollama 连接失败，请检查：")
-                print("   1. Ollama 服务是否已启动（运行 ollama serve）")
-                print("   2. Embedding 模型是否已拉取（ollama pull <model>）")
-                print(f"   3. 连接地址是否正确（当前: {config.EMBEDDING_URL or 'http://localhost:11434'}）")
+                print("   1. 运行 .\\infra\\start_ollama.bat 手动启动")
+                print(f"   2. Embedding 模型是否已拉取（ollama pull {config.EMBEDDING_MODEL or 'bge-m3'}）")
+                print(f"   3. 连接地址是否正确（当前: {_ollama_url}）")
                 print("=" * 60)
                 raise RuntimeError("Ollama 连接失败") from e
 
-    # 3. Agent 初始化（Phase A + Phase C）
+    # 3. Agent 初始化（Phase A + Phase B）
     logger.info(">>> 启动智能测试助手 Web 服务 ...")
-    from agent_components.graph_builder import build_and_run_agent, build_new_workflow
-    _chat_func = build_and_run_agent()
-    _components = _chat_func.components
+    from agent_components.graph_builder import build_workflow
+    _phase_b_graph, _phase_b_components = build_workflow()
 
-    # Phase C 工作流（独立 graph 实例，不共享 _chat_func）
-    _phase_c_graph, _phase_c_components = build_new_workflow()
-
-    # 4. 恢复已导入文件列表（SQLite 为主，文件系统为补充）
+    # 4. 恢复已导入文件列表（以 SQLite 为唯一数据源）
     from database import get_session, get_session_ctx
     from database.operations import DocOps
-    ext_to_type = {".pdf": "product", ".docx": "product", ".zip": "axure"}
     db_files: dict[str, dict] = {}
     try:
         with get_session_ctx() as session:
             for d in DocOps.get_all_documents(session):
+                size_str = "—"
+                for scan_dir_base in ["uploads/pdf", "uploads/docx", "uploads/product",
+                                      "uploads/axure", "uploads/md"]:
+                    candidate = Path(config.BASE_DIR) / scan_dir_base / d.file_name
+                    if candidate.is_file():
+                        size_str = f"{candidate.stat().st_size / 1024:.1f} KB"
+                        break
                 db_files[d.file_name] = {
                     "name": d.file_name,
                     "type": d.doc_type,
@@ -301,53 +370,26 @@ async def lifespan(app: FastAPI):
                     if d.upload_time else "—",
                     "doc_id": d.id,
                     "status": d.status or "",
+                    "size": size_str,
                 }
     except Exception:
-        logger.warning("SQLite 查询失败，降级为纯文件扫描", exc_info=True)
-
-    seen_names = set(db_files.keys())
-    # 文件系统补充：仅添加 SQLite 中不存在的文件
-    scan_dirs = [
-        ("uploads/pdf", ".pdf"),
-        ("uploads/docx", ".docx"),
-        ("uploads/product", ".pdf"),
-        ("uploads/product", ".docx"),
-        ("uploads/axure", ".zip"),
-    ]
-    for scan_dir, ext in scan_dirs:
-        dir_path = Path(config.BASE_DIR) / scan_dir
-        if not dir_path.exists():
-            continue
-        for f in sorted(dir_path.glob(f"*{ext}"),
-                        key=lambda p: p.stat().st_mtime, reverse=True):
-            if f.name in seen_names:
-                continue
-            seen_names.add(f.name)
-            size_kb = f.stat().st_size / 1024
-            mtime = "—"
-            chunks = "—"
-            meta_path = str(f) + ".meta.json"
-            if os.path.exists(meta_path):
-                try:
-                    with open(meta_path, "r", encoding="utf-8") as _mf:
-                        _meta = json.load(_mf)
-                    chunks = _meta.get("chunks", "—")
-                    mtime = _meta.get("time", mtime)
-                except Exception:
-                    logger.warning("读取 meta.json 失败: %s", meta_path, exc_info=True)
-            db_files[f.name] = {
-                "name": f.name,
-                "size": f"{size_kb:.1f} KB",
-                "chunks": chunks,
-                "time": mtime,
-                "type": ext_to_type.get(f.suffix.lower(), "?"),
-            }
+        logger.warning("SQLite 查询失败，无法恢复文件列表", exc_info=True)
 
     _imported_files[_DEFAULT_USER] = list(db_files.values())
-    logger.info("已恢复 %d 个文件（SQLite %d + 文件补充 %d）",
-                len(db_files),
-                sum(1 for v in db_files.values() if v.get("doc_id")),
-                sum(1 for v in db_files.values() if not v.get("doc_id")))
+    logger.info("已恢复 %d 个文件（全部来自 SQLite）", len(db_files))
+
+    # 4.5 启动诊断：扫描磁盘孤儿文件
+    _known_names = {f["name"] for f in db_files.values()}
+    orphans = _scan_orphan_files(_known_names, config.BASE_DIR)
+    if orphans:
+        for o in orphans:
+            logger.warning("⚠️ 孤儿文件（磁盘有但 SQLite 无记录）: %s (%.1f 天前)", o["path"], o["age_days"])
+            if o["meta_exists"]:
+                try: os.remove(o["path"] + ".meta.json")
+                except OSError: logger.warning("清理孤儿 meta.json 失败: %s", o["path"], exc_info=True)
+        logger.warning("⚠️ 检测到 %d 个孤儿文件，已列出。请手动清理。", len(orphans))
+    else:
+        logger.info("   ✅ 磁盘文件与 SQLite 一致，无孤儿文件")
 
     # 5. 判断向量库是否已就绪
     chroma_path = Path(config.CHROMA_DB_DIR)
@@ -430,6 +472,7 @@ async def audit_module(data: dict):
                     _cascade_bind_to_module_docs(session, doc_type, doc_id, rmod)
             return {"success": True, "message": f"模块信息已更新: {module_name}"}
     except Exception as e:
+        logger.error("update-module 失败: %s", e, exc_info=True)
         return JSONResponse(status_code=500,
                             content={"success": False, "message": str(e)})
 

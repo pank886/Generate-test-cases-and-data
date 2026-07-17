@@ -13,7 +13,7 @@ logger = logging.getLogger(__name__)
 
 from langchain_chroma import Chroma
 from langchain_core.documents import Document
-from langchain_ollama import OllamaEmbeddings
+from agent_components.fallback_embeddings import FallbackOllamaEmbeddings
 
 from config import (
     CHROMA_DB_DIR,
@@ -34,7 +34,10 @@ class DualChromaDB:
             raise ValueError("EMBEDDING_MODEL 未设置")
         url = EMBEDDING_URL or "http://localhost:11434"
 
-        embeddings = OllamaEmbeddings(model=model, base_url=url)
+        embeddings = FallbackOllamaEmbeddings(
+            model=model, base_url=url,
+            client_kwargs={"timeout": 45},
+        )
 
         pd_dir = os.path.join(persist, "product_docs") if persist else None
         ad_dir = os.path.join(persist, "api_defs") if persist else None

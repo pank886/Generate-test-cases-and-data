@@ -1,6 +1,6 @@
 # 修复总结报告
 
-> 生成日期: 2026-07-10
+> 生成日期: 2026-07-10 | 最后更新: 2026-07-15
 > 范围: 全代码库架构审查与修复
 
 ---
@@ -21,7 +21,7 @@
 | 等级 | 数量 |
 |------|------|
 | P0 | 14 |
-| P1 | 14 |
+| P1 | 16 |
 | P2 | 8 |
 | 架构改进 | 2 |
 
@@ -236,6 +236,31 @@
 - **问题根因**：`_task_store_lock` 为 `asyncio.Lock`，被后台线程通过 `asyncio.run_coroutine_threadsafe` 访问
 - **架构决策**：经分析，所有访问均经主事件循环调度，`asyncio.Lock` 在此模式下线程安全，无需修改
 - **衍生规则**：`asyncio.Lock` 仅在协程内直接 await 时保证线程安全；跨线程访问必须通过 `asyncio.run_coroutine_threadsafe` 将操作调度回事件循环
+
+---
+
+### [15] [P1] Ollama Embedding 端点版本兼容层
+
+- **涉及模块**：`agent_components/fallback_embeddings.py`, `agent_components/dual_chroma.py`
+- **问题根因**：Python `ollama` 客户端 v0.6+ 使用 `/api/embed` 端点，但 Ollama 服务端 v0.1.x 仅有 `/api/embeddings`，LangChain 调用时返回 404，导致 RAG 检索链路中断
+- **架构决策**：新增 `FallbackOllamaEmbeddings` 继承 `OllamaEmbeddings`，`embed_documents` / `aembed_documents` 先尝试新端点，404 时自动降级到 `/api/embeddings`；降级状态按 `base_url` 缓存至模块级 dict（非 Pydantic 字段），避免同服务端重复探测；仅首次降级时写 warning 日志
+- **衍生规则**：
+  - Ollama Python 客户端版本必须与服务端 API 版本兼容；若无法升级服务端，调用链路必须具备端点降级能力
+  - 外部 HTTP 服务调用（Embedding / LLM / 第三方 API）必须有明确的降级或兜底路径
+  - Pydantic BaseModel 子类的类变量不加类型注解（否则被 Pydantic 识别为 model field），降级状态等非业务字段使用模块级 dict 存储
+
+### [16] [P1] LLM 连接池跨工作流污染（热重载机制）
+
+- **涉及模块**：`agent_components/nodes.py`, `web/tasks.py`, `web/routes/chat.py`
+- **问题根因**：`_llm_instance` 为模块级单例，底层 `httpx.Client` 连接池在 Phase B 大量调用后残留僵死连接，下一轮工作流（Phase B 或 Phase C）在新线程中复用时出现 `Connection error`；原有 `reload_llm()` 函数虽已定义但从未被调用
+- **架构决策**：
+  - `ChatTestAgentGraph.llm` 从 `__init__` 中 `self.llm = _get_llm()` 改为 `@property` 惰性获取，`reload_llm()` 将 `_llm_instance` 置 None 后，下次属性访问自动重建新实例
+  - 三个工作流入口 `_run_chat_bg`、`_confirm_plan_bg`、`/workflow/start` 在处理前调用 `reload_llm()`，确保每轮工作流拿到独立的 `httpx.Client` 连接池
+  - `_get_llm()` 双检锁不变，保证同一工作流内只创建一个客户端
+- **衍生规则**：
+  - 跨工作流/跨请求共享的 `httpx.Client` 必须在每轮启动时重建；`Client` 非线程安全，不得跨线程复用连接池
+  - LLM / Embedding 等外部服务客户端若采用模块级单例模式，必须配套热重载机制（reset + lazy init），并在工作流入口显式触发
+  - `asyncio.to_thread` 中使用的 HTTP 客户端必须独立于事件循环线程的生命周期管理
 
 ---
 
@@ -495,3 +520,111 @@
 - **问题根因**：`_resume_workflow_bg` 和 `_run_chat_bg` 只有头尾两处进度更新（10% 和 80%），中间整个 LangGraph 执行（ChromaDB 查询 + 多轮 LLM 调用）是单次 `to_thread` 调用，期间无任何进度上报。前端 `pollTask` 每次轮询看到相同的进度值，用户感知为"界面卡死"。
 - **架构决策**：在独立线程同步执行 LangGraph（`asyncio.to_thread`），主协程启动独立心跳协程，每 10s 更新一次进度消息并附带已运行秒数。心跳协程在 `to_thread` 返回后通过 `CancelledError` 安全终止。心跳消息按执行阶段轮转（检索产品文档→提取关联模块→检索接口定义→分析测试场景→生成测试计划）。
 - **衍生规则**：所有在 `to_thread` 中执行的长时间同步操作，必须配套心跳协程定期更新任务进度；禁止让前端轮询在长时间同步操作期间看到不变的进度值。
+
+
+---
+
+## 8. 2026-07-14 批量修复（Skill C 执行）
+
+### [33] [P0] JS `let _uploadDone` 块作用域导致上传进度卡永远不隐藏
+
+- **涉及模块**：`static/app.js`
+- **问题根因**：`let _uploadDone = false` 声明在 `try {}` 块内，JavaScript 块作用域导致 `catch` 和 `finally` 块无法访问。`catch` 中的 `_uploadDone = true` 实际创建了全局 `window._uploadDone`，`finally` 读到的是 `undefined`，卡片永远不隐藏。
+- **架构决策**：将 `let _uploadDone` 提升至函数作用域（`try` 之前），确保所有块可见。同时将 `catch` 路径也设置 `_uploadDone = true`。
+- **衍生规则**：JS 中需要在 `try/catch/finally` 间共享的标志变量必须声明在函数作用域顶层，禁止在 `try` 块内用 `let/const` 声明。
+
+### [34] [P1] `_serialize_for_log` 缺少 Decimal/UUID 类型分支
+
+- **涉及模块**：`agent_components/nodes.py`
+- **问题根因**：自定义序列化函数的 `isinstance` 链缺少 `Decimal` 和 `UUID` 标准库类型，走 `str()` 兜底导致 Decimal 被序列化为字符串而非数字。
+- **架构决策**：新增 `Decimal` → `float()` 和 `UUID` → `str()` 显式分支。
+- **衍生规则**：自定义序列化函数必须覆盖所有标准库类型（datetime/Decimal/UUID），禁止依赖 `str()` 兜底。
+
+### [35] [P1] delete-file 端点 SQLite 无记录时漏清 ChromaDB 和 .meta.json
+
+- **涉及模块**：`web/routes/files.py`
+- **问题根因**：`if not doc:` 分支只清理物理文件+内存状态，跳过 ChromaDB 向量清理和 `.meta.json` 删除。当 SQLite 记录因历史崩溃丢失时，ChromeraDB 残留数据污染检索。
+- **架构决策**：在 `if not doc:` 分支中从 `.meta.json` 读取 `doc_id`，尝试调用 `_chroma_db.delete_by_doc_id()`。同时删除 `.meta.json` 文件。
+- **衍生规则**：删除操作的三处清理（SQLite + ChromaDB + 内存）中，任一处不可用时不应跳过其他处，应从可用数据源（meta.json 等）恢复缺失的标识符。
+
+### [36] [P1] 路径包含检查 `str.startswith` 可被 sibling 目录绕过
+
+- **涉及模块**：`web/routes/files.py`
+- **问题根因**：`abs_path.startswith(allowed_dir)` 可将 `/app/testcases_backup/file` 误判为在 `/app/testcases` 内。同时 `os.path.abspath("uploads")` 依赖 CWD 而非项目根目录。
+- **架构决策**：改用 `os.path.commonpath([abs_path, d]) == d` 严格路径包含检查，并包裹 `try/except ValueError` 防跨盘符崩溃。`uploads` 改为 `os.path.join(config.BASE_DIR, "uploads")` 绝对路径。
+- **衍生规则**：文件访问控制中的路径包含检查必须用 `commonpath` 或 `pathlib.Path.is_relative_to()`，禁止用 `str.startswith`。
+
+### [37] [P2] `_read_excel_rows` 打开工作簿后未关闭
+
+- **涉及模块**：`agent_components/generators.py`
+- **问题根因**：`load_workbook()` 后无 `wb.close()`，Windows 上可能因文件句柄泄漏导致后续 `os.remove` 失败。
+- **架构决策**：加 `try/finally` 确保 `wb.close()` 始终执行。
+
+### [38] [P2] `_extract_text` 中 PDF `extract_text()` 重复调用
+
+- **涉及模块**：`ingest_v2.py`
+- **问题根因**：列表推导式 `[p.extract_text() for p in pages if p.extract_text()]` 对每个页面调用两次。
+- **架构决策**：改为显式循环，每个页面只调一次。
+
+### [39] [P2] `_invoke_structured` 中 free_text 方法未显式控制 thinking
+
+- **涉及模块**：`agent_components/nodes.py`
+- **问题根因**：`features["supports_thinking"]=True` 且 `thinking=False` 时，`llm_kwargs` 为空，DeepSeek API 行为不可预测。
+- **架构决策**：为所有路径显式设置 `extra_body`，无默认隐式行为。
+
+### [40] [P2] `_resolve_path("")` 静默返回项目根目录
+
+- **涉及模块**：`config.py`
+- **问题根因**：空字符串传给 `_resolve_path` 时，`os.path.isabs("")` 返回 `False`，`os.path.join(BASE_DIR, "")` 返回 `BASE_DIR`，导致路径配置错误时静默指向项目根。
+- **架构决策**：空字符串时抛出 `ValueError`，明确拒绝无效配置。
+
+### [41] [P1] 输出路径硬编码为 `./testcase_out`，依赖 CWD
+
+- **涉及模块**：`config.py`, `settings.py`
+- **问题根因**：`testcase_base` 默认值 `"./testcase_out"` 依赖工作目录。同时 `.env` 变量名 `TESTCASE_BASE` 与用户已有 `PYTEST_DATA_DIR` 不一致。
+- **架构决策**：新增 `PYCHARM_MISC` 配置项，`TESTCASE_BASE = PYCHARM_MISC + PYTEST_DATA_DIR` 组合路径。`settings.py` 使用 `AliasChoices` 兼容新旧变量名。启动时强制校验，未配置则报错。
+
+
+---
+
+## 9. 2026-07-14 前端优化 + 可观测性建设
+
+### [42] [P1] 多文件上传共享单进度卡，并发上传互相覆盖
+
+- **涉及模块**：`static/app.js`, `templates/index.html`, `static/style.css`
+- **问题根因**：全局唯一 `upload-progress-card`，多个文件同时上传时后一个覆盖前一个的进度。
+- **架构决策**：改为动态创建独立进度卡（`up-{timestamp}-{random}`），上传完成 3 秒后渐隐移除。CSS flex column 布局 + fadeIn 动画。
+- **衍生规则**：并发操作的 UI 反馈必须是独立隔离的，禁止全局单例进度指示器。
+
+### [43] [P2] 文件路径展示时反斜杠被双重转义
+
+- **涉及模块**：`static/app.js`
+- **问题根因**：`esc()` 函数将 `\` → `\\`，用于 HTML 属性安全。展示文本（聊天消息、弹窗）无需转义反斜杠，导致 Windows 路径展示为 `C:\\Users\\...`。
+- **架构决策**：新增 `escText()` 轻量版（只转义 `&` `<` `>`），文本展示用 `escText()`，属性值保持 `esc()`。
+- **衍生规则**：HTML 属性值必须用完整 `esc()`，HTML 文本内容用轻量 `escText()`。
+
+### [44] [P2] PY+YAML 生成时前端只有 toast 无实时进度
+
+- **涉及模块**：`static/app.js`
+- **问题根因**：`confirmPlan` 只用 `toast` 提示开始和结束，中间无进度更新，用户不知道生成进展。
+- **架构决策**：改为聊天框内嵌进度消息，`pollTask` 实时更新 `⏳ 正在生成 .py...（20%）` → `✅ 完成`，与 Phase C 工作流体验一致。
+- **衍生规则**：所有后台任务的前端反馈必须包含实时进度条/文本，禁止仅用 toast 做首尾通知。
+
+### [45] [P2] Thinking 节点原始输出无记录，提示词调优缺数据
+
+- **涉及模块**：`observability.py`, `agent_components/nodes.py`, `retrievers.py`, `generators.py`
+- **问题根因**：`_analyze_scenarios_node`、`_analyze_test_points_raw`、`_analyze_data_deps` 三个 thinking 节点的 LLM 原始输出只打 `logger.info` 摘要，完整内容丢失。
+- **架构决策**：新增 `log_thinking(node, user_input, output)` 写入 `logs/thinking_trace.log`（RotatingFileHandler，5MB/10归档），记录节点名+用户输入+完整输出。
+- **衍生规则**：所有 LLM 非结构化输出节点必须将原始结果写入专属日志，禁止仅记录长度或截断内容。
+
+### [46] [P2] 工作流日志路径硬编码，未跟随 LOG_DIR 配置
+
+- **涉及模块**：`agent_components/nodes.py`
+- **问题根因**：`Path("logs") / "workflow"` 硬编码，不受 `LOG_DIR` 配置影响。
+- **架构决策**：改为 `Path(config.LOG_DIR) / "workflow"`。
+
+### [47] [P1] Axure 文档绑定 type 存储为 product，解绑失败
+
+- **涉及模块**：数据库记录
+- **问题根因**：历史上 Axure 文档与模块的绑定记录使用了错误的 `type="product"` 而非 `"axure"`，导致前端传正确 type 时 normalize 查询不到，解绑报"绑定不存在"。
+- **架构决策**：修复数据库中 `axure_` 前缀绑定的 type 为 `axure`。
