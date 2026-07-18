@@ -261,6 +261,30 @@ async def _process_file_bg(task_id: str, file_path: str, ext: str,
 # Phase C: 确认计划 → 生成 .py + .yaml
 # ========================================================================
 
+def _resolve_api_defs(excel_path: str, api_defs_json: str = "") -> str | None:
+    """解析 Phase C 所需的接口定义（规则 M8：缺失必须显式失败，禁止空定义续跑）。
+
+    优先级:
+      1. 显式入参 api_defs_json（非空且非 "[]"）
+      2. excel 同级 api_defs.json —— Phase B 生成计划时落盘的接口定义快照
+    返回 None 表示缺失，调用方必须阻断任务，严禁以空值/假数据继续生成。
+    """
+    if api_defs_json and api_defs_json.strip() and api_defs_json.strip() != "[]":
+        return api_defs_json
+
+    snapshot = os.path.join(os.path.dirname(excel_path), "api_defs.json")
+    if os.path.exists(snapshot):
+        try:
+            with open(snapshot, "r", encoding="utf-8") as f:
+                content = f.read().strip()
+            if content and _json.loads(content):
+                return content
+            logger.warning("接口定义快照为空: %s", snapshot)
+        except (OSError, ValueError):
+            logger.error("接口定义快照读取失败: %s", snapshot, exc_info=True)
+    return None
+
+
 async def _confirm_plan_bg(task_id: str, excel_path: str | None,
                           api_defs_json: str = "", user_ctx: str = ""):
     """后台执行确认计划 -> 生成 .py + .yaml。
@@ -298,6 +322,17 @@ async def _confirm_plan_bg(task_id: str, excel_path: str | None,
                                error="组件未初始化")
             return
 
+        # 规则 M8：接口定义缺失必须显式阻断，禁止空定义盲写 YAML
+        resolved_defs = _resolve_api_defs(excel_path, api_defs_json)
+        if resolved_defs is None:
+            await _update_task(
+                task_id, status="failed",
+                error="未找到接口定义（计划目录缺少 api_defs.json 或内容为空），"
+                      "请重新执行 Phase B 生成测试计划后再确认",
+            )
+            return
+        api_defs_json = resolved_defs
+
         await _update_task(task_id, status="running", progress=20,
                            message="正在生成 .py 测试文件...")
 
@@ -318,6 +353,11 @@ async def _confirm_plan_bg(task_id: str, excel_path: str | None,
         msg = f".py: {py_result['py_file_name']}（{py_result['modules']}模块）"
         if yaml_result["total"] > 0:
             msg += f" | YAML: {yaml_result['success']}/{yaml_result['total']} 个"
+            if yaml_result.get("repaired"):
+                msg += f"（含自查修复 {yaml_result['repaired']} 个）"
+            if yaml_result.get("failed"):
+                msg += (f"，仍失败 {yaml_result['failed']} 个"
+                        f"（详见 _generation_errors.json 与 logs/thinking_trace.log）")
 
         result = {
             "success": True,
@@ -326,6 +366,10 @@ async def _confirm_plan_bg(task_id: str, excel_path: str | None,
             "py_path": py_result.get("py_path", ""),
             "yaml_success": yaml_result["success"],
             "yaml_total": yaml_result["total"],
+            "yaml_repaired": yaml_result.get("repaired", 0),
+            "yaml_failed": yaml_result.get("failed", 0),
+            "yaml_rounds": yaml_result.get("rounds", 0),
+            "errors_file": yaml_result.get("errors_file"),
             "excel_path": excel_path,
             "output_dir": os.path.dirname(excel_path),
         }
@@ -426,7 +470,7 @@ async def _resume_workflow_bg(task_id: str, session_id: str, state: dict):
                     failed_tc_ids = list(set(re.findall(
                         r"\| (TC-\d+) \|", content)))
         except Exception:
-            pass
+            logger.warning("无法读取思考日志，跳过失败用例提取", exc_info=True)
 
         thinking_parts = [f"Excel 计划 {case_count} 条用例"]
         if failed_tc_ids:

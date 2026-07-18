@@ -1,6 +1,6 @@
 # 架构规则详情
 
-> 最后编译: 2026-07-14 | 覆盖问题: 67 项 (P0×24, P1×26, P2×15, 架构改进×2) | [Ref: 42~47]
+> 最后编译: 2026-07-18 | 覆盖问题: 76 项 (P0×28, P1×31, P2×15, 架构改进×2) | [Ref: 42~54]
 
 <!-- RULE: M1 -->
 <!-- PRIORITY: P0 -->
@@ -225,6 +225,7 @@ catch (e) {}  # 用户永远看不到错误
 **边界情况**：
 - API 端点顶层 `except Exception` 返回 JSONResponse 是可接受的（最后一道防线），但必须记录日志
 - `finally` 块中不应 return/raise（会覆盖 try 块异常）
+- **新增**：非关键路径（如读取可选日志文件、解析可选元数据文件）失败时，必须 `logger.warning(..., exc_info=True)` 后继续流程，严禁 `except Exception: pass` 静默跳过 [Ref: 48, 49]
 
 ---
 
@@ -458,6 +459,7 @@ await _update_task(task_id, progress=80, message="处理完成")
 - `settings.py` 中 `Field(ge=..., le=...)` 约束用于启动时校验
 - 测试时可通过 `@patch("config.CHROMA_RETRY_DELAY", 0.1)` 缩短配置值
 - **新增**：所有后台任务（`confirmPlan`、`_confirm_plan_bg` 等）必须配套实时进度更新，禁止仅用 toast 做首尾通知；前端须用 `pollTask` + 内嵌进度消息模式
+- **新增**：TypedDict / dataclass 中同一字段名禁止重复定义（后定义静默覆盖前定义，编译期无报错）。代码审查时发现重复字段必须合并 [Ref: 53]
 
 ---
 
@@ -532,7 +534,55 @@ function init() {
 - cache-busting 参数（`?v=YYYYMMDD`）在每次更新前端文件时递增
 - `onclick=` / `onchange=` 内联事件绑定的函数必须在全局作用域可访问
 - **新增**：`try/catch/finally` 之间共享的标志变量必须声明在函数作用域顶层，禁止在 `try{}` 块内用 `let/const` 声明（块作用域导致 `catch`/`finally` 无法访问）
-- **新增**：动态文件路径传递给按钮时，必须用 `data-*` 属性 + 全局事件委托模式，禁止在 HTML 字符串中 `'...' + esc(path) + '...'` 拼入 JS 字面量（`esc()` 的 `&#39;` 会被 HTML 解码为 `'` 破坏 JS 语法）
+- **新增**：动态文件路径传递给按钮时，必须用 `data-*` 属性 + 全局事件委托模式，禁止在 HTML 字符串中 `'...' + esc(path) + '...'` 拼入 JS 字面量（`esc()` 的 `&#39;` 会被 HTML 解码为 `'` 破坏 JS 语法）。正确模式：`data-action="openFile" data-path="' + encPath + '"` + `document.addEventListener('click', ...)` 委托分派 [Ref: 51]
 - **新增**：上传等异步操作的完成状态用 JS 闭包变量追踪，不依赖 UI 文本内容匹配
 - **新增**：并发文件上传必须为每个文件创建独立进度卡片（`up-{timestamp}-{random}` ID），禁止多文件共享全局单例进度指示器
 - **新增**：HTML 文本内容展示用轻量 `escText()`（仅转义 `&` `<` `>`），HTML 属性值用完整 `esc()`（含 `\` `'` `"`），禁止混用导致反斜杠双重转义
+- **新增**：所有 `catch` 块必须输出 `console.error(e)` 保留错误堆栈，禁止仅弹 toast 不记录原始错误（如 `catch (e) { toast('❌ 失败'); }` 缺少排查手段） [Ref: 54]
+
+<!-- RULE: M8 -->
+<!-- PRIORITY: P0 -->
+<!-- KEYWORDS: MOCK_, FAKE_, SAMPLE_, mock_data, fallback数据, 兜底数据, api_defs_json, 检索为空, 假数据, 静默降级 -->
+
+## M8：数据真实性与缺失阻断
+
+**核心定义**：生产链路任何环节（检索、生成、交接）遇到数据缺失时，必须显式失败并报告（`requires_review` / 任务 `failed` / 错误清单文件），严禁以 mock/示例/占位/硬编码假数据继续流程，严禁静默降级。
+
+**涵盖原规则**：[Ref: 55]
+
+✅ **正确示例**：
+
+```python
+# 关键输入缺失 → 显式阻断并给出可操作的提示
+api_defs = _load_api_defs(excel_path)
+if not api_defs:
+    await _update_task(task_id, status="failed",
+                       error="未找到接口定义（api_defs.json 缺失），请先完成 Phase B 或重新绑定接口文档")
+    return
+
+# 生成失败 → 登记错误清单，不写占位文件
+if registry:
+    with open(errors_file, "w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False, indent=2)
+```
+
+❌ **错误示例**：
+
+```python
+# 检索为空时用假数据兜底（mock_data.py 原型，已删除）
+docs = chroma_db.search_product_docs(query)
+if not docs:
+    docs = MOCK_PRODUCT_DOCS.get(module, [])   # ← 假数据混入生产流程
+
+# 关键输入为空仍继续生成（Phase C 盲写 63 个 YAML 的事故原型）
+def _confirm_plan_bg(task_id, excel_path, api_defs_json="", user_ctx=""):
+    ...
+    yaml_result = _generate_all_yamls(excel_path, api_defs_json, user_ctx)  # ← 空定义直传，字段全靠编
+```
+
+**边界情况**：
+
+- **测试代码豁免**：`tests/` 下的 `MagicMock`、`SAMPLE_APIS`、伪造响应等属于标准单元测试手段，不在禁止范围。
+- **协议级降级不属于假数据**：如 Embedding 新旧端点切换（M2 的 `FallbackOllamaEmbeddings`）是"换通道取同一份真实数据"，允许；被禁止的是"取不到数据就编一份"。
+- **确定性格式规整不属于托底**：对 LLM 输出做 method 小写、url 去域名等语义等价修正（2026-07-18 质量治理计划清单 A）允许；语义性缺失/错误（清单 B）必须回炉或失败，不得代编。
+- **骨架/初始化文件例外**：Skill A 冷启动创建的 `fixes_summary.md` 骨架属于文档初始化，非运行时数据托底。

@@ -2,6 +2,7 @@
 import json
 import os
 import threading
+from collections import defaultdict
 from datetime import datetime
 from typing import Optional, Type
 
@@ -26,6 +27,8 @@ from prompts.response_model import (
     ExcelPlan,
     ExcelRow,
     ExcelPlanV2,
+    SharedPrecondition,
+    TestCaseRow,
     PyFile,
     ClassCode,
     IntentConfirmation,
@@ -44,9 +47,7 @@ METHOD_FEATURES = {
     "free_text": {"supports_thinking": True},
 }
 
-# 数据工厂方法缓存（文件不变时只读一次磁盘）
-_factory_methods_cache: str | None = None
-_factory_methods_lock = threading.Lock()
+# 数据工厂方法缓存已归位 data_factory/registry.py（此处不再维护）
 
 # 全局共享的 LLM 客户端单例（避免多个 ChatTestAgentGraph 实例重复创建）
 _llm_instance: Optional[DeepSeekChatOpenAI] = None
@@ -206,63 +207,126 @@ class ChatTestAgentGraph(RetrievalMixin, GenerationMixin):
         output_dir = None
         plan = None
         failed_details: list[tuple[int, dict, list[str]]] = []
-        confirmed_rows: list = []
+        all_confirmed: list = []
+        all_shared_pres: list = []  # 首轮共享前置，重试时复用
+        failed_ids: set = set()  # 失败行 TC ID 集合，重试时只接受这些 ID 的修复
 
         for attempt in range(config.EXCEL_REPAIR_ATTEMPTS):
             if attempt == 0:
                 plan = self._invoke_structured(prompt, ExcelPlanV2,
                     method="json_mode", **prompt_vars)
-            else:
-                plan = self._invoke_structured(repair_excel_plan_prompt(), ExcelPlanV2,
-                    method="json_mode",
-                    original_system=str(prompt),
-                    original_test_analysis=test_analysis,
-                    passed_rows_summary="（已通过的行仍保留在 JSON 中）",
-                    failed_rows_detail="\n".join(
-                        f"第{f[0]}个用例 ({f[1].get('id','?')}): {'; '.join(f[2])}"
-                        for f in failed_details
-                    ),
+                if isinstance(plan, list):
+                    plan = ExcelPlanV2(shared_preconditions=[], test_cases=plan)
+                all_shared_pres = plan.shared_preconditions
+
+                # 首轮校验全部用例
+                pre_ids = {p.id for p in plan.shared_preconditions}
+                _new_failed: list = []
+                for i, tc in enumerate(plan.test_cases, 1):
+                    errs = []
+                    for fld, lbl in [("id", "编号"), ("story", "子模块"), ("title", "标题"),
+                                     ("steps", "步骤"), ("expected", "预期")]:
+                        if not getattr(tc, fld, ""):
+                            errs.append(f"{lbl}为空")
+                    for pid in tc.preconditions:
+                        if pid not in pre_ids:
+                            errs.append(f"引用前置 {pid} 不存在")
+                    if tc.steps and tc.expected:
+                        ns = tc.steps.count("\n") + 1
+                        ne = tc.expected.count("\n") + 1
+                        if ns != ne:
+                            errs.append(f"步骤({ns}条)与预期({ne}条)数量不一致")
+                    if errs:
+                        _new_failed.append((i, tc.model_dump(), errs))
+                    else:
+                        all_confirmed.append(tc)
+
+                # 记录失败行 ID（重试时只有匹配这些 ID 的修复才被接受）
+                failed_ids = {f[1].get("id", "") for f in _new_failed}
+                failed_details = _new_failed
+                logger.warning(
+                    f"   ⚠️ 校验: {len(all_confirmed)} 用例通过, "
+                    f"{len(failed_details)} 失败 (第1次)"
                 )
+                if not failed_details:
+                    break
+            else:
+                # 重试：LLM 只返回失败行的修复版
+                attempt_label = f"第{attempt+1}次重试"
+                failed_tc_list = []
+                for f_idx, f_dict, f_errs in failed_details:
+                    failed_tc_list.append(
+                        f"TC ID: {f_dict.get('id','?')}\n"
+                        f"  子模块: {f_dict.get('story','?')}\n"
+                        f"  标题: {f_dict.get('title','?')}\n"
+                        f"  步骤: {f_dict.get('steps','?')}\n"
+                        f"  预期: {f_dict.get('expected','?')}\n"
+                        f"  错误: {'; '.join(f_errs)}"
+                    )
+                failed_tc_text = "\n---\n".join(failed_tc_list)
+                # 把必须保持不变的 TC ID 列表写入 prompt
+                repair_prompt = repair_excel_plan_prompt()
+                failed_ids_str = ", ".join(sorted(failed_ids))
 
-            if isinstance(plan, list):
-                plan = ExcelPlanV2(shared_preconditions=[], test_cases=plan)
+                plan = self._invoke_structured(repair_prompt, ExcelPlanV2,
+                    method="json_mode",
+                    original_test_analysis=test_analysis,
+                    failed_test_cases=failed_tc_text,
+                    failed_ids=failed_ids_str,
+                )
+                if isinstance(plan, list):
+                    plan = ExcelPlanV2(shared_preconditions=[], test_cases=plan)
 
-            # 校验
-            pre_ids = {p.id for p in plan.shared_preconditions}
-            _new_failed: list = []
+                # 重试校验：只接受 ID 匹配失败行的修复
+                pre_ids_all = {p.id for p in all_shared_pres}
+                for p in plan.shared_preconditions:
+                    pre_ids_all.add(p.id)
 
-            for i, tc in enumerate(plan.test_cases, 1):
-                errs = []
-                for fld, lbl in [("id", "编号"), ("story", "子模块"), ("title", "标题"),
-                                 ("steps", "步骤"), ("expected", "预期")]:
-                    if not getattr(tc, fld, ""):
-                        errs.append(f"{lbl}为空")
-                for pid in tc.preconditions:
-                    if pid not in pre_ids:
-                        errs.append(f"引用前置 {pid} 不存在")
-                if tc.steps and tc.expected:
-                    ns = tc.steps.count("\n") + 1
-                    ne = tc.expected.count("\n") + 1
-                    if ns != ne:
-                        errs.append(f"步骤({ns}条)与预期({ne}条)数量不一致")
-                if errs:
-                    _new_failed.append((i, tc.model_dump(), errs))
-                else:
-                    confirmed_rows.append(tc)
+                _new_failed = []
+                fixed_ids = set()
+                for tc in plan.test_cases:
+                    # 拒绝不在失败 ID 集合中的行（LLM 幻觉出新的用例）
+                    if tc.id not in failed_ids:
+                        logger.warning(f"   ⚠️ 重试返回了不在失败列表中的 TC {tc.id}，已丢弃")
+                        continue
+                    errs = []
+                    for fld, lbl in [("id", "编号"), ("story", "子模块"), ("title", "标题"),
+                                     ("steps", "步骤"), ("expected", "预期")]:
+                        if not getattr(tc, fld, ""):
+                            errs.append(f"{lbl}为空")
+                    for pid in tc.preconditions:
+                        if pid not in pre_ids_all:
+                            errs.append(f"引用前置 {pid} 不存在")
+                    if tc.steps and tc.expected:
+                        ns = tc.steps.count("\n") + 1
+                        ne = tc.expected.count("\n") + 1
+                        if ns != ne:
+                            errs.append(f"步骤({ns}条)与预期({ne}条)数量不一致")
+                    if errs:
+                        _new_failed.append((0, tc.model_dump(), errs))
+                    else:
+                        all_confirmed.append(tc)
+                        fixed_ids.add(tc.id)
 
-            failed_details = _new_failed
-            if not failed_details:
-                break
-            attempt_label = f"第{attempt+1}次" if attempt == 0 else f"第{attempt+1}次重试"
-            logger.warning(
-                f"   ⚠️ 校验: {len(confirmed_rows)} 用例通过, "
-                f"{len(failed_details)} 失败 ({attempt_label})"
-            )
+                # 仍未修复的失败行：保留在 failed_details 中
+                _still_failed = [
+                    (f_idx, f_dict, f_errs)
+                    for f_idx, f_dict, f_errs in failed_details
+                    if f_dict.get("id", "") not in fixed_ids
+                ]
+                failed_details = _still_failed + _new_failed
+                logger.warning(
+                    f"   ⚠️ 校验: {len(all_confirmed)} 用例通过（本次修复 {len(plan.test_cases)} 行, "
+                    f"接受 {len(fixed_ids)}, 仍失败 {len(failed_details)}）, "
+                    f"({attempt_label})"
+                )
+                if not failed_details:
+                    break
 
         # 最终校验 + 引用完整性
         if failed_details:
             pre_ids = {p.id for p in plan.shared_preconditions} if plan else set()
-            valid_cases = [tc for tc in confirmed_rows]
+            valid_cases = [tc for tc in all_confirmed]
             for f_idx, f_dict, f_errs in failed_details:
                 orphan = [p for p in (f_dict.get("preconditions") or []) if p not in pre_ids]
                 if orphan:
@@ -272,9 +336,11 @@ class ChatTestAgentGraph(RetrievalMixin, GenerationMixin):
                     title=f_dict.get("title","?"),
                     preconditions=f_dict.get("preconditions") or [],
                     steps=f_dict.get("steps",""), expected=f_dict.get("expected",""),
+                    mutates_data=f_dict.get("mutates_data", False),
+                    is_negative_test=f_dict.get("is_negative_test", False),
                 ))
         else:
-            valid_cases = confirmed_rows
+            valid_cases = all_confirmed
 
         if failed_details:
             from observability import log_thinking
@@ -341,6 +407,10 @@ class ChatTestAgentGraph(RetrievalMixin, GenerationMixin):
         os.makedirs(output_dir, exist_ok=True)
         excel_path = os.path.join(output_dir, "test_plan.xlsx")
 
+        # Phase B 资源冲突消解（纯代码，LLM 输出 → Excel 写入之间）
+        if plan is not None and plan.shared_preconditions:
+            self._resolve_resource_conflicts(plan)
+
         # 写双 Sheet
         n_confirmed = len(valid_cases)
         wb = Workbook()
@@ -386,6 +456,18 @@ class ChatTestAgentGraph(RetrievalMixin, GenerationMixin):
                 mx = max((len(str(ws.cell(r, ci).value or "")) for r in range(2, ws.max_row + 1)), default=0)
                 ws.column_dimensions[get_column_letter(ci)].width = max(len(str(h)) + 2, min(mx + 2, 55))
         wb.save(excel_path); wb.close()
+
+        # 接口定义快照与 Excel 同目录落盘 —— Phase C 生成 YAML 的数据来源。
+        # 规则 M8：接口定义靠产物传递（快照随计划走），禁止依赖内存态跨阶段交接；
+        # 此前 api_definition_list 在 _resume_workflow_bg 交接时丢失，导致 Phase C 空定义盲写。
+        api_defs_path = os.path.join(output_dir, "api_defs.json")
+        try:
+            with open(api_defs_path, "w", encoding="utf-8") as f:
+                json.dump(all_apis_dict, f, ensure_ascii=False, indent=2)
+            logger.info(f"   📄 接口定义快照已保存: {api_defs_path} ({len(all_apis_dict)} 个接口)")
+        except OSError:
+            logger.error("接口定义快照写入失败（Phase C 确认时将按 M8 阻断）: %s",
+                         api_defs_path, exc_info=True)
 
         fail_warn = f"（{len(failed_details)} 行未通过校验，需人工审查）" if failed_details else ""
         n_modules = len(set(tc.story for tc in valid_cases))
@@ -441,6 +523,80 @@ class ChatTestAgentGraph(RetrievalMixin, GenerationMixin):
                 errors.append(f"第{idx}行: 是否启用必须为 Y 或 N，当前为 '{row.enabled}'")
 
         return errors
+
+    # ==================== Phase B 资源冲突消解 ====================
+
+    @staticmethod
+    def _find_pre(plan: ExcelPlanV2, pre_id: str) -> SharedPrecondition | None:
+        """在 plan.shared_preconditions 中查找指定 id 的前置条件。"""
+        for pre in plan.shared_preconditions:
+            if pre.id == pre_id:
+                return pre
+        return None
+
+    def _resolve_resource_conflicts(self, plan: ExcelPlanV2) -> None:
+        """资源冲突消解：检测同一 PRE 被多个正向写操作用例引用时，克隆隔离。
+
+        纯代码节点，不调用 LLM。嵌入在 _generate_excel_plan_node 内部，
+        LLM 生成 → 校验 → 消解 → 写 Excel 的流程中执行。
+
+        算法:
+          1. 关键词兜底 LLM 漏标（mutates_data 未标但 steps 含写操作关键词）
+          2. 构建 PRE → 正向写操作用例列表
+          3. 同一 PRE 被 ≥2 个正向写操作用例引用 → 克隆隔离
+        """
+        if not plan or not plan.test_cases:
+            return
+
+        # 1. 代码兜底 LLM 漏标
+        for tc in plan.test_cases:
+            if not tc.preconditions or tc.mutates_data:
+                continue
+            if any(kw in tc.steps for kw in config.RESOURCE_MUTATE_KEYWORDS):
+                tc.mutates_data = True
+                logger.debug(
+                    "消解器兜底: %s 未标 mutates_data，但步骤含写操作关键词，已自动标记",
+                    tc.id,
+                )
+
+        # 2. 构建 PRE → 正向写操作用例列表
+        pre_refs: dict[str, list] = defaultdict(list)
+        for tc in plan.test_cases:
+            if not tc.mutates_data or tc.is_negative_test:
+                continue
+            for pid in tc.preconditions:
+                pre_refs[pid].append(tc)
+
+        # 3. 检测冲突 → 克隆隔离
+        isolation_count = 0
+        for pre_id, ref_list in pre_refs.items():
+            if len(ref_list) <= 1:
+                continue
+            original = self._find_pre(plan, pre_id)
+            if original is None:
+                logger.warning("消解器: PRE %s 被 %d 个用例引用但未在 shared_preconditions 中找到，跳过",
+                               pre_id, len(ref_list))
+                continue
+            # 第一个用例保持引用原始 PRE，其余克隆隔离
+            for tc in ref_list[1:]:
+                clone_id = f"{pre_id}_isolated_{tc.id}"
+                plan.shared_preconditions.append(SharedPrecondition(
+                    id=clone_id,
+                    name=f"{original.name}（{tc.id}专用）",
+                    steps=original.steps,
+                    expected=original.expected,
+                    cloned_from=pre_id,
+                ))
+                tc.preconditions = [
+                    clone_id if p == pre_id else p for p in tc.preconditions
+                ]
+                isolation_count += 1
+                logger.info("消解器: %s → %s（%s 隔离）", pre_id, clone_id, tc.id)
+
+        if isolation_count:
+            logger.info("消解器完成: %d 个 PRE 被隔离，共 %d 条用例受影响",
+                        len([p for p, r in pre_refs.items() if len(r) > 1]),
+                        isolation_count)
 
     # ==================== 日志辅助方法 ====================
 
@@ -586,38 +742,13 @@ class ChatTestAgentGraph(RetrievalMixin, GenerationMixin):
 
     @staticmethod
     def _load_factory_methods() -> str:
-        """从 data_factory/methods.yaml 读取数据工厂方法列表（带缓存+双检锁，文件不变时不重复读盘）。"""
-        global _factory_methods_cache
-        if _factory_methods_cache is not None:
-            return _factory_methods_cache
-        # 文件 I/O + 缓存赋值全部在锁内执行，防止双检锁模式下多线程重复读盘
-        with _factory_methods_lock:
-            if _factory_methods_cache is not None:
-                return _factory_methods_cache
-            factory_path = os.path.join(config.BASE_DIR, "data_factory", "methods.yaml")
-            if not os.path.exists(factory_path):
-                _factory_methods_cache = "（无可用数据工厂方法）"
-                return _factory_methods_cache
+        """数据工厂方法清单（prompt 注入文本）。
 
-            import yaml as _yaml
-            with open(factory_path, "r", encoding="utf-8") as f:
-                raw = _yaml.safe_load(f)
-
-            methods = raw.get("methods", []) if isinstance(raw, dict) else []
-            if not methods:
-                _factory_methods_cache = "（无可用数据工厂方法）"
-                return _factory_methods_cache
-
-            lines = []
-            for m in methods:
-                name = m.get("name", "?")
-                syntax = m.get("syntax", f"${{{name}(...)}}")
-                desc = m.get("description", "")
-                lines.append(f"   - `{syntax}`：{desc}")
-                for tip in m.get("usage_tips", []):
-                    lines.append(f"     - {tip}")
-            _factory_methods_cache = "\n".join(lines)
-            return _factory_methods_cache
+        薄壳：实现已归位 data_factory/registry.py（单一事实源 methods.yaml v2，
+        目录+分类详情渲染、缓存、旧结构兼容均在 registry 内）。
+        """
+        from data_factory.registry import render_for_prompt
+        return render_for_prompt()
 
     def _invoke_structured(self, prompt, model_class: Type[BaseModel],
                            max_retries: int = config.MAX_RETRIES,

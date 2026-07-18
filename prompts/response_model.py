@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 import logging
+import re
 from typing import Dict, Any, List, Optional
 from pydantic import BaseModel, Field, field_validator, model_validator, ValidationInfo
 
@@ -16,6 +17,12 @@ logger = logging.getLogger(__name__)
 # LLM 字段漂移统计（data→json），用于监控 prompt 质量
 _drift_total = 0
 _drift_count = 0
+
+# 动态占位符解析（框架 replace_load() 只解析 ${func(args)}）。
+# 函数白名单与实参规则以 data_factory/methods.yaml 注册表为单一事实源
+# （data_factory.registry.get_validation_rules()），此处不维护清单副本。
+_PLACEHOLDER_RE = re.compile(r"\$\{([^{}]*)\}")
+_PLACEHOLDER_CALL_RE = re.compile(r"^([A-Za-z_]\w*)\(([^()]*)\)$")
 
 
 # ============================================================
@@ -61,6 +68,10 @@ class SharedPrecondition(BaseModel):
     name: str = Field(description="前置名称，如「已创建测试跑步机」")
     steps: str = Field(description="详细步骤文本，\\n 分隔")
     expected: str = Field(description="预期结果文本")
+    cloned_from: Optional[str] = Field(
+        default=None,
+        description="克隆来源 PRE id。消解器自动填入，非克隆时为 null，不写入 Excel"
+    )
 
 
 class TestCaseRow(BaseModel):
@@ -74,6 +85,14 @@ class TestCaseRow(BaseModel):
     )
     steps: str = Field(description="执行步骤文本，\\n 分隔")
     expected: str = Field(description="预期结果文本，\\n 分隔")
+    mutates_data: bool = Field(
+        default=False,
+        description="内部元数据：是否为写操作（增删改等）。LLM 输出，不写入 Excel"
+    )
+    is_negative_test: bool = Field(
+        default=False,
+        description="内部元数据：是否为写操作（增删改等）。LLM 输出，不写入 Excel"
+    )
 
 
 class ExcelPlanV2(BaseModel):
@@ -138,7 +157,16 @@ class TestCase(BaseModel):
         validation_alias="json",     # LLM 输入时接受 json 字段名
     )
     params: Optional[Dict[str, Any]] = Field(default=None, description="URL query 参数")
+    form_data: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description="表单编码请求体（仅 Content-Type 为 x-www-form-urlencoded 时合法），"
+                    "由 StepData 依据 header 判定后填入，YAML 输出为 data",
+        serialization_alias="data",
+    )
     validation: List[Dict[str, Any]] = Field(default=[], description="断言规则列表")
+    # B5/B10（回炉类）: extract 系字段值必须是 str —— 依赖 Dict[str, str] 严格类型校验，
+    # int/float/bool/None 一律 ValidationError（不做静默强转/丢弃，失败进重生成循环）。
+    # 无需提取时应省略字段（prompt 铁律），空 {} 由 strip_empty_optional_dicts 剔除。
     extract_list: Optional[Dict[str, str]] = Field(default=None, description="从响应提取字段")
     extract: Optional[Dict[str, str]] = Field(default=None, description="(兼容旧字段) 从响应提取")
     input_extract: Optional[Dict[str, str]] = Field(default=None, description="从请求提取")
@@ -167,17 +195,234 @@ class TestCase(BaseModel):
                     logger.warning(log_msg)
         return data
 
+    @model_validator(mode="after")
+    def validate_body_exclusivity(self) -> "TestCase":
+        """B9（回炉类）: json/params/data 必须且只能出现一个。
+
+        空 params 占位已由 strip_empty_optional_dicts 剔除，此处检出的是真实并存 —
+        代码删哪个都是猜测，一律校验失败进重生成循环，由 LLM 自查决定正确的请求方式。
+        """
+        present = [label for label, val in (
+            ("json", self.request_body),
+            ("params", self.params),
+            ("data", self.form_data),
+        ) if val is not None]
+        if len(present) > 1:
+            raise ValueError(
+                f"json/params/data 三选一，检测到并存: {' + '.join(present)}，"
+                "请依据接口定义只保留正确的一种请求参数")
+        return self
+
+    @model_validator(mode="before")
+    @classmethod
+    def strip_empty_optional_dicts(cls, data: Any) -> Any:
+        """输出卫生兜底（json/params/data 必须且只能出现一个）。
+
+        - extract/input_extract/extract_list 为空对象 {} → None（可选字段，省略）
+        - params 为空 {} 且已有 json/data 请求体 → None（消除"有 json 还带空 params"）
+        - params 为空 {} 但无其他请求体（如无条件 GET）→ 保留，满足三选一必填
+        None 会被 model_dump(exclude_none=True) 剔除；json 请求体不做剔除（{} 有语义）。
+        """
+        if isinstance(data, dict):
+            for field in ("extract", "input_extract", "extract_list"):
+                if data.get(field) == {}:
+                    data[field] = None
+            if data.get("params") == {}:
+                has_body = any(
+                    data.get(k) is not None
+                    for k in ("json", "request_body", "data", "form_data")
+                )
+                if has_body:
+                    data["params"] = None
+        return data
+
+    @model_validator(mode="before")
+    @classmethod
+    def merge_same_type_validations(cls, data: Any) -> Any:
+        """输出卫生兜底：合并同类型断言为一个条目。
+
+        LLM 输出 [{eq: {code: 0}}, {eq: {msg: ok}}] → [{eq: {code: 0, msg: ok}}]。
+        同类型断言中出现同名字段但期望值不同（真实冲突）时保持独立条目，不丢断言。
+        """
+        if not isinstance(data, dict):
+            return data
+        validation = data.get("validation")
+        if not isinstance(validation, list) or len(validation) <= 1:
+            return data
+
+        merged_by_type: Dict[str, Dict[str, Any]] = {}
+        result = []
+        for item in validation:
+            if not (isinstance(item, dict) and len(item) == 1):
+                result.append(item)
+                continue
+            vtype, payload = next(iter(item.items()))
+            if not isinstance(payload, dict):
+                result.append(item)
+                continue
+            bucket = merged_by_type.get(vtype)
+            if bucket is None:
+                bucket = dict(payload)
+                merged_by_type[vtype] = bucket
+                result.append({vtype: bucket})
+            elif any(k in bucket and bucket[k] != v for k, v in payload.items()):
+                result.append({vtype: payload})  # 同字段不同期望值 → 保持独立
+            else:
+                bucket.update(payload)
+        if len(result) != len(validation):
+            data["validation"] = result
+        return data
+
 
 class StepData(BaseModel):
     """单步测试数据 — data 数组中的一个元素"""
     baseInfo: Dict[str, Any] = Field(description="接口基础信息（api_name, url, method, header 等）")
-    testCase: List[TestCase] = Field(description="测试用例列表（每个元素含 case_name, request_body, validation 等）")
+    testCase: List[TestCase] = Field(
+        min_length=1,
+        description="测试用例列表（每个元素含 case_name, request_body, validation 等），至少 1 条",
+    )
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_base_info(cls, data: Any) -> Any:
+        """规范化 baseInfo（代码兜底 LLM 漂移）。
+
+        1. method 必须小写
+        2. url 不含域名，LLM 输出完整 URL 时截取 path
+        3. header 缺失时注入 Content-Type（token/公共头由框架层常量注入，此处不生成）：
+           - json/迁移后为 json 的请求体: application/json;charset=UTF-8
+           - 文件上传（请求体含 file）/ 仅 params: 不注入（multipart 边界由客户端生成、
+             GET 无需请求体头）
+        4. 表单体判定（data 仅在 x-www-form-urlencoded 下合法）：
+           header 明确为表单 Content-Type 时，case 的 data 是合法表单体 → 存入
+           form_data（输出仍为 data）；否则 data 视为字段漂移，由 TestCase 迁移为 json。
+        """
+        if not isinstance(data, dict):
+            return data
+        base = data.get("baseInfo")
+        if not isinstance(base, dict):
+            return data
+        cases = [c for c in (data.get("testCase") or []) if isinstance(c, dict)]
+
+        # 1. method 小写
+        method = base.get("method")
+        if isinstance(method, str) and method != method.lower():
+            base["method"] = method.lower()
+
+        # 2. url 去域名
+        url = base.get("url")
+        if isinstance(url, str) and url.startswith(("http://", "https://")):
+            from urllib.parse import urlparse
+            parsed = urlparse(url)
+            base["url"] = parsed.path + (f"?{parsed.query}" if parsed.query else "")
+            logger.warning("LLM url 含域名已截取 path: %s -> %s", url, base["url"])
+
+        # 3. header 注入（仅在有 json 类请求体且非上传时）
+        if "header" not in base:
+            has_body, has_file = False, False
+            for c in cases:
+                body = c.get("json")
+                if body is None:
+                    body = c.get("request_body")
+                if body is None:
+                    body = c.get("data")  # 无表单 CT，后续会迁移为 json
+                if body is not None:
+                    has_body = True
+                    if isinstance(body, dict) and "file" in body:
+                        has_file = True
+            if has_body and not has_file:
+                base["header"] = {"Content-Type": "application/json;charset=UTF-8"}
+
+        # 4. 表单 Content-Type 明确时，data 为合法表单体
+        header = base.get("header")
+        if isinstance(header, dict):
+            ct = next((v for k, v in header.items()
+                       if str(k).lower() == "content-type"), "")
+            if "x-www-form-urlencoded" in str(ct).lower():
+                for c in cases:
+                    if "data" in c and "form_data" not in c:
+                        c["form_data"] = c.pop("data")
+        return data
 
 
 class TestData(BaseModel):
     """测试数据（序列化为 YAML 文件）"""
-    data: List[StepData] = Field(description="接口调用列表，每个元素为一个接口调用（含 baseInfo + testCase）")
+    data: List[StepData] = Field(
+        min_length=1,
+        description="接口调用列表，每个元素为一个接口调用（含 baseInfo + testCase），至少 1 个",
+    )
     file_name: str = Field(default="test_data.yaml", description="输出的 YAML 文件名")
+
+    @model_validator(mode="after")
+    def validate_placeholders(self) -> "TestData":
+        """动态占位符校验（B1-B4，回炉类。框架只认 ${...}）。
+
+        函数白名单与实参规则读取 data_factory/methods.yaml 注册表
+        （单一事实源，框架新增方法只需更新注册表，此处自动跟随）。
+        拦截 LLM 幻觉语法（真实案例: '{{(get_current_time(ymd) + 1day)}} 11:00:00'）：
+          - {{}} 双花括号 → replace_load() 不解析，原样发给服务端
+          - 占位符内运算/拼接（+ 1day）→ 框架不支持
+          - 非注册表函数 / 实参个数越界 / 首参不在枚举内（如 fmt 非 ydm|hms）
+        校验失败抛 ValueError → 登记后进入轮末自查重生成循环。
+        """
+        from data_factory.registry import get_validation_rules
+        rules = get_validation_rules()
+        issues: List[str] = []
+
+        def _check_call(inner: str, raw: str, path: str) -> None:
+            call = _PLACEHOLDER_CALL_RE.match(inner)
+            if not call:
+                issues.append(
+                    path + ": 占位符只能是 ${函数名(参数)}，禁止运算/拼接: " + raw[:60])
+                return
+            func, args_str = call.group(1), call.group(2)
+            rule = rules.get(func)
+            if rule is None:
+                issues.append(
+                    path + f": 未知占位符函数 '{func}'，注册表可用: "
+                    + "/".join(sorted(rules)))
+                return
+            args = ([a.strip() for a in args_str.split(",")]
+                    if args_str.strip() else [])
+            n = len(args)
+            min_a = rule.get("min_args")
+            max_a = rule.get("max_args")
+            if (min_a is not None and n < min_a) or (max_a is not None and n > max_a):
+                issues.append(
+                    path + f": {func} 实参个数 {n} 超出范围 [{min_a}, {max_a}]: " + raw[:60])
+                return
+            enum0 = rule.get("arg0_enum")
+            if enum0 and args:
+                a0 = args[0].strip("'\"").lower()
+                if a0 not in {str(e).lower() for e in enum0}:
+                    issues.append(
+                        path + f": {func} 第1个参数仅支持 "
+                        + "/".join(str(e) for e in enum0) + f"，得到 '{args[0]}'")
+
+        def _walk(node: Any, path: str) -> None:
+            if isinstance(node, str):
+                if "{{" in node or "}}" in node:
+                    issues.append(
+                        path + ": 含 '{{}}' 双花括号（框架只解析 ${...}）: " + node[:60])
+                matches = list(_PLACEHOLDER_RE.finditer(node))
+                if node.count("${") > len(matches):
+                    issues.append(path + ": 占位符未闭合或嵌套: " + node[:60])
+                for m in matches:
+                    _check_call(m.group(1).strip(), m.group(0), path)
+            elif isinstance(node, dict):
+                for k, v in node.items():
+                    _walk(v, f"{path}.{k}")
+            elif isinstance(node, list):
+                for idx, v in enumerate(node):
+                    _walk(v, f"{path}[{idx}]")
+
+        _walk(self.model_dump(exclude_none=True, by_alias=True)["data"], "data")
+        if issues:
+            raise ValueError(
+                "动态占位符校验失败（只能使用数据工厂注册表内的函数；时间偏移用 "
+                "get_offset_time；注册表不支持的能力请写合理固定字面量，如 "
+                "'2029-12-31 10:00:00'）:\n" + "\n".join(issues[:10]))
+        return self
 
 
 # ============================================================
@@ -270,3 +515,10 @@ class ApiDefExtract(BaseModel):
     """接口文档提取结果"""
     apis: List[ApiDefinition] = Field(description="提取到的所有接口定义")
     module_name: str = Field(description="接口所属模块")
+
+
+class TranslationResult(BaseModel):
+    """Phase C 翻译结果：中文 → 英文标识符映射。"""
+    feature_en: Dict[str, str] = Field(default_factory=dict, description="feature 中文→英文")
+    story_en: Dict[str, str] = Field(default_factory=dict, description="story 中文→英文")
+    title_en: Dict[str, str] = Field(default_factory=dict, description="title 中文→英文")

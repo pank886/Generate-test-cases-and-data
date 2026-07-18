@@ -37,6 +37,9 @@ pydantic-settings>=2.0.0
 pyyaml>=6.0
 openpyxl>=3.1.0
 
+# ====== 中文转拼音（Phase C 翻译缓存未命中时的文件名降级方案） ======
+pypinyin>=0.53.0
+
 # ====== Web 服务 ======
 fastapi>=0.111.0
 uvicorn>=0.41.0

@@ -628,3 +628,63 @@
 - **涉及模块**：数据库记录
 - **问题根因**：历史上 Axure 文档与模块的绑定记录使用了错误的 `type="product"` 而非 `"axure"`，导致前端传正确 type 时 normalize 查询不到，解绑报"绑定不存在"。
 - **架构决策**：修复数据库中 `axure_` 前缀绑定的 type 为 `axure`。
+
+---
+
+## 10. 2026-07-18 Phase B 实现 + Skill B/C 修复
+
+### [48] [P0] `_resume_workflow_bg` 读取思考日志时 `except Exception: pass` 静默吞异常
+
+- **涉及模块**：`web/tasks.py`
+- **问题根因**：Phase B 恢复执行时读取 `thinking_trace.log` 提取失败用例编号，`except Exception: pass` 吞掉所有异常（编码错误、权限拒绝），`failed_tc_ids` 为空列表，前端不展示校验失败警告。
+- **架构决策**：改为 `logger.warning("无法读取思考日志，跳过失败用例提取", exc_info=True)`，降级但不静默。
+- **衍生规则**：同 [2] — 所有 `except` 块必须至少记录日志
+
+### [49] [P0] delete-file 端点读取 meta.json 时 `except Exception: pass` 静默吞异常
+
+- **涉及模块**：`web/routes/files.py`
+- **问题根因**：删除文件时从 `.meta.json` 读取 `doc_id`，`except Exception: pass` 吞掉 JSON 解析异常，`_doc_id` 保持 None，ChromaDB 孤儿数据永不清理。
+- **架构决策**：改为 `logger.warning("读取 meta.json 失败，跳过 ChromaDB 孤儿清理: %s", meta_path, exc_info=True)`。
+- **衍生规则**：删除操作中的可选步骤失败时，应记录日志后继续（不阻断主流程），但必须保留异常信息供排查
+
+### [50] [P0] 路径包含检查 `startswith` → `commonpath`
+
+- **涉及模块**：`web/routes/files.py`
+- **问题根因**：文件访问白名单用 `str.startswith` 做目录归属判断，`/tmp/attack_app` 会通过 `/tmp/app` 前缀检查，存在路径穿越风险。
+- **架构决策**：改为 `os.path.commonpath([abs_path, d]) == d` 语义等价的严格检查，消除前缀绕过。
+- **衍生规则**：同 [36] — 路径包含检查必须用 `commonpath` 或 `is_relative_to()`，禁止 `startswith`
+
+### [51] [P0] `onclick` 属性中 `esc(path)` 拼接 JS 字符串 — 改用 `data-*` + 事件委托
+
+- **涉及模块**：`static/app.js`
+- **问题根因**：3 处 `onclick="openLocalFile('...' + esc(path) + '...')"` 中 `esc()` 将 `'` 转 `&#39;`，浏览器 HTML 解码后 `&#39;` 还原为 `'`，破坏 JS 字符串边界。
+- **架构决策**：替换为 `data-action="..." data-path="..."` 属性，新增全局 `click` 事件委托处理器，按 `data-action` 值分派函数调用。
+- **衍生规则**：动态数据传递给 JS 事件处理函数时，必须使用 `data-*` 属性 + 全局事件委托模式；禁止在 HTML 字符串中拼接 JS 字面量
+
+### [52] [P1] `os.path.abspath("uploads")` 相对路径依赖 CWD
+
+- **涉及模块**：`web/routes/files.py`
+- **问题根因**：文件访问白名单中 `os.path.abspath("uploads")` 依赖 CWD，不同启动方式解析到不同目录。
+- **架构决策**：改为 `os.path.abspath(os.path.join(config.BASE_DIR, "uploads"))`，与项目其他路径统一基准。
+- **衍生规则**：同 [15] — 所有路径以 `config.BASE_DIR` 为根
+
+### [53] [P1] `test_point_analysis` 字段在 TypedDict 中重复定义
+
+- **涉及模块**：`agent_components/state.py`
+- **问题根因**：同一 TypedDict 键定义两次，类型相同但注释不同。Python 中后定义覆盖前定义，编译期无错误但造成混淆。
+- **架构决策**：删除第一条重复定义，合并注释。
+- **衍生规则**：TypedDict / dataclass 字段名必须唯一；禁止重复定义同一键
+
+### [54] [P1] 前端 12 处 `catch` 块缺少 `console.error`
+
+- **涉及模块**：`static/app.js`
+- **问题根因**：多处 API 调用 `catch (e) { toast('❌ ...'); }` 不记录 `console.error`，用户看到通用错误提示但无法排查具体原因。
+- **架构决策**：统一追加 `console.error(e)` 保留错误堆栈，便于开发者从控制台排查。
+- **衍生规则**：所有前端 `catch` 块必须输出 `console.error`，禁止仅弹 toast 不记录原始错误
+
+### [55] [P0] 生产链路虚假数据托底清除 — mock_data.py 删除与数据缺失阻断
+
+- **涉及模块**：`data_factory/mock_data.py`（已删除）、`web/tasks.py`、`web/routes/chat.py`、`agent_components/generators.py`
+- **问题根因**：`mock_data.py` 自述"ChromaDB 无结果时兜底"，内置 `MOCK_PRODUCT_DOCS`/`MOCK_API_DEFS` 假数据（合同/房产等与本项目无关的样例）；同类问题：`/confirm-plan` 链路 `api_defs_json` 恒为空时，Phase C 未阻断而是静默盲写 63 个 YAML，字段名/类型/断言大面积幻觉（`status: 正常开放` vs 接口定义 `gymStatus: integer`、`code` vs `retCode`、提取 returns 中不存在的 `$.data.id`）。
+- **架构决策**：删除 `mock_data.py`（经全盘检索确认已无生产代码引用）；确立"数据缺失必须显式失败"原则——检索为空/定义缺失/交接丢失时，返回 `requires_review`、任务 `failed` 或写入错误清单（如 `_generation_errors.json`），绝不以任何假数据继续流程。
+- **衍生规则**：系统任何环节（检索、生成、交接）遇到数据缺失，必须显式阻断并报告，严禁以 mock/示例/占位/硬编码假数据托底续跑，严禁静默降级；单元测试中的 MagicMock/测试样例数据不在禁止范围。

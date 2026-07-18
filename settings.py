@@ -124,6 +124,22 @@ class Settings(BaseSettings):
         description="Excel 计划校验失败后自动修复的最大尝试次数",
     )
 
+    # -- Phase B 资源冲突消解 — 写操作关键词（中英文），代码层兜底 LLM 漏标 --
+    resource_mutate_keywords: list[str] = Field(
+        default=[
+            # 删除类
+            "删除", "移除", "销毁", "删掉", "清空",
+            "DELETE", "/del", "/remove", "/delete",
+            # 修改类
+            "修改", "更新", "编辑", "调为", "变更",
+            "UPDATE", "PUT", "PATCH", "/modify", "/edit",
+            # 新增类
+            "新增", "添加", "创建", "增加",
+            "POST", "/add", "/create",
+        ],
+        description="Phase B 资源冲突消解 — 写操作关键词列表。代码兜底 LLM 漏标 mutates_data",
+    )
+
     # ================================================================
     # 节点: YAML 数据文件生成 (generate_all_yamls)
     # 影响范围: nodes.py → ThreadPoolExecutor
@@ -132,6 +148,12 @@ class Settings(BaseSettings):
     yaml_concurrency: int = Field(
         default=5, ge=1, le=20,
         description="YAML 文件并发生成线程数",
+    )
+
+    yaml_repair_rounds: int = Field(
+        default=1, ge=0, le=3,
+        description="Phase C YAML 修复轮数：第 1 轮全量生成之外的自查重生成轮数"
+                    "（失败项集中送思考节点自查后重生成；0=不修复直接计失败）",
     )
 
     # -- 后台任务线程池 --

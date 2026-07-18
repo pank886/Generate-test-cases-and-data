@@ -144,7 +144,7 @@ async def delete_file(filename: str = Form(...)):
                         with open(meta_path, "r", encoding="utf-8") as _mf:
                             _doc_id = _json.load(_mf).get("doc_id")
                     except Exception:
-                        pass
+                        logger.warning("读取 meta.json 失败，跳过 ChromaDB 孤儿清理: %s", meta_path, exc_info=True)
                 if _doc_id and _chroma_db is not None:
                     try:
                         _chroma_db.delete_by_doc_id(_doc_id)
@@ -324,9 +324,9 @@ async def get_file_content(path: str = ""):
 
         allowed_dirs = [
             _os.path.abspath(config.TESTCASE_BASE),
-            _os.path.abspath("uploads"),
+            _os.path.abspath(_os.path.join(config.BASE_DIR, "uploads")),
         ]
-        if not any(abs_path.startswith(d) for d in allowed_dirs):
+        if not any(_os.path.commonpath([abs_path, d]) == d for d in allowed_dirs):
             return JSONResponse(status_code=403,
                                 content={"success": False,
                                          "message": "无权访问该路径"})

@@ -34,7 +34,6 @@ class State(TypedDict):
     product_docs: Optional[List[dict]]       # Hop 1: 产品文档检索结果
     related_modules: Optional[List[str]]     # 提取出的关联模块列表
     api_definitions: Optional[List[dict]]    # Hop 2b: 接口定义检索结果
-    test_point_analysis: Optional[str]       # analyze_test_points_raw 输出的自由文本分析
     test_point_analysis: Optional[str]       # analyze_test_points_raw 输出的自由文本分析报告
 
     # --- Phase B 多轮对话 ---

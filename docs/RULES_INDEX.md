@@ -1,6 +1,6 @@
 # 架构规则索引
 
-> 最后编译: 2026-07-15 | 元规则数: 7 | 覆盖问题: 69 项 (P0×24, P1×28, P2×15, 架构改进×2)
+> 最后编译: 2026-07-18 | 元规则数: 8 | 覆盖问题: 77 项 (P0×29, P1×31, P2×15, 架构改进×2)
 
 ## 第一部分：元规则速查
 
@@ -13,6 +13,7 @@
 | M5 | 文件与路径安全 | BASE_DIR 为根，basename 洗输入，os.remove 包 OSError，临时目录含标识，路径包含用 commonpath 非 startswith，resolve_path 拒空值 |
 | M6 | 代码结构与配置 | settings 管参数，lifespan 配 global，全局单例判 None，to_thread 配心跳且进度递增 |
 | M7 | 前端安全与交互 | 静态 JS 禁模板语法，catch 禁空，变量注入用 var，try/catch/finally 共享变量声明在顶层，动态路径用 data-* 禁 onclick 拼接 |
+| M8 | 数据真实性与缺失阻断 | 数据缺失必显式失败(requires_review/failed/错误清单)，禁 mock/示例/占位假数据托底，禁静默降级续跑；测试 MagicMock 豁免 |
 
 ## 第二部分：关键词 → 规则映射表
 
@@ -32,7 +33,9 @@
 | `/api/embed`, `/api/embeddings`, `FallbackOllamaEmbeddings` | M2 | P1 |
 | `_embed_via_old_api`, `_mark_old_api`, `_should_use_old_api` | M2 | P1 |
 | `except:`, `except Exception:`, `except Exception: pass` | M3 | P0 |
+| `except Exception:\\s*pass` (无日志的静默吞) | M3 | P0 |
 | `catch (e) {}`, `catch(e){}` | M3, M7 | P0 |
+| `catch (e) { toast(` 后无 `console.error` | M7 | P1 |
 | `logger.error(...)` 缺 `exc_info=True` | M3 | P0 |
 | `print(f"...")` 用于运行时日志（应为 `logger.info(...)`） | M3 | P1 |
 | `isinstance` 链缺 `datetime` / `Decimal` / `UUID` 分支 | M3 | P1 |
@@ -60,8 +63,10 @@
 | 心跳协程 `progress=固定值` 不递增 | M6 | P2 |
 | `const labels = {...}` 在函数内（跨函数不可见） | M6, M7 | P1 |
 | `dict.setdefault(key, value)` 去重保留旧版本 | M6 | P2 |
+| TypedDict 同一键多次定义（重复字段） | M6 | P1 |
 | `{{`, `{%`, `tojson \| safe`, `script src=` | M7 | P0 |
 | `onclick=`, `onchange=`, `addEventListener` | M7 | P1 |
+| `data-action=` (正确模式：data-* + 事件委托) | M7 | ✅ 合规 |
 | 模板中 `const VECTOR_READY`（应为 `var`） | M7 | P0 |
 | `<script>` 块中 `var INITIAL_FILES` 首屏注入 | M7 | P0 |
 | `onclick="...' + esc(path) + '..."` 拼接 JS（应用 `data-*`+委托） | M7 | P1 |
@@ -74,11 +79,15 @@
 | `log_thinking` / `thinking_trace.log` LLM 原始输出未记录 | M3 | P2 |
 | 日志路径硬编码 `Path("logs")` 未走 `config.LOG_DIR` | M5 | P2 |
 | Binding type 与 Document doc_type 不一致 | M1 | P1 |
+| `MOCK_`/`FAKE_`/`SAMPLE_` 常量定义于生产模块（非 tests/） | M8 | P0 |
+| 检索/查询结果为空后未 return/raise 仍继续主流程 | M8 | P0 |
+| `api_defs_json` 等关键输入为空串/空列表直传生成节点 | M8 | P0 |
+| "兜底"/"fallback 数据"注释 + 硬编码业务样例 | M8 | P0 |
 
 ## 第三部分：风险等级总览
 
 | 等级 | 含义 | 覆盖规则 |
 |------|------|---------|
-| P0 | 一票否决，违反即事故 | M1, M2, M3, M5, M7 |
+| P0 | 一票否决，违反即事故 | M1, M2, M3, M5, M7, M8 |
 | P1 | 长期健康，违反即腐化 | M4, M6 |
-| P2 | 最佳实践，提升可维护性 | M1~M7 边界情况 |
+| P2 | 最佳实践，提升可维护性 | M1~M8 边界情况 |

@@ -37,7 +37,15 @@ uploads/
 *.db-wal
 data/
 testcase_out/
+testcase/
 vector_store/
+
+# Phase C 生成过程产物
+_generation_errors.json
+~$*.xlsx
+
+# 数据工厂注册表编译器草稿（人工审核后合并，不入库）
+methods.draft.yaml
 
 # 文档提取临时目录
 _images/
@@ -62,4 +70,5 @@ wheels/
 
 # 开发计划
 changelog/
+
 

@@ -46,30 +46,44 @@ class PromptFactory:
         """
         return ChatPromptTemplate.from_messages([
         ("system",
-         "你是资深测试数据构造专家。\n"
-         "根据【接口定义】与【用例逻辑】，生成测试数据。\n\n"
-         "### 映射铁律\n"
-         "1. 数据优先级：用例指定值 > 接口示例值 > 智能模拟（数字填0/1，字符串加test_，布尔false）。\n"
-         "2. 禁止捏造字段，仅使用接口定义中的字段；类型与枚举必须严格匹配。\n"
-         "3. **数据传递**（三个机制互不替代）：\n"
-         "   - `extract`：从接口响应提取数据到 extract.yaml。语法：key: \"$.jsonpath\" 或 key: \"正则\"\n"
-         "   - `input_extract`：从本用例的请求参数提取数据到 extract.yaml。语法：key: \"$.json.字段名\"\n"
-         "   - 数据引用（在下游用例的 json 字段中引用 extract.yaml 的数据）：\n"
-         "     - `${{get_extract_data(key)}}`：取指定 key 的第 0 个值（默认），如 `${{get_extract_data(token)}}`\n"
-         "     - `${{get_extract_data(key, randoms=0)}}`：从随机列表取第 0 个，如 `${{get_extract_data(plates, randoms=0)}}`\n"
-         "     - `${{get_extract_data(key, sec_node_name)}}`：指定从某接口节点的响应中取值，如 `${{get_extract_data(token, login)}}`\n"
-         "4. 断言规则：每个用例必须配置断言不可为空。断言字段**必须从接口的 `returns` 中实际存在的字段中选择**，不得捏造。\n"
-         "   断言格式：`关键字: {{字段名: 期望值}}`，字段名直接写键名，**不要用 JSONPath**。\n"
-         "   支持的关键字：\n"
-         "   - `eq`：相等断言，验证实际值与预期值完全相等。增删改用 eq 校验返回的标识字段（如 `eq: {{success: true, retCode: 0}}`）。\n"
-         "   - `contains`：包含断言，验证实际值包含预期字符串。查询用 contains 校验结果数据（如 `contains: {{data: 期望值}}`）。\n"
-         "   - `ne`：不相等断言，验证实际值与预期值不相等。用于校验数据删除/变更后的状态（如 `ne: {{id: 已删除ID}}`）。\n"
-         "   - `db`：数据库断言，验证数据库中存在（或不存在）对应记录。用于校验数据持久化（如 `db: {{table: 表名, where: {{id: xxx}}}}`）。\n"
-         "5. **数据工厂方法**（在 json 字段值中使用 `${{方法名}}`，运行时自动替换）：\n"
+         "你是资深测试数据构造专家。根据【接口定义】与【用例逻辑】，生成测试数据。\n\n"
+         "### 输出结构（仅限以下字段，禁止编造）\n\n"
+         "```yaml\n"
+         "- baseInfo:\n"
+         "    api_name: \"接口名称\"          # 必填，与接口定义一致，中文就中文\n"
+         "    url: /path/to/api            # 必填，与接口定义一致\n"
+         "    method: post                 # 必填，get/post/put/delete/patch\n"
+         "    header:                      # 必填\n"
+         "      Content-Type: application/json\n"
+         "    cookies: {{}}                 # 可选\n"
+         "  testCase:\n"
+         "    - case_name: \"场景描述\"      # 必填，中文简要描述\n"
+         "      # ---- 请求参数（三选一） ----\n"
+         "      json: {{ ... }}              # JSON 请求体（post/put/patch 用）\n"
+         "      params: {{ ... }}            # URL query 参数（get/delete 用）\n"
+         "      data: {{ ... }}              # form 表单体（极少用）\n"
+         "      # ---- 数据传递（可选） ----\n"
+         "      extract: {{ key: \"$.jsonpath\" }}\n"
+         "      extract_list: {{ key: \"$.jsonpath[*]\" }}\n"
+         "      input_extract: {{ key: \"$.json.字段名\" }}\n"
+         "      # ---- 断言 ----\n"
+         "      validation:\n"
+         "        - eq: {{ retCode: 0 }}\n"
+         "        - contains: {{ msg: \"success\" }}\n"
+         "        - ne: {{ retCode: 0 }}\n"
+         "        - db: {{ sql: \"SELECT ...\", data: [...] }}\n"
+         "```\n\n"
+         "### 铁律\n"
+         "1. **字段仅限上面列出的**：禁止编造 json_data / request_body / body / form 等变体。\n"
+         "2. **api_name / url / method 与接口定义完全一致**，中文就写中文，禁止翻译。\n"
+         "3. **case_name 中文简要描述**（如 新增设施成功），禁止带 TC-xxx/PRE-xxx 前缀。\n"
+         "4. **json 对应 JSON 请求体（90% 场景），params 对应 GET URL 参数，data 对应表单**。三者都会被框架处理 ${} 占位符。\n"
+         "5. 参数值从接口定义的示例/枚举中选取，有枚举说明（如 status: 0-正常/1-维修）则用枚举值（0/1），禁止写中文描述。\n"
+         "6. 断言字段必须从接口 returns 中实际存在的字段中选择，不得捏造。\n"
+         "7. 仅输出有实际数据的字段，可选字段为空时不输出。\n"
+         "8. **数据工厂方法**（在参数值中使用 ${{方法名}}）：\n"
          "{data_factory_methods}\n\n"
-         "### 输出要求\n"
-         "仅输出有实际数据的字段，可选字段为空时不要输出，避免出现空对象或空数组。\n"
-         "禁止 Markdown、禁止解释文字。"
+         "禁止 Markdown、禁止解释文字，只输出 YAML。"
         ),
         ("human",
          "### 接口定义\n{all_apis_info}\n\n"
@@ -120,13 +134,17 @@ class PromptFactory:
          '        "title": "设施管理-新增设施-正向",\n'
          '        "preconditions": [],\n'
          '        "steps": "1.调用新增设施接口\\n2.查询详情",\n'
-         '        "expected": "1.创建成功\\n2.信息一致"}},\n'
+         '        "expected": "1.创建成功\\n2.信息一致",\n'
+         '        "mutates_data": true,\n'
+         '        "is_negative_test": false}},\n'
          '      {{"id": "TC-002",\n'
          '        "story": "设施修改",\n'
          '        "title": "设施管理-修改设施-正向",\n'
          '        "preconditions": ["PRE-001"],\n'
          '        "steps": "1.调用修改接口\\n2.查询详情",\n'
-         '        "expected": "1.修改成功\\n2.信息已更新"}}\n'
+         '        "expected": "1.修改成功\\n2.信息已更新",\n'
+         '        "mutates_data": true,\n'
+         '        "is_negative_test": false}}\n'
          '    ],\n'
          '    "file_name": "test_plan.xlsx"\n'
          '  }}\n\n'
@@ -138,7 +156,13 @@ class PromptFactory:
          "- title: 用例名称（对应 @allure.title），如「设施管理-新增设施-正向」\n"
          "- preconditions: PRE 编号数组，无则为 []\n"
          "- steps/expected: 文本，\\n 分隔，条数一致\n"
+         "- mutates_data: 分析【执行步骤】，含增/删/改/状态变更/重置/清理 → true；仅查询 → false\n"
+         "- is_negative_test: 分析【预期结果】，含失败/报错/异常/不存在/无权/冲突/重复 → true；否则 false\n"
          "- file_name: 固定 test_plan.xlsx\n\n"
+         "### 字段硬约束（违反即校验失败）\n"
+         "- 字段名必须是 story，禁止写 sub_module / module / feature_name 等变体\n"
+         "- steps 和 expected 必须是**字符串**（\\n 分隔），禁止输出数组/列表\n"
+         "- steps 和 expected 条数必须一致\n\n"
          "### 规则\n"
          "1. 每个 PRE-xxx → 一个 shared_preconditions 对象\n"
          "2. 每个 TC-xxx → 一个 test_cases 对象\n"
@@ -292,50 +316,55 @@ class PromptFactory:
 
     def generate_py_class_node(self) -> ChatPromptTemplate:
         """
-        生成单个 Python 测试类（供外层循环组装）
+        生成单个 Python 测试类 — V2 fixture + parametrize 结构（供外层循环组装）。
         """
         return ChatPromptTemplate.from_messages([
         ("system",
          "你是一个资深测试开发工程师。\n"
          "根据【模块数据】生成一个 Python 测试类。\n\n"
-         "### 类模板\n"
+         "### 类模板（V2 fixture + parametrize）\n"
          "```python\n"
-         "@allure.feature('<feature>')\n"
+         "@pytest.fixture(scope=\"class\")\n"
+         "def setup_<class_slug>():\n"
+         "    read = ReadYamlData()\n"
+         "    read.write_yaml_data({...})\n"
+         "    base = RequestsBase()\n"
+         "    base.specification_yaml(get_testcase_yaml(\n"
+         "        './testcase/<feature_en>/setup_data/setup_<class_slug>.yaml'))\n"
+         "    yield\n"
+         "    base.specification_yaml(get_testcase_yaml(\n"
+         "        './testcase/<feature_en>/setup_data/teardown_<class_slug>.yaml'))\n"
+         "\n"
          "@allure.story('<story>')\n"
-         "@pytest.mark.<fixture_level>\n"
-         "class <ModuleName>:\n"
-         "    @allure.title('<用例标题>')\n"
-         "    def test_xxx(self):\n"
-         "        RequestsBase().run_blocks('./testcase/<项目名>/{module_subdir}/<yaml文件名>')\n"
+         "@pytest.mark.danyuan\n"
+         "@pytest.mark.usefixtures(\"setup_<class_slug>\")\n"
+         "class Test<story_en>:\n"
+         "    @allure.title('<title>')\n"
+         "    @pytest.mark.order(1)\n"
+         "    @pytest.mark.parametrize('params', get_testcase_yaml(\n"
+         "        './testcase/<feature_en>/<func1_en>/step1.yaml'))\n"
+         "    def <func1_en>(self, params):\n"
+         "        RequestsBase().specification_yaml(params)\n"
          "```\n\n"
          "### 生成规则\n"
-         "1. **class 装饰器**：\n"
-         "   - `@allure.feature('<feature>')` → 从数据取 `allure_feature`\n"
-         "   - `@allure.story('<story>')` → 从数据取 `allure_story`\n"
-         "   - `@pytest.mark.<fixture_level>` → 从数据取 `fixture_level`（多个用逗号隔开则生成多个）\n"
-         "2. **方法装饰器**：\n"
-         "   - `@allure.title('<标题>')` → 使用用例标题\n"
-         "3. **方法体**：方法名用 `case_name`，调用 `RequestsBase().run_blocks('./testcase/<项目名>/{module_subdir}/<yaml文件名>')`\n"
-         "   - `test_data_yaml` 来自数据，即为 yaml 文件名\n"
-         "4. **是否启用=N**：该用例方法生成 `pass`，整个类全 N 则 class 生成 `pass`\n\n"
+         "1. **fixture 生成**：从 Sheet2 共享前置去重后生成 setup_<class_slug> fixture\n"
+         "   - yield 前 = setup（创建资源），yield 后 = teardown（清理资源）\n"
+         "   - 无共享前置的 class → fixture 只写 pass + yield\n"
+         "2. **parametrize 生成**：每个 function 用 @pytest.mark.parametrize 加载 step YAML\n"
+         "3. **命名映射**：\n"
+         "   - <class_slug> = story_en 小写下划线（如 facility_mgmt）\n"
+         "   - <feature_en> / <story_en> / <func1_en> / <title> 由翻译步骤提供\n"
+         "4. **order 编号**：同 class 内 function 按 @pytest.mark.order(N) 递增\n"
+         "5. **YAML 路径**: ./testcase/<feature_en>/<func_en>/step1.yaml\n\n"
          "### 输出格式\n"
-         "输出 JSON 对象，`class_code` 字段包含完整的类定义代码。\n\n"
-         "### 命名规范（必须遵守）\n"
-         "- 文件: `test_*.py`（外层已处理）\n"
-         "- class: `Test*` 格式，直接用数据中的 `module_name`\n"
-         "- 方法: `test_*` 格式，直接用数据中的 `case_name`\n"
-         "- YAML 路径: `./testcase/<项目名>/{module_subdir}/<yaml文件名>`\n"
-         "  - `{module_subdir}` 和 `test_data_yaml` 由数据提供\n\n"
+         "输出 JSON 对象，class_code 字段包含完整的类定义代码。\n\n"
          "### 注意\n"
-         "- 不生成 import 和 @allure.epic（外层已处理）\n"
-         "- YAML 路径: `./testcase/<项目名>/{module_subdir}/<yaml文件名>`\n"
-         "- 输出字段 `class_code` 仅包含类定义本身\n"
+         "- 不生成 import（外层已处理）\n"
+         "- 输出字段 class_code 仅包含 fixture + class 定义\n"
         ),
         ("human",
          "### 模块数据:\n{module_data}\n\n"
-         "### 项目名称:\n{project_name}\n\n"
-         "### 模块子目录:\n{module_subdir}\n\n"
-         "### 任务\n"
+         "### feature_en:\n{feature_en}\n\n"
          "请生成该测试类的 Python 代码："
         )
     ])

@@ -1,255 +1,234 @@
 # 架构审查报告
 
+> 审查引擎: Skill B (risk-detective) | 规则集: docs/RULES_INDEX.md + docs/RULES_DETAIL.md
+
+---
+
 ## 第一部分：审查摘要
 
 | 项目 | 内容 |
-| :--- | :--- |
-| 扫描范围 | `agent_components/`, `web/`, `database/`, `prompts/`, `ingest_v2.py`, `observability.py`, `config.py`, `settings.py`, `static/app.js`, `templates/index.html` |
-| 排除目录 | `tests/`, `.venv/`, `.git/`, `__pycache__/`, `.claude/` |
-| 扫描文件数 | 40 个源文件 |
-| 审查时间 | 2026-07-15 |
-| P0 问题数 | 0 |
-| P1 问题数 | 2 |
-| P2 问题数 | 2 |
+|:---|:---|
+| 扫描范围 | `.`（项目根目录，排除 `tests`, `docs`, `.git`, `__pycache__`, `.venv`, `node_modules`, `vector_store`, `uploads`, `logs`, `.claude`, `chonglog`, `testcase_out`） |
+| 扫描文件数 | 70 个源文件（57 `.py` + 7 `.js` + 4 `.html`/`.css` + 2 `.yaml`） |
+| 审查时间 | 2026-07-18 |
+| P0 问题数 | **4** |
+| P1 问题数 | **3** |
+| P2 问题数 | **3** |
 | **存在规则盲区** | **FALSE** |
-| 审查结论 | ✅ **通过** |
+| **盲区数量** | 0 |
+| 审查结论 | ⚠️ **有条件通过** — 存在 P1 问题需在 Skill C 执行时附带修复方案，P0 问题均为已有代码（非本次变更引入） |
+
+---
 
 ## 第二部分：问题统计概览
 
 | 规则 | 违反次数 | P0 | P1 | P2 |
-| :--- | :---: | :---: | :---: | :---: |
-| M3: 异常处理与日志 | 2 | 0 | 2 | 0 |
-| M7: 前端安全与交互 | 2 | 0 | 0 | 2 |
+|:---|:---:|:---:|:---:|:---:|
+| M3: 异常处理与日志 | 3 | 2 | 0 | 1 |
+| M5: 文件与路径安全 | 3 | 1 | 1 | 1 |
+| M6: 代码结构与配置 | 2 | 0 | 1 | 1 |
+| M7: 前端安全与交互 | 2 | 1 | 1 | 0 |
+
+---
 
 ## 第三部分：风险详情清单
 
 ---
 
-### [P1] ISSUE-001：logger.error() 缺少 exc_info=True
+### [P0] ISSUE-001: `except Exception: pass` 静默吞异常 — Phase B 工作流恢复路径
 
-- **触发规则**：`M3: 异常处理与日志`
-- **风险位置**：
-  - `agent_components/nodes.py:197` — error_snapshot logger.error
-  - `agent_components/nodes.py:288` — file validation failed logger.error
-- **违规描述**：`logger.error()` 调用未附带 `exc_info=True`，当异常发生时丢失完整堆栈信息，无法追溯根因。
-- **风险推演**：生产环境中 Excel 生成失败或文件校验失败时，日志只记录 message 文本，缺少调用栈，排查困难。
-- **修复建议**：在 `nodes.py:197` 和 `nodes.py:288` 的 `logger.error()` 调用中添加 `exc_info=True`。
+- **问题编号**：`ISSUE-001`
+- **触发规则**：`M3: 异常处理与日志` — 禁止静默吞异常
+- **风险位置**：`web/tasks.py:428-429`
+- **违规代码**：
+  > ```python
+  >         except Exception:
+  >             pass
+  > ```
+- **违规描述**：`_resume_workflow_bg` 中读取 `thinking_trace.log` 失败时静默跳过。若文件编码异常或权限错误，`failed_tc_ids` 保持为空列表，前端不展示校验失败警告，用户对 Excel 计划中的问题毫不知情。
+- **风险推演**：LLM 生成的 Excel 包含 3 行校验失败的用例 → `thinking_trace.log` 写入了失败标记 → Phase B 后台任务读取该文件时因编码问题抛异常 → `except pass` 吞掉 → 前端显示"全部通过" → 用户点击确认 → Phase C 基于有问题的 Excel 生成 .py/.yaml → 遗漏校验失败的用例。
+- **修复建议**：至少记录 WARNING 日志 `logger.warning("无法读取思考日志: %s", e, exc_info=True)`，降级为不影响主流程。
 
 ---
 
-### [P1] ISSUE-002：前端空 catch 块
+### [P0] ISSUE-002: `except Exception: pass` 静默吞异常 — 文件删除路径
 
-- **触发规则**：`M3: 异常处理与日志` / `M7: 前端安全与交互`
-- **风险位置**：`static/app.js:289`
+- **问题编号**：`ISSUE-002`
+- **触发规则**：`M3: 异常处理与日志` — 禁止静默吞异常
+- **风险位置**：`web/routes/files.py:146-147`
 - **违规代码**：
-  ```javascript
-  } catch (e) {}
-  ```
-- **违规描述**：`refreshModuleTree` 函数的 catch 块为空，模块树加载失败时用户无感知，也无法排查。
-- **风险推演**：模块树接口故障时页面静默失效，前端不报错，用户看到空白模块列表，不知道是网络问题还是服务端问题。
-- **修复建议**：在 catch 块中至少渲染一条错误提示（如「模块加载失败，请刷新重试」），必要时输出 `console.error`。
+  > ```python
+  >                     try:
+  >                         import json as _json
+  >                         with open(meta_path, "r", encoding="utf-8") as _mf:
+  >                             _doc_id = _json.load(_mf).get("doc_id")
+  >                     except Exception:
+  >                         pass
+  > ```
+- **违规描述**：删除文件时读取 `.meta.json` 失败静默跳过。若 JSON 损坏或被截断（如之前在崩溃时写入一半），`_doc_id` 保持 `None`，导致 ChromaDB 中的孤儿数据永不清理。
+- **风险推演**：用户删除文件 → meta.json 读取失败 → pass → `_doc_id` 为 None → ChromaDB 清理被跳过 → 向量库残留数据 → 后续检索命中已删除文档的旧数据 → 生成错误的测试用例。
+- **修复建议**：记录 WARNING 日志后继续流程（meta.json 损坏不应阻断删除操作），但必须记录异常便于排查。
+
+---
+
+### [P0] ISSUE-003: 路径包含检查使用 `startswith` 而非 `commonpath`
+
+- **问题编号**：`ISSUE-003`
+- **触发规则**：`M5: 文件与路径安全` — 路径包含检查必须用 `os.path.commonpath`，禁止 `startswith`
+- **风险位置**：`web/routes/files.py:329`
+- **违规代码**：
+  > ```python
+  >         allowed_dirs = [
+  >             _os.path.abspath(config.TESTCASE_BASE),
+  >             _os.path.abspath("uploads"),
+  >         ]
+  >         if not any(abs_path.startswith(d) for d in allowed_dirs):
+  > ```
+- **违规描述**：`startswith` 做目录归属判断存在路径穿越漏洞。例如 `/tmp/attack_uploads` 以 `/tmp/attack_` 开头，可绕过以 `/tmp/attack` 为前缀的白名单。虽当前白名单中 `uploads` 不易利用，但该模式违反安全铁律。
+- **风险推演**：若未来白名单目录名更短（如 `/a`），攻击者可通过 `/a_evil/file.txt` 绕过检查读取越权文件。
+- **修复建议**：替换为 `os.path.commonpath([abs_path, allowed_d]) == allowed_d` 语义等价的安全检查。
+
+---
+
+### [P0] ISSUE-004: `onclick` 属性中 `esc(path)` 拼接 — JS 语法破坏风险
+
+- **问题编号**：`ISSUE-004`
+- **触发规则**：`M7: 前端安全与交互` — 动态路径必须用 `data-*` 属性 + 事件委托，禁止在 HTML 字符串中拼接 `esc(path)`
+- **风险位置**：`static/app.js:36, 38, 670`
+- **违规代码**：
+  > ```javascript
+  > '<button class="btn btn-sm btn-outline" onclick="openLocalFile(\'' + esc(path) + '\')">打开</button>'
+  > ```
+- **违规描述**：`esc()` 将 `'` 转义为 `&#39;`，但浏览器将 HTML 属性值解码后 `&#39;` 还原为 `'`，若 `path` 包含 `'` 则破坏 onclick 字符串字面量边界。
+- **风险推演**：文件名包含单引号（如 `test's_file.py`）→ esc 转为 `&#39;` → HTML 解码还原为 `'` → onclick 变成 `onclick="openLocalFile('test's_file.py')"` → JS 语法错误 → 按钮无响应。
+- **修复建议**：改用 `data-path="..."` 属性存储路径 + 全局事件委托读取 `e.target.dataset.path`，彻底消除拼接风险。
+
+---
+
+### [P1] ISSUE-005: `os.path.abspath("uploads")` 相对路径
+
+- **问题编号**：`ISSUE-005`
+- **触发规则**：`M5: 文件与路径安全` — 所有文件路径必须以 `config.BASE_DIR` 为根
+- **风险位置**：`web/routes/files.py:327`（及 365 行）
+- **违规代码**：
+  > ```python
+  >             _os.path.abspath("uploads"),
+  > ```
+- **违规描述**：使用相对路径 `"uploads"` 依赖当前工作目录（CWD），不同启动方式可能导致 CWD 不同（如 systemd、IDE 直接运行、命令行启动）。
+- **风险推演**：从不同目录启动服务 → CWD 不是项目根目录 → `abspath("uploads")` 解析到错误路径 → 文件读取白名单不包含实际文件路径 → 所有文件操作返回 403。
+- **修复建议**：改为 `_os.path.abspath(_os.path.join(config.BASE_DIR, "uploads"))`。
+
+---
+
+### [P1] ISSUE-006: `test_point_analysis` 字段在 TypedDict 中重复定义
+
+- **问题编号**：`ISSUE-006`
+- **触发规则**：`M6: 代码结构与配置` — 代码结构重复/冲突
+- **风险位置**：`agent_components/state.py:37-38`
+- **违规代码**：
+  > ```python
+  >     test_point_analysis: Optional[str]       # analyze_test_points_raw 输出的自由文本分析
+  >     test_point_analysis: Optional[str]       # analyze_test_points_raw 输出的自由文本分析报告
+  > ```
+- **违规描述**：同一个 TypedDict 键定义了两次，类型签名完全相同但注释不同。Python TypedDict 中后定义覆盖前定义，造成混淆且违反单一数据源原则。
+- **风险推演**：若有人修改第 37 行的注释/类型，期望生效但实际被第 38 行覆盖 → 类型检查与实际行为不符 → 潜在的类型安全问题。
+- **修复建议**：删除第 37 行，保留第 38 行，合并注释为 `# analyze_test_points_raw 输出的自由文本分析报告`。
+
+---
+
+### [P1] ISSUE-007: 前端 `catch` 缺少错误日志（多处）
+
+- **问题编号**：`ISSUE-007`
+- **触发规则**：`M7: 前端安全与交互` — catch 禁止为空，但关键路径缺少 `console.error` 排查手段
+- **风险位置**：`static/app.js:345, 352, 460, 468, 516, 526, 567, 575, 587`
+- **违规代码**：
+  > ```javascript
+  >   } catch (e) { toast('操作失败'); }
+  > ```
+- **违规描述**：多处 API 调用 catch 仅弹 toast 提示"失败"，不记录 `console.error` 也不展示具体错误信息。用户看到"失败"后无法自行排查，开发者也无法从控制台获取错误详情。
+- **风险推演**：创建模块失败 → toast "失败" → 用户不知道是网络超时（重试即可）还是名称冲突（需改名） → 重复尝试仍失败 → 放弃使用。
+- **修复建议**：统一错误处理模式 `catch (e) { console.error('操作名:', e); toast('操作失败: ' + (e.message || '')); }`。
 
 ---
 
 ## 第四部分：P2 最佳实践建议
 
-- `static/app.js:36,38`：`onclick` 属性中拼接用户路径 `esc(path)`，建议改用 `data-*` 属性 + 事件委托 | 规则：`M7`
-- `agent_components/retrievers.py:128`：`logger.warning("...%s", e)` 缺少 `exc_info=True`，建议补齐以便追溯异常堆栈 | 规则：`M3`
+- **`web/app.py:318`** 建议：Ollama 健康检查重试中的 `except Exception: pass` 应至少 `print(f"[startup] 等待 Ollama...({attempt})")` 输出进度 | 规则：`M3`
+- **`agent_components/nodes.py:556`** 建议：`Path("logs")` 硬编码日志路径应改用 `config.LOG_DIR`，保持与其他模块一致 | 规则：`M6`
+- **`docs/fixes_summary.md` 根目录残留** 建议：确认 `./fixes_summary.md` 是否仍被引用，若无则删除（正确位置是 `./docs/fixes_summary.md`） | 规则：`M6`
 
 ---
 
-## 第五部分：已通过审查的文件清单
+## 第五部分：本次 Phase B 变更专项审查
+
+对本次 `chonglog/2026-07-16_phase_c_downstream.md` Phase B 部分的实现进行了逐项对照审查：
+
+| 计划项 | 审查结果 |
+|:---|:---|
+| `TestCaseRow.mutates_data` 字段 | ✅ `bool, default=False`，Excel 9 列表头不变 |
+| `TestCaseRow.is_negative_test` 字段 | ✅ `bool, default=False`，不写入 Excel |
+| `SharedPrecondition.cloned_from` 字段 | ✅ `Optional[str], default=None`，不写入 Excel |
+| `settings.py::resource_mutate_keywords` 配置 | ✅ 26 个中英文关键词，`config.py` 导出 `RESOURCE_MUTATE_KEYWORDS` |
+| `generate_excel_plan_node` prompt 追加 | ✅ JSON 示例含 `mutates_data`/`is_negative_test`，字段描述 + 判断规则完整 |
+| `_resolve_resource_conflicts` 算法实现 | ✅ 三层过滤（有无前置/关键词兜底/PRE 映射）→ 克隆隔离 → `cloned_from` 标记 |
+| B5 嵌入位置（方案 A） | ✅ 不拆图节点，在 `_generate_excel_plan_node` 内部、Excel 写入前调用 |
+| 图拓扑不变 | ✅ `graph_builder.py` 零修改 |
+| 新增 LLM 调用 | ✅ 0 次（纯代码节点） |
+| 关键词兜底日志 | ✅ `logger.debug` 记录每次兜底，含 `tc.id` |
+| 消解统计日志 | ✅ `logger.info` 输出隔离的 PRE 数和受影响用例数 |
+| PRE 缺失防护 | ✅ `_find_pre` 返回 None 时 WARNING 跳过，不崩溃 |
+| `defaultdict` 导入 | ✅ `nodes.py:4` from `collections` |
+
+**结论：Phase B 实现 0 偏移，0 新增违规，代码质量符合全部规则要求。**
+
+---
+
+## 第六部分：已通过审查的核心文件
 
 | 文件 | 状态 |
-| :--- | :---: |
-| `agent_components/fallback_embeddings.py` | ✅ |
-| `agent_components/dual_chroma.py` | ✅ |
-| `agent_components/graph_builder.py` | ✅ |
-| `agent_components/nodes.py` | ✅ |
-| `agent_components/retrievers.py` | ✅ |
-| `agent_components/generators.py` | ✅ |
-| `agent_components/state.py` | ✅ |
-| `agent_components/__init__.py` | ✅ |
-| `agent_components/llm/base.py` | ✅ |
-| `agent_components/llm/deepseek.py` | ✅ |
-| `agent_components/module_tree.py` | ✅ |
-| `agent_components/axure_parser.py` | ✅ |
-| `agent_components/validator.py` | ✅ |
-| `web/app.py` | ✅ |
-| `web/tasks.py` | ✅ |
-| `web/routes/chat.py` | ✅ |
-| `web/routes/files.py` | ✅ |
-| `web/routes/bindings.py` | ✅ |
-| `web/routes/docs.py` | ✅ |
-| `web/routes/modules.py` | ✅ |
-| `web/routes/api_extract.py` | ✅ |
-| `web/services/doc_binding.py` | ✅ |
-| `database/__init__.py` | ✅ |
-| `database/models.py` | ✅ |
-| `database/operations.py` | ✅ |
-| `prompts/definitions.py` | ✅ |
-| `prompts/response_model.py` | ✅ |
-| `prompts/extraction_prompts.py` | ✅ |
-| `ingest_v2.py` | ✅ |
-| `observability.py` | ✅ |
-| `config.py` | ✅ |
-| `settings.py` | ✅ |
-| `static/style.css` | ✅ |
-| `templates/index.html` | ✅ |
+|:---|:---:|
+| `prompts/response_model.py` | ✅ 通过 |
+| `prompts/definitions.py` | ✅ 通过 |
+| `settings.py` | ✅ 通过 |
+| `config.py` | ✅ 通过 |
+| `agent_components/nodes.py` | ✅ 通过（含本次新增消解器） |
+| `agent_components/graph_builder.py` | ✅ 通过 |
+| `agent_components/retrievers.py` | ✅ 通过 |
+| `agent_components/dual_chroma.py` | ✅ 通过 |
+| `agent_components/generators.py` | ✅ 通过 |
+| `agent_components/state.py` | ⚠️ ISSUE-006（重复字段） |
+| `agent_components/validator.py` | ✅ 通过 |
+| `agent_components/module_tree.py` | ✅ 通过 |
+| `agent_components/llm/base.py` | ✅ 通过 |
+| `agent_components/llm/deepseek.py` | ✅ 通过 |
+| `agent_components/fallback_embeddings.py` | ✅ 通过 |
+| `web/app.py` | ✅ 通过（P2 建议项） |
+| `web/tasks.py` | ❌ ISSUE-001 |
+| `web/routes/chat.py` | ✅ 通过 |
+| `web/routes/files.py` | ❌ ISSUE-002, ISSUE-003, ISSUE-005 |
+| `web/routes/modules.py` | ✅ 通过 |
+| `web/routes/bindings.py` | ✅ 通过 |
+| `web/routes/docs.py` | ✅ 通过 |
+| `web/routes/api_extract.py` | ✅ 通过 |
+| `web/services/doc_binding.py` | ✅ 通过 |
+| `database/__init__.py` | ✅ 通过 |
+| `database/models.py` | ✅ 通过 |
+| `database/operations.py` | ✅ 通过 |
+| `database/init_db.py` | ✅ 通过 |
+| `ingest_v2.py` | ✅ 通过 |
+| `observability.py` | ✅ 通过 |
+| `static/app.js` | ❌ ISSUE-004, ISSUE-007 |
+| `templates/index.html` | ✅ 通过 |
+| `static/style.css` | ✅ 通过 |
+| `data_factory/mock_data.py` | ✅ 通过 |
 
 ---
 
-## 第六部分：代码结构优化建议
+## 审查员备注
 
-> 审查日期：2026-07-17 | 范围：全项目结构级审查 | 不改代码，仅作评估参考
+审查结论：⚠️ **有条件通过**
 
----
-
-### 🔴 高优先级（结构性问题，影响可维护性）
-
-#### 1. `nodes.py` — God Class（580+ 行）
-
-`ChatTestAgentGraph` 职责过多：
-
-| 职责 | 位置 | 行数 |
-|------|------|------|
-| LLM 调用 + 结构化输出校验 | `_invoke_structured` | ~50 |
-| LangGraph 节点实现 (Phase A x4) | `_retrieve_node`, `_parse_api_node`, `_analyze_scenarios_node`, `_generate_excel_plan_node` | ~200 |
-| Excel 写入（openpyxl 内联样式） | `_generate_excel_plan_node` 内部 | ~50 |
-| 工作流日志 + 过期清理 | `_log_node_output`, `_cleanup_logs` | ~80 |
-| 数据工厂方法缓存 | `_load_factory_methods` | ~30 |
-| 状态序列化 | `_serialize_for_log` | ~15 |
-| Excel 数据校验 | `_validate_excel_plan` | ~25 |
-
-**建议**：拆分为 `NodesCore`（LLM 调用 + 校验）、`PhaseANodes`（检索 → Excel）、`WorkflowLogger`（日志）、`ExcelWriter`（Excel 样式 + 写入）四个独立类。
-
-#### 2. Mixin 模式隐性耦合
-
-`ChatTestAgentGraph(RetrievalMixin, GenerationMixin)` 中两个 Mixin 大量引用基类属性（`self.llm`、`self._invoke_structured()`、`self.prompt_factory`、`self._log_node_output()`、`self.dual_chroma`），但全部隐式依赖，无接口契约。
-
-```
-retrievers.py:119  →  self._invoke_structured(prompt, IntentConfirmation, ...)
-generators.py:55   →  self._invoke_structured(prompt, DataPlan, ...)
-generators.py:190  →  self._log_node_output("generate_py_file", result)
-retrievers.py:50   →  self.dual_chroma.search_product_docs(query, ...)
-```
-
-**建议**：定义 `Protocol` 或抽象基类声明依赖接口；或改为组合模式，把 Mixin 方法变成独立函数，接受 llm/prompt_factory 等作为参数传入。
-
-#### 3. `static/app.js` — 817 行巨石文件
-
-所有前端逻辑挤在一个文件：文件上传、模块树、文档关联、聊天、Phase C 工作流、文件编辑器、术语表管理。
-
-- 全部状态用全局变量（10+ 个）
-- HTML 用字符串拼接生成
-- 无模块化 / 组件化
-
-**建议**：拆分为独立模块（`upload.js`, `module-tree.js`, `chat.js`, `workflow.js`, `editor.js`），用 ES modules 或 IIFE 组织。
-
----
-
-### 🟡 中优先级（重复代码 / 不一致）
-
-#### 4. 心跳进度逻辑重复
-
-`web/tasks.py` 中 `_run_chat_bg`（第 276-312 行）与 `_resume_workflow_bg`（第 440-474 行）的心跳协程逻辑几乎一致：
-- 相同的 `_heartbeat_stop` 标志位
-- 相同的 10 秒间隔 `asyncio.sleep(10)`
-- 相同的 elapsed 时间计算
-- 各自硬编码不同的 messages 列表
-
-**建议**：抽取 `async def _with_heartbeat(task_id, messages, coro_fn)` 上下文管理器，消除 ~30 行重复。
-
-#### 5. 配置双层包装
-
-```
-settings.py (pydantic-settings, 240 行)
-    ↓
-config.py (薄包装层, 88 行)
-    ↓
-各模块: import config / from config import X / import config as _config
-```
-
-`config.py` 的核心价值仅在 `_resolve_path()` 把相对路径转绝对路径。`LLM_API_KEY()` 和 `DEEP_API_KEY()` 的命名风格像常量但实际是函数：
-
-```python
-# 全大写名字，使用体验像常量，实际是函数调用
-def LLM_API_KEY() -> str:
-    return settings.active_llm_api_key
-```
-
-**建议**：要么让 `settings.py` 直接输出绝对路径（消除包装层），要么让 `config.py` 完全接管，禁止直接引用 settings。
-
-#### 6. Excel 10 列结构在 3 处硬编码
-
-| 位置 | 用途 |
-|------|------|
-| `nodes.py:239` | 写 Excel 表头 |
-| `generators.py:79-90` | `_read_excel_rows` 按索引解析 |
-| `generators.py:253-270` | `_generate_all_yamls` 再次按索引取列 |
-
-改一列名或顺序要同步改三处。
-
-**建议**：定义 `EXCEL_COLUMNS` 常量（含 key / header / width），三处统一引用。
-
-#### 7. `ingest_v2.py` 文本切分逻辑不统一
-
-- `process_product_doc` 用 `RecursiveCharacterTextSplitter` + 自定义 `_group_chunks_into_batches`
-- `process_api_doc_extract` 用正则 `_split_text_by_headers` + 简单截断
-
-两者的分批策略不一致，且 `_split_text_by_headers` 的截断逻辑对 UTF-8 中文不友好（`text[i:i+max_chars]` 直接按字符切，不考虑完整语义）。
-
-**建议**：提取统一的 `TextChunker` 类，参数化分块策略和分批上限。
-
----
-
-### 🟢 低优先级（细节优化）
-
-#### 8. `web_app.py` daemon 线程启动不标准
-
-```python
-# web_app.py:30-35
-thread = threading.Thread(target=server.run, daemon=True)
-thread.start()
-```
-
-`daemon=True` 导致 Python 进程退出时 uvicorn 被强制杀掉，无优雅停机。lifespan 的 shutdown 逻辑（`_executor.shutdown`）在 daemon 线程被杀时不会执行。
-
-**建议**：改用 `uvicorn.run(app, ...)` 让 uvicorn 管理主线程生命周期；或至少改用非 daemon 线程并在主线程 join。
-
-#### 9. 数据库无迁移系统
-
-`database/init_db.py` 直接用 `Base.metadata.create_all()` 建表。后续改 schema（加列、改类型）无版本迁移能力，只能手动 SQL。
-
-**建议**：引入 Alembic 做数据库迁移版本管理。
-
-#### 10. `State` TypedDict 27 个字段无编译时校验
-
-节点函数返回部分 dict（如 `{"product_docs": ..., "context": ...}`），字段名拼写错误只能在运行时暴露。
-
-**建议**：加一个 `STATE_KEYS` frozenset + CI lint 脚本检测 typo，或定义中间返回类型。
-
-#### 11. `fixes_summary.md` 重复
-
-```
-./docs/fixes_summary.md       ← 正确位置
-./fixes_summary.md             ← 项目根目录也有一份，疑似旧版残留
-```
-
-**建议**：确认根目录那份是否仍被引用，若无则删除。
-
----
-
-### 📊 整体评价
-
-| 维度 | 评价 |
-|------|------|
-| **架构分层** | ✅ 清晰：`agent_components/` → `web/` → `database/` → `static/`，职责边界明确 |
-| **配置管理** | ⚠️ 双层包装略显多余，但 pydantic-settings 的校验机制做得好 |
-| **错误处理** | ✅ 关键路径有补偿回滚（SQLite ← ChromaDB），异常有 trace_id 追踪 |
-| **代码复用** | ⚠️ God Class + Mixin 耦合让复用不直观；Excel 列、心跳、文本切分有重复 |
-| **前端架构** | ❌ 单文件巨石，无模块化，全局状态裸奔 |
-| **可测试性** | ⚠️ `ChatTestAgentGraph` 难以单元测试（LLM / ChromaDB / 文件系统全耦合） |
-| **文档/注释** | ✅ 每个文件 / 类 / 关键方法都有中文 docstring，设计意图清楚 |
-
-**总评**：架构骨架良好（LangGraph 工作流 + 双存储引擎 + FastAPI 后端），God Class 和巨石 JS 是当前最大的技术债，建议优先处理。
+- **本次 Phase B 变更**：0 项新增违规，实现与计划完全对齐，通过审查
+- **已有代码**：发现 4 项 P0、3 项 P1、3 项 P2，均为历史遗留问题（非本次变更引入）
+- **规则盲区**：无
+- **建议 Skill C 优先修复**：ISSUE-001（静默吞异常）、ISSUE-002（静默吞异常）、ISSUE-005（相对路径）、ISSUE-006（重复字段）

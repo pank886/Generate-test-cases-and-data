@@ -43,15 +43,18 @@ Workflow（运行阶段）
   │     ├── 思考阶段（thinking, 自由文本分析场景）
   │     ├── 格式化阶段（function_calling + Pydantic 模型约束）
   │     ├── Pydantic 校验 ← 自动修复循环
-  │     └── 文件层校验 ← 通过 → 继续
-  │         └── 失败 → 重试（最多 3 次）
-  │             └── 仍失败 → 标记需人工审查
+  │     ├── 文件层校验 ← 通过 → 继续
+  │     │   └── 失败 → 重试（最多 3 次）
+  │     │       └── 仍失败 → 标记需人工审查
+  │     └── 落盘三件套：test_plan.xlsx + translation_cache.json
+  │         + api_defs.json（接口定义快照，Phase C 数据来源，缺失即阻断确认）
   │
-  ├── 数据规划（两阶段：analyze_data_deps → format_data_plan）
-  │     分析数据依赖、提取规则、断言策略
-  │
-  ├── YAML 填充（function_calling, 无 thinking）
-  └── .py 文件生成（function_calling, 无 thinking）
+  ├── .py 文件生成（纯代码组装：fixture + run_blocks 结构，翻译缓存优先）
+  └── YAML 生成（两阶段：analyze_yaml_data thinking → format json_mode，单次输出）
+        ├── 规整层（确定性修正：method 小写/url 去域名/header 补全/断言合并/空字段剔除）
+        ├── 校验层（回炉类：占位符注册表/三选一/空列表/提取值类型，失败不写盘）
+        └── 修复循环：失败登记占位 → 轮末错误模式汇总 → 思考自查 → 重生成
+            └── 超轮次仍失败 → _generation_errors.json + 计 failed（无占位假文件）
 ```
 
 ---
@@ -65,6 +68,9 @@ Workflow（运行阶段）
 - **测试点分析** — 深度思考模式分析业务场景，输出测试点和风险区域
 - **Excel 测试计划** — 生成含 Allure 标签、模块划分、步骤描述的标准化测试计划
 - **自动校验修复** — Pydantic + 文件层双重校验 + 自动修复循环（最多 3 次）+ 人工审查兜底
+- **YAML 质量治理** — 规整/重生成两分法：确定性格式修正静默执行；语义性错误（占位符幻觉/三选一冲突/空输出）登记后集中送思考节点自查重生成，终态失败输出 `_generation_errors.json`，杜绝"假成功"
+- **数据真实性** — 接口定义快照 `api_defs.json` 随计划落盘，Phase C 数据缺失显式阻断，禁止假数据托底
+- **数据工厂注册表** — `data_factory/methods.yaml` 单一事实源（目录+大类结构），prompt 渲染 / 占位符校验 / 单元测试三处同源
 - **Python 测试脚本** — 生成 pytest + allure 测试类代码
 - **YAML 测试数据** — 结构化的请求/响应测试数据
 - **模块目录树** — 支持模块的增删改查、重命名级联更新向量库
@@ -84,9 +90,10 @@ Workflow（运行阶段）
 | 测试点分析（thinking） | free_text | ✅ | 无（自由文本） |
 | 格式化测试点 | json_mode | ❌ | TestPointList |
 | 格式化 Excel 计划 | function_calling | ❌ | ExcelPlan |
-| 场景数据规划 | free_text → function_calling | ✅→❌ | DataPlan |
-| YAML 填充 | function_calling | ❌ | TestData |
-| .py 生成 | function_calling | ❌ | PyFile / ClassCode |
+| 英文翻译（缓存未命中时） | json_mode | ❌ | TranslationResult |
+| YAML 数据分析 / 修复轮自查 | free_text | ✅ | 无（自由文本，全文落 thinking_trace.log） |
+| YAML 格式化（单次，无 inline 重试） | json_mode | ❌ | TestData（占位符/三选一/空列表校验内置） |
+| .py 生成 | 纯代码组装 | — | —（不经 LLM） |
 
 > DeepSeek V4 的 thinking 控制通过声明式 `METHOD_FEATURES` 配置表管理：
 > - `METHOD_FEATURES = {"function_calling": {"supports_thinking": False}, ...}`
@@ -241,8 +248,8 @@ Generate-test-cases-and-data/
 │   └── response_model.py           # Pydantic 响应模型
 │
 ├── data_factory/                   # 测试数据工厂
-│   ├── mock_data.py                # Mock 数据生成
-│   └── methods.yaml                # HTTP 方法配置
+│   ├── registry.py                 # 方法注册表加载层（prompt 渲染 + 校验规则）
+│   └── methods.yaml                # 数据工厂方法注册表（分类结构，单一事实源）
 │
 ├── static/
 │   ├── app.js                      # 前端主逻辑
@@ -251,16 +258,13 @@ Generate-test-cases-and-data/
 ├── templates/
 │   └── index.html                  # Jinja2 前端页面
 │
-├── docs/                           # 内部文档
-│   ├── RULES_INDEX.md              # 规则索引
-│   ├── RULES_DETAIL.md             # 规则详情
-│   └── fixes_summary.md            # 架构修复总结报告
-│
 ├── tests/                          # Pytest 测试套件
 │   ├── conftest.py                 # 共享 fixtures
 │   ├── test_ingest_main_flow.py    # 主摄取流程集成测试
-│   ├── test_workflow_api.py        # 工作流 API 测试
+│   ├── test_workflow_api.py        # Phase B 工作流 API 测试
 │   ├── test_workflow_init.py       # 工作流初始化测试
+│   ├── test_phase_bc_unit.py       # Phase B/C 单元测试（消解/校验/注册表/修复循环）
+│   ├── test_phase_c_api.py         # Phase C /confirm-plan API 集成测试（产物质量校验）
 │   ├── test_commit_api.py          # 提交 API 测试
 │   ├── test_delete_file.py         # 文件删除测试
 │   ├── test_doc_binding.py         # 文档绑定测试
@@ -271,7 +275,7 @@ Generate-test-cases-and-data/
 ├── uploads/                        # 上传文件存储（gitignored）
 ├── data/                           # 运行时数据（gitignored）
 │   └── modules.json                # 模块树持久化
-├── testcase_out/                   # 生成产物输出（gitignored）
+├── testcase/                       # 生成产物输出（PYCHARM_MISC/PYTEST_DATA_DIR 解析，gitignored）
 └── vector_store/                   # ChromaDB 向量库（gitignored）
 ```
 
@@ -292,7 +296,8 @@ Generate-test-cases-and-data/
 | 数据模型 | Pydantic v2（含 model_validator 防御性校验） |
 | Excel 处理 | openpyxl |
 | YAML 生成 | PyYAML |
-| 日志 | 结构化 JSON（ContextVar trace_id 追踪） |
+| 配置 | pydantic-settings (.env) |
+| 日志 | 结构化 JSON（ContextVar trace_id 追踪）+ thinking_trace.log 思考全文 |
 
 ---
 
@@ -311,11 +316,12 @@ EMBEDDING_MODEL=bge-m3-cpu
 CPU 模式下，bge-m3 处理短文本耗时 5-15 秒，完全满足 RAG 入库和检索的性能需求。
 
 > `./infra/Modelfile` 已在项目中管理，内容为 `FROM bge-m3:latest` + `PARAMETER num_gpu 0`，可放心使用。
-| 配置 | pydantic-settings (.env) |
 
 ---
 
 ## 校验与修复机制
+
+**Phase B — Excel 计划**
 
 ```
 生成节点 → Excel 文件
@@ -336,11 +342,42 @@ Pydantic 层校验    ←     自动修复循环
     └── 仍失败 → 标记 requires_review → 前端展示错误
 ```
 
+**Phase C — YAML 生成（规整/重生成两分法 + 批量自查修复循环）**
+
+```
+单文件生成（thinking 分析 → json_mode 单次输出，无 inline 重试）
+    │
+    ▼
+规整层（确定性，静默）: method 小写 / url 去域名 / header 按 CT 补全
+                        / 同类断言合并 / 空 {} 字段剔除
+    │
+    ▼
+校验层（回炉类，Pydantic）: {{}} 占位符幻觉 / 非注册表函数 / 实参不合规
+                            / json·params·data 三选一 / 空列表 / 提取值非 str
+    │
+    ├── 通过 → 原子写盘
+    └── 失败 → 登记占位 GEN-FAIL-R{轮}-{序}（不写盘）
+              │
+              ▼ 轮末
+        全批次错误模式汇总 → repair prompt 思考自查 → 修复轮重生成
+              │  （≤ YAML_REPAIR_ROUNDS，默认 1 轮）
+              ▼
+        终态仍失败 → 计 failed + _generation_errors.json
+                     + thinking_trace.log 标记 generate_yaml_FAILED（无占位假文件）
+```
+
 ---
 
 ## 最新变更
 
-详见 `docs/fixes_summary.md`（2026-07-10 架构审查修复总结，覆盖 P0~P3 共 50+ 项问题）。
+**2026-07-18**
+
+- **P0 — 接口定义传递断链** — `api_defs.json` 快照随 Excel 落盘，Phase C 数据缺失显式阻断；删除假数据托底文件，确立"数据缺失必须显式失败"原则
+- **P0 — YAML 质量治理** — 规整/重生成两分法 + 批量自查修复循环 + 占位符注册表校验 + `_generation_errors.json` 终态错误清单
+- **数据工厂注册表 v2** — `methods.yaml` 重构为目录+大类结构（6 方法含 `get_offset_time`），`data_factory/registry.py` 加载层，prompt/校验器/测试三处同源
+- **Phase C 日志补全** — 思考全文、轮次汇总、失败标记全量写入 `thinking_trace.log`，与 Phase B 同规格
+
+**历史**
 
 - **P0 — Phase C 工作流恢复断裂** — `_confirm_user_intent` 覆盖 CONFIRMED 状态已修复
 - **P0 — 路径遍历漏洞** — 所有文件上传入口加 basename 清洗 + UUID 前缀

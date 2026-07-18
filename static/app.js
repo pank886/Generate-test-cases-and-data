@@ -33,9 +33,9 @@ function excelActionButtons(path, name) {
   const binaryExts = ['xlsx', 'xls', 'zip', 'png', 'jpg', 'jpeg', 'gif', 'ico', 'pdf'];
   const showEdit = !binaryExts.includes(ext);
   return '<div class="btn-row" style="margin-top:8px">'
-    + '<button class="btn btn-sm btn-outline" onclick="openLocalFile(\'' + esc(path) + '\')">📂 打开</button>'
+    + '<button class="btn btn-sm btn-outline" data-action="openLocalFile" data-path="' + encPath + '">📂 打开</button>'
     + '<a class="btn btn-sm btn-outline" href="/api/files/download-file?path=' + encPath + '" download="' + esc(name || '') + '">📥 下载</a>'
-    + (showEdit ? '<button class="btn btn-sm btn-outline" onclick="openFileEditor(\'' + esc(path) + '\')">✏️ 编辑</button>' : '')
+    + (showEdit ? '<button class="btn btn-sm btn-outline" data-action="openFileEditor" data-path="' + encPath + '">✏️ 编辑</button>' : '')
     + '</div>';
 }
 async function openLocalFile(path) {
@@ -342,14 +342,14 @@ async function createModule() {
   try {
     const r = await fetch('/api/modules', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name, parent_id: pid }) });
     const d = await r.json(); if (d.success) { inp.value = ''; refreshModuleTree(); toast('✅ 模块已创建'); } else toast('❌ ' + d.message);
-  } catch (e) { toast('❌ 创建失败'); }
+  } catch (e) { console.error(e); toast('❌ 创建失败'); }
 }
 async function renameModule(id, cur) {
   const name = prompt('新名称:', cur); if (!name) return;
   try {
     const r = await fetch('/api/modules/' + encodeURIComponent(id), { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name }) });
     const d = await r.json(); if (d.success) { refreshModuleTree(); toast('✅ 已重命名'); } else toast('❌ ' + d.message);
-  } catch (e) { toast('❌ 失败'); }
+  } catch (e) { console.error(e); toast('❌ 失败'); }
 }
 async function deleteModule(id, name) {
   if (!confirm('确定删除模块 "' + name + '"？\n\n该模块下绑定的文档将被解绑但不会删除。')) return;
@@ -363,7 +363,7 @@ async function deleteModule(id, name) {
       document.getElementById('related-modules-content').innerHTML = '';
       toast('✅ 已删除');
     } else toast('❌ ' + d.message);
-  } catch (e) { toast('❌ 失败'); }
+  } catch (e) { console.error(e); toast('❌ 失败'); }
 }
 async function loadBoundDocs(modName) {
   try {
@@ -457,7 +457,7 @@ async function bindDocToModule(docId, docType) {
     const r = await fetch('/api/bindings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ source_type: docType, source_id: docId, target_type: 'module', target_id: selectedModuleName }) });
     const d = await r.json(); toast(d.success ? '✅ 已关联' : '❌ ' + d.message);
     loadBoundDocs(selectedModuleName); loadUnassociatedDocs(); loadRelatedModules(selectedModuleName);
-  } catch (e) { toast('❌ 关联失败'); }
+  } catch (e) { console.error(e); toast('❌ 关联失败'); }
 }
 async function unbindDocFromModule(docId, docType) {
   if (!selectedModuleName) return;
@@ -465,7 +465,7 @@ async function unbindDocFromModule(docId, docType) {
     const r = await fetch('/api/bindings', { method: 'DELETE', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ a_type: docType, a_id: docId, b_type: 'module', b_id: selectedModuleName }) });
     const d = await r.json(); toast(d.success ? '✅ 已解绑' : '❌ ' + d.message);
     loadBoundDocs(selectedModuleName); loadUnassociatedDocs(); loadRelatedModules(selectedModuleName);
-  } catch (e) { toast('❌ 解绑失败'); }
+  } catch (e) { console.error(e); toast('❌ 解绑失败'); }
 }
 async function loadRelatedModules(modName) {
   try {
@@ -513,7 +513,7 @@ async function linkModuleToModule() {
     const d = await r.json();
     if (d.success) { toast('✅ 已关联模块: ' + targetName); loadRelatedModules(selectedModuleName); }
     else toast('❌ ' + d.message);
-  } catch (e) { toast('❌ 关联失败'); }
+  } catch (e) { console.error(e); toast('❌ 关联失败'); }
 }
 
 async function unlinkModuleFromModule(targetName) {
@@ -523,7 +523,7 @@ async function unlinkModuleFromModule(targetName) {
     const d = await r.json();
     if (d.success) { toast('✅ 已解除关联: ' + targetName); loadRelatedModules(selectedModuleName); }
     else toast('❌ ' + d.message);
-  } catch (e) { toast('❌ 解除失败'); }
+  } catch (e) { console.error(e); toast('❌ 解除失败'); }
 }
 
 // ===== 模块关联弹窗（审核确认） =====
@@ -564,7 +564,7 @@ async function addGlossaryTerm() {
   try {
     const r = await fetch('/api/modules/' + encodeURIComponent(selectedModuleName) + '/glossary', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ term, definition: def }) });
     const d = await r.json(); if (d.success) { document.getElementById('new-term-input').value = ''; document.getElementById('new-term-def').value = ''; loadGlossary(selectedModuleName); toast('✅ 术语已添加'); } else toast('❌ ' + d.message);
-  } catch (e) { toast('❌ 添加失败'); }
+  } catch (e) { console.error(e); toast('❌ 添加失败'); }
 }
 async function deleteDocGlossaryTerm(termId) {
   if (!selectedDocId) return;
@@ -572,7 +572,7 @@ async function deleteDocGlossaryTerm(termId) {
     const r = await fetch('/api/docs/' + encodeURIComponent(selectedDocId) + '/glossary/' + termId, { method: 'DELETE' });
     const d = await r.json();
     if (d.success) { loadDocGlossary(selectedDocId); toast('✅ 已删除'); } else toast('❌ ' + d.message);
-  } catch (e) { toast('❌ 删除失败'); }
+  } catch (e) { console.error(e); toast('❌ 删除失败'); }
 }
 
 async function deleteGlossaryTerm(termId) {
@@ -584,7 +584,7 @@ async function deleteGlossaryTerm(termId) {
     if (!termName) { toast('未找到术语名'); return; }
     const r = await fetch('/api/modules/' + encodeURIComponent(selectedModuleName) + '/glossary/' + encodeURIComponent(termName), { method: 'DELETE' });
     const d = await r.json(); if (d.success) { loadGlossary(selectedModuleName); toast('✅ 已删除'); } else toast('❌ ' + d.message);
-  } catch (e) { toast('❌ 删除失败'); }
+  } catch (e) { console.error(e); toast('❌ 删除失败'); }
 }
 
 // ===== 聊天 & 测试生成 =====
@@ -667,7 +667,7 @@ async function sendWorkflowChat() {
       if (d.candidates && d.candidates.length) {
         html += '<div class="chat-msg"><div class="body" style="display:flex;flex-wrap:wrap;gap:6px">';
         d.candidates.forEach((c, i) => {
-          html += '<button class="btn btn-outline btn-sm" onclick="confirmWorkflowModule(\'' + esc(d.session_id) + '\',\'' + esc(c) + '\')">' + (i + 1) + '. ' + esc(c) + '</button>';
+          html += '<button class="btn btn-outline btn-sm" data-action="confirmWorkflowModule" data-session="' + esc(d.session_id) + '" data-module="' + esc(c) + '">' + (i + 1) + '. ' + esc(c) + '</button>';
         });
         html += '</div></div>';
       }
@@ -782,7 +782,7 @@ async function openFileEditor(path) {
     document.getElementById('file-editor-path').textContent = path;
     document.getElementById('file-editor-textarea').value = d.content || '';
     document.getElementById('file-editor').style.display = 'block';
-  } catch (e) { toast('❌ 读取失败'); }
+  } catch (e) { console.error(e); toast('❌ 读取失败'); }
 }
 function closeFileEditor() { editorPath = ''; editorDirty = false; document.getElementById('file-editor').style.display = 'none'; }
 async function saveFileEditor() {
@@ -791,8 +791,18 @@ async function saveFileEditor() {
     const content = document.getElementById('file-editor-textarea').value;
     const r = await fetch('/api/files/file-save', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path: editorPath, content }) });
     const d = await r.json(); if (d.success) { editorDirty = false; toast('✅ 已保存'); } else toast('❌ ' + d.message);
-  } catch (e) { toast('❌ 保存失败'); }
+  } catch (e) { console.error(e); toast('❌ 保存失败'); }
 }
+
+// ===== 全局事件委托（data-action 按钮） =====
+document.addEventListener('click', function(e) {
+  const btn = e.target.closest('[data-action]');
+  if (!btn) return;
+  const action = btn.dataset.action;
+  if (action === 'openLocalFile') openLocalFile(decodeURIComponent(btn.dataset.path || ''));
+  else if (action === 'openFileEditor') openFileEditor(decodeURIComponent(btn.dataset.path || ''));
+  else if (action === 'confirmWorkflowModule') confirmWorkflowModule(btn.dataset.session || '', btn.dataset.module || '');
+});
 
 // ===== 启动 =====
 function init() {

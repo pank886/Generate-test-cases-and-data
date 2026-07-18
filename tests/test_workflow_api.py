@@ -1,10 +1,12 @@
-"""Phase C 工作流 API 集成测试 — 纯 HTTP 接口验证。
+"""Phase B 工作流 API 集成测试 — 纯 HTTP 接口验证。
 
 验证范围:
   1. /workflow/start — 输入校验、模块匹配、会话创建
   2. /workflow/confirm — 选择解析策略（数字/精确/重新匹配）、会话过期
   3. /task/{id} — 任务状态轮询
   4. 完整链路：start → confirm → poll task（验证中间节点不跳过）
+
+Phase C（/confirm-plan 生成 .py + YAML）见 tests/test_phase_c_api.py。
 
 运行方式:
   # 确保服务已启动（python web/app.py），然后:
