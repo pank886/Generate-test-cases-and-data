@@ -59,6 +59,9 @@ _images/
 .DS_Store
 Thumbs.db
 
+# Node.js
+node_modules/
+
 # 构建产物
 *.egg-info/
 dist/

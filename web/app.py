@@ -276,12 +276,12 @@ async def lifespan(app: FastAPI):
     if not config.TESTCASE_BASE:
         missing = []
         if not config.PYCHARM_MISC: missing.append("PYCHARM_MISC=C:\\path\\to\\your\\pycharm\\project")
-        if not config.TESTCASE_SUBDIR: missing.append("PYTEST_DATA_DIR=./pytest_test_data")
+        if not config.TESTCASE_SUBDIR: missing.append("testcase_base=pytest_test_data")
         print("=" * 60)
-        print("❌ 缺少必填的输出路径配置，请在 .env 中设置：")
+        print("❌ 缺少必填的输出路径配置，请在 settings.py 中设置：")
         for m in missing: print(f"   {m}")
         print("=" * 60)
-        raise RuntimeError("输出路径未配置，请在 .env 中设置 PYCHARM_MISC 和 PYTEST_DATA_DIR 后重启")
+        raise RuntimeError("输出路径未配置，请在 settings.py 中设置 PYCHARM_MISC 和 testcase_base 后重启")
 
     # 1. SQLite
     try:

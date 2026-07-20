@@ -1,6 +1,6 @@
 # 架构规则索引
 
-> 最后编译: 2026-07-18 | 元规则数: 8 | 覆盖问题: 77 项 (P0×29, P1×31, P2×15, 架构改进×2)
+> 最后编译: 2026-07-20 | 元规则数: 8 | 覆盖问题: 79 项 (P0×29, P1×32, P2×15, 架构改进×2, 死代码清理×1)
 
 ## 第一部分：元规则速查
 
@@ -11,7 +11,7 @@
 | M3 | 异常处理与日志 | 禁裸 except，禁空 catch，禁静默吞，自定义序列化全覆盖(含Decimal/UUID)，exc_info=True 不遗漏 |
 | M4 | 并发安全 | 双检锁副作用归锁内，单例必上锁，线程池必有界，跨工作流 HTTP Client 必重建 |
 | M5 | 文件与路径安全 | BASE_DIR 为根，basename 洗输入，os.remove 包 OSError，临时目录含标识，路径包含用 commonpath 非 startswith，resolve_path 拒空值 |
-| M6 | 代码结构与配置 | settings 管参数，lifespan 配 global，全局单例判 None，to_thread 配心跳且进度递增 |
+| M6 | 代码结构与配置 | .env 仅放模型地址/Key，其余参数 settings.py 管；lifespan 配 global；全局单例判 None；to_thread 配心跳；无引用代码必清 |
 | M7 | 前端安全与交互 | 静态 JS 禁模板语法，catch 禁空，变量注入用 var，try/catch/finally 共享变量声明在顶层，动态路径用 data-* 禁 onclick 拼接 |
 | M8 | 数据真实性与缺失阻断 | 数据缺失必显式失败(requires_review/failed/错误清单)，禁 mock/示例/占位假数据托底，禁静默降级续跑；测试 MagicMock 豁免 |
 
@@ -64,6 +64,10 @@
 | `const labels = {...}` 在函数内（跨函数不可见） | M6, M7 | P1 |
 | `dict.setdefault(key, value)` 去重保留旧版本 | M6 | P2 |
 | TypedDict 同一键多次定义（重复字段） | M6 | P1 |
+| `load_dotenv()` / `env_file=".env"` + 非模型字段 | M6 | P2 |
+| `validation_alias` / `AliasChoices` 用于非模型配置项 | M6 | P1 |
+| `.env` 文件含 `chunk_size`、`retrieval_k`、`timeout` 等参数 | M6 | P1 |
+| `def get_xxx_logger` 无调用方引用（grep 零结果仍保留） | M6 | P2 |
 | `{{`, `{%`, `tojson \| safe`, `script src=` | M7 | P0 |
 | `onclick=`, `onchange=`, `addEventListener` | M7 | P1 |
 | `data-action=` (正确模式：data-* + 事件委托) | M7 | ✅ 合规 |

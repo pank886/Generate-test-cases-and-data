@@ -1,6 +1,6 @@
 # 修复总结报告
 
-> 生成日期: 2026-07-10 | 最后更新: 2026-07-15
+> 生成日期: 2026-07-10 | 最后更新: 2026-07-20
 > 范围: 全代码库架构审查与修复
 
 ---
@@ -688,3 +688,30 @@
 - **问题根因**：`mock_data.py` 自述"ChromaDB 无结果时兜底"，内置 `MOCK_PRODUCT_DOCS`/`MOCK_API_DEFS` 假数据（合同/房产等与本项目无关的样例）；同类问题：`/confirm-plan` 链路 `api_defs_json` 恒为空时，Phase C 未阻断而是静默盲写 63 个 YAML，字段名/类型/断言大面积幻觉（`status: 正常开放` vs 接口定义 `gymStatus: integer`、`code` vs `retCode`、提取 returns 中不存在的 `$.data.id`）。
 - **架构决策**：删除 `mock_data.py`（经全盘检索确认已无生产代码引用）；确立"数据缺失必须显式失败"原则——检索为空/定义缺失/交接丢失时，返回 `requires_review`、任务 `failed` 或写入错误清单（如 `_generation_errors.json`），绝不以任何假数据继续流程。
 - **衍生规则**：系统任何环节（检索、生成、交接）遇到数据缺失，必须显式阻断并报告，严禁以 mock/示例/占位/硬编码假数据托底续跑，严禁静默降级；单元测试中的 MagicMock/测试样例数据不在禁止范围。
+
+---
+
+## 11. 2026-07-20 配置架构重构 + 死代码清理
+
+### [56] [P1] 配置管理架构重构：.env 职责收缩为仅模型地址/Key
+
+- **涉及模块**：`settings.py`, `config.py`, `web/app.py`
+- **问题根因**：`.env` 文件承载了所有配置项（从模型地址、API Key 到 chunk_size、retrieval_k 等可调参数），导致 .env 膨胀、配置来源不清晰、敏感信息与非敏感参数混在一起。开发者不确定某项配置该改 .env 还是改 settings.py。
+- **架构决策**：
+  - `.env` 仅保留模型地址和 API Key（8 个字段：`EMBEDDING_MODEL`/`EMBEDDING_URL`、`DEEP_URL`/`DEEP_API_KEY`/`DEEP_MODEL`、`LLM_MODEL`/`LLM_API_KEY`/`LLM_BASE_URL`）
+  - 其余所有可调参数（`chunk_size`、`retrieval_k`、`embedding_timeout`、线程池大小、超时等 25+ 项）统一在 `settings.py` 中通过 `Field(default=...)` 管理
+  - `SettingsConfigDict` 移除 `env_file=".env"`，改用 `load_dotenv()` 手动加载，明确配置边界
+  - 移除已废弃的 env 变量别名（`PYTEST_DATA_DIR` → `testcase_base`、`LANGCHAIN_URL` → `llm_base_url`）
+  - `config.py` 和 `web/app.py` 的报错提示从"检查 .env"改为"检查 settings.py"
+- **衍生规则**：
+  - 新增配置项时：属于模型地址/API Key → 入 .env；属于可调参数 → 只在 settings.py 加 Field(default=...)
+  - 禁止为非模型字段添加 `validation_alias` 或 `AliasChoices` 指向 .env 变量名
+  - 禁止在 .env 中放置 chunk_size、retrieval_k、timeout、线程池大小等可调参数
+  - .env 文件仅包含 8 个模型相关变量，其余一律不认
+
+### [57] [P2] 移除废弃的 repair_failures 快照 Logger
+
+- **涉及模块**：`observability.py`, `agent_components/nodes.py`, `agent_components/retrievers.py`
+- **问题根因**：`get_error_snapshot_logger()` 函数及配套的 `_repair_logger` 全局变量已无任何调用方，属于死代码。`repair_failures.log` 文件不再生成，残留的 RotatingFileHandler 配置造成代码阅读干扰。
+- **架构决策**：删除 `get_error_snapshot_logger()` 函数定义（~30 行）及 `nodes.py`/`retrievers.py` 中对应的无用 import。`repair_failures.log` 引用从 `settings.py` 日志目录描述中移除。
+- **衍生规则**：删除任何全局可访问的函数/类/变量前，必须用 grep 确认零调用方；禁止保留已确认无引用的死代码

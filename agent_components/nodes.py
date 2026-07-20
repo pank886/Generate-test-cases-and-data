@@ -17,7 +17,7 @@ from langchain_core.exceptions import OutputParserException
 from agent_components.llm.deepseek import DeepSeekChatOpenAI
 
 import config
-from observability import get_logger, get_error_snapshot_logger
+from observability import get_logger
 from agent_components.dual_chroma import get_chroma_db
 from agent_components.state import State, ApiDefinitionList
 from prompts.response_model import (

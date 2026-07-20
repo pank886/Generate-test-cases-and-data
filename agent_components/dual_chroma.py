@@ -21,6 +21,7 @@ from config import (
     COLLECTION_API_DEFS,
     EMBEDDING_MODEL,
     EMBEDDING_URL,
+    EMBEDDING_TIMEOUT,
 )
 
 
@@ -36,7 +37,7 @@ class DualChromaDB:
 
         embeddings = FallbackOllamaEmbeddings(
             model=model, base_url=url,
-            client_kwargs={"timeout": 45},
+            client_kwargs={"timeout": EMBEDDING_TIMEOUT},
         )
 
         pd_dir = os.path.join(persist, "product_docs") if persist else None

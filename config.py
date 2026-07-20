@@ -16,7 +16,7 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 # 辅助：相对路径 → 基于 BASE_DIR 的绝对路径（空字符串拒绝处理，防止静默指向根目录）
 def _resolve_path(path: str) -> str:
     if not path:
-        raise ValueError("路径配置不能为空，请检查 .env 文件中的对应配置项")
+        raise ValueError("路径配置不能为空，请检查 settings.py 中的对应配置项")
     return os.path.normpath(path if os.path.isabs(path) else os.path.join(BASE_DIR, path))
 
 # ====== 向量数据库 ======
@@ -25,6 +25,7 @@ CHROMA_DB_DIR = _resolve_path(settings.chroma_db_dir)
 # ====== Embedding 模型 ======
 EMBEDDING_MODEL = settings.embedding_model
 EMBEDDING_URL = settings.embedding_url
+EMBEDDING_TIMEOUT = settings.embedding_timeout
 
 # ====== LLM 配置 ======
 LLM_MODEL = settings.active_llm_model
@@ -63,7 +64,7 @@ WEB_PORT = settings.web_port
 
 # ====== 输出路径 ======
 PYCHARM_MISC = _resolve_path(settings.pycharm_misc) if settings.pycharm_misc else ""
-TESTCASE_SUBDIR = settings.testcase_base  # 来自 PYTEST_DATA_DIR 别名
+TESTCASE_SUBDIR = settings.testcase_base
 if not PYCHARM_MISC or not TESTCASE_SUBDIR:
     TESTCASE_BASE = ""
 else:

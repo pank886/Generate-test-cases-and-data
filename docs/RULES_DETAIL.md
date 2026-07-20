@@ -1,6 +1,6 @@
 # 架构规则详情
 
-> 最后编译: 2026-07-18 | 覆盖问题: 76 项 (P0×28, P1×31, P2×15, 架构改进×2) | [Ref: 42~54]
+> 最后编译: 2026-07-20 | 覆盖问题: 79 项 (P0×29, P1×32, P2×15, 架构改进×2, 死代码清理×1) | [Ref: 1~57]
 
 <!-- RULE: M1 -->
 <!-- PRIORITY: P0 -->
@@ -371,20 +371,28 @@ if _chroma_db is None:
 
 <!-- RULE: M6 -->
 <!-- PRIORITY: P1 -->
-<!-- KEYWORDS: settings., config., Field(default=, global, lifespan, _phase_c_graph, _chroma_db, _chat_func, ThreadPoolExecutor, _BoundedThreadPoolExecutor, to_thread, heartbeat, _update_task, pollTask -->
+<!-- KEYWORDS: settings., config., Field(default=, global, lifespan, _phase_c_graph, _chroma_db, _chat_func, ThreadPoolExecutor, _BoundedThreadPoolExecutor, to_thread, heartbeat, _update_task, pollTask, load_dotenv, env_file, validation_alias, AliasChoices, .env, def get_xxx_logger, 死代码 -->
 
 ## M6：代码结构与配置
 
-**核心定义**：所有可变参数通过 `settings.py` 集中管理；`lifespan` 中赋值模块级变量必须 `global` 声明；全局单例在使用点必须判 None；长时间 `to_thread` 同步操作必须配套心跳协程更新前端进度。
+**核心定义**：`.env` 仅放模型地址/API Key（8 个字段），其余所有可调参数通过 `settings.py` 的 `Field(default=...)` 管理；`lifespan` 中赋值模块级变量必须 `global` 声明；全局单例在使用点必须判 None；长时间 `to_thread` 同步操作必须配套心跳协程更新前端进度；删除死代码前必须 grep 确认零引用。
 
-**涵盖原规则**：CSL-1~17, [Ref: 25], [Ref: 28], [Ref: 29], [Ref: 32]
+**涵盖原规则**：CSL-1~17, [Ref: 25], [Ref: 28], [Ref: 29], [Ref: 32], [Ref: 56], [Ref: 57]
 
 ✅ **正确示例**：
 ```python
 # 配置外化
 class Settings(BaseSettings):
+    model_config = SettingsConfigDict(extra="ignore")  # 无 env_file=
     chroma_retry_delay: int = Field(default=300, ge=10, le=3600)
     task_max_workers: int = Field(default=10)
+
+# .env 仅放模型地址/Key，通过 load_dotenv() 加载
+from dotenv import load_dotenv
+load_dotenv()
+class Settings(BaseSettings):
+    deep_url: str | None = Field(default=None, description="[.env] DeepSeek API 地址")
+    chunk_size: int = Field(default=1000, ...)  # settings.py 管理，.env 不生效
 
 # lifespan global 声明
 async def lifespan(app):
@@ -452,6 +460,21 @@ await _update_task(task_id, progress=10, message="处理中...")
 result = await asyncio.to_thread(long_blocking_call, data)
 # ↑ 如果 long_blocking_call 执行 2 分钟，前端 2 分钟看不到任何进度变化
 await _update_task(task_id, progress=80, message="处理完成")
+
+# .env 承载所有配置 → 边界模糊
+class Settings(BaseSettings):
+    model_config = SettingsConfigDict(env_file=".env", ...)
+    chunk_size: int = ...   # ← 可从 .env 覆盖，来源不清
+    retrieval_k: int = ...  # ← 同上
+
+# 非模型字段设 validation_alias 引用 .env
+testcase_base: str = Field(
+    validation_alias=AliasChoices("PYTEST_DATA_DIR", "testcase_base")
+)  # ← 鼓励将非模型配置放入 .env，破坏职责边界
+
+# 死代码保留（grep 确认零引用后仍未删除）
+def get_error_snapshot_logger():  # ← 无任何调用方，属于死代码
+    ...
 ```
 
 **边界情况**：
@@ -460,6 +483,8 @@ await _update_task(task_id, progress=80, message="处理完成")
 - 测试时可通过 `@patch("config.CHROMA_RETRY_DELAY", 0.1)` 缩短配置值
 - **新增**：所有后台任务（`confirmPlan`、`_confirm_plan_bg` 等）必须配套实时进度更新，禁止仅用 toast 做首尾通知；前端须用 `pollTask` + 内嵌进度消息模式
 - **新增**：TypedDict / dataclass 中同一字段名禁止重复定义（后定义静默覆盖前定义，编译期无报错）。代码审查时发现重复字段必须合并 [Ref: 53]
+- **新增**：`.env` 仅可配置模型地址和 API Key（`EMBEDDING_MODEL`/`EMBEDDING_URL`、`DEEP_URL`/`DEEP_API_KEY`/`DEEP_MODEL`、`LLM_MODEL`/`LLM_API_KEY`/`LLM_BASE_URL`），共 8 项。其余所有可调参数必须在 `settings.py` 的 `Field(default=...)` 中管理。禁止为非模型字段设置 `validation_alias` 或 `AliasChoices` 指向 .env 变量名 [Ref: 56]
+- **新增**：删除任何全局可访问的函数/类/变量前，必须用 grep 全量搜索确认零调用方。确认后立即删除，禁止保留已确认无引用的死代码（避免代码阅读干扰和后续维护者误用）[Ref: 57]
 
 ---
 

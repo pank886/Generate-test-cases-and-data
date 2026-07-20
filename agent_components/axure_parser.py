@@ -62,7 +62,10 @@ class AxureParser:
             project_name = sitemap.get("name", os.path.basename(self.zip_path).replace(".zip", ""))
 
             # 判断数据格式：全局 data/data.js（旧格式）还是 files/页面名/data.js（新格式）
+            # Axure RP 9+ 可能用 document.js 替代 data.js
             global_data_js = self._find_data_file(root, "data.js")
+            if global_data_js is None:
+                global_data_js = self._find_data_file(root, "document.js")
             global_data_js_content = None
             if global_data_js:
                 global_data_js_content = global_data_js.read_text(encoding="utf-8", errors="replace")
@@ -124,7 +127,7 @@ class AxureParser:
             if match:
                 return json5.loads(match.group(1))
             return json5.loads(content)
-        except (ValueError, json5.Json5Exception):
+        except Exception:
             return {"name": "Unknown", "children": []}
 
     @staticmethod
@@ -218,11 +221,12 @@ class AxureParser:
                 if candidate.is_file():
                     return candidate
 
-        # 策略 3: 递归降级（只匹配父目录名为 "data" 的，防止误匹配 files/页面/data.js）
+        # 策略 3: 递归降级
         for path in root.rglob(filename):
             if "__MACOSX" in path.parts:
                 continue
-            if path.parent.name == "data":
+            # 允许 "data" 或 "plugins/sitemap" 等 Axure 标准目录
+            if path.parent.name in ("data", "sitemap"):
                 return path
 
         return None

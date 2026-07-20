@@ -168,43 +168,6 @@ def get_logger(name: str) -> logging.Logger:
     return logging.getLogger(name)
 
 
-# ====== 修复失败快照 Logger（RotatingFileHandler，自动轮转） ======
-
-_repair_logger: logging.Logger | None = None
-
-
-def get_error_snapshot_logger() -> logging.Logger:
-    """返回专用于写入修复失败快照的 logger。
-
-    使用 RotatingFileHandler:
-      - 文件: {LOG_DIR}/repair_failures.log
-      - 超过 5MB 自动轮转，保留最近 10 个归档
-    """
-    global _repair_logger
-    if _repair_logger is not None:
-        return _repair_logger
-
-    if not _initialized:
-        init_logging()
-
-    logger = logging.getLogger("repair_failures")
-    logger.propagate = False  # 不污染 root logger
-    if not logger.handlers:
-        h = logging.handlers.RotatingFileHandler(
-            os.path.join(LOG_DIR, "repair_failures.log"),
-            maxBytes=5 * 1024 * 1024,
-            backupCount=10,
-            encoding="utf-8",
-        )
-        h.setLevel(logging.DEBUG)
-        h.setFormatter(logging.Formatter("%(asctime)s | %(message)s"))
-        logger.addHandler(h)
-        logger.setLevel(logging.DEBUG)
-
-    _repair_logger = logger
-    return logger
-
-
 # ====== Thinking 节点日志（提示词调优专用） ======
 
 _thinking_logger: logging.Logger | None = None

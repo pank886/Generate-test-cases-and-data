@@ -4,7 +4,7 @@ import os
 from datetime import datetime
 
 import config
-from observability import get_logger, get_error_snapshot_logger
+from observability import get_logger
 from agent_components.dual_chroma import get_chroma_db
 from agent_components.state import State
 from prompts.response_model import IntentConfirmation
