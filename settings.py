@@ -228,11 +228,11 @@ class Settings(BaseSettings):
 
     # -- 输出路径（必须配置！未配置则启动报错） --
     testcase_base: str = Field(
-        default="",
+        default="testcase",
         description="测试用例输出子目录名（相对于 PYCHARM_MISC），必填，如 pytest_test_data",
     )
     pycharm_misc: str = Field(
-        default="",
+        default="C:\\Users\\damai\\PyCharmMiscProject",
         description="目标 PyCharm 项目根路径，必填，如 C:\\Users\\damai\\PycharmMiscProject。Excel/PY/YAML 均输出到其下的 testcase_base 目录",
     )
 

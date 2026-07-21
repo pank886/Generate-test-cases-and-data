@@ -202,32 +202,85 @@ class RetrievalMixin:
             "context": self._docs_to_text(docs),
         }
 
-    # ---- 节点 3：提取关联模块（基于 SQLite 绑定关系） ----
+    # ---- 节点 3：提取关联模块（三路召回，基于 SQLite 绑定关系） ----
 
     def _extract_related_modules(self, state: State):
-        """从 product_docs 中提取关联模块（一次 SQL 批量查询，避免 N+1）。"""
-        logger.info("\n--- 提取关联模块 ---")
+        """从已确认模块的所有绑定关系中提取关联模块。
+
+        三路召回策略：
+          1. module↔module 直接绑定 —— 模块之间的显式关联
+          2. product/axure 文档 → 其他模块 —— 文档被多个模块共享
+          3. API 文档 → 其他模块 —— API 被多个模块引用
+
+        直接查询 SQLite，不依赖 state 中 ChromaDB 检索结果（不完整）。
+        """
+        logger.info("\n--- 提取关联模块（三路召回） ---")
         confirmed_module = state.get("confirmed_module", "")
         related: set[str] = set()
 
-        doc_sources = [d.get("source", d.get("doc_id", ""))
-                       for d in state.get("product_docs", [])]
-        doc_sources = [s for s in doc_sources if s]  # 过滤空
+        if not confirmed_module:
+            logger.info("   => 无确认模块，跳过关联模块提取")
+            return {"related_modules": []}
 
-        if doc_sources:
-            from database import get_session_ctx
-            from database.operations import BindingOps
-            with get_session_ctx() as session:
+        from database import get_session_ctx
+        from database.operations import BindingOps
+
+        with get_session_ctx() as session:
+            # ── 路径 1：module↔module 直接绑定 ──
+            mod_partners = BindingOps.get_partners(
+                session, "module", confirmed_module, partner_type="module",
+            )
+            for _ptype, pname in mod_partners:
+                if pname and pname != confirmed_module:
+                    related.add(pname)
+            logger.info(
+                "   路径1 (module↔module): %d 个关联模块",
+                len([p for p in mod_partners if p[1] != confirmed_module]),
+            )
+
+            # ── 路径 2+3：通过模块下所有类型文档查找关联模块 ──
+            bound_docs = BindingOps.get_bound_docs(session, confirmed_module)
+
+            # 按 doc_type 分组（product/axure 和 api 的绑定类型不同，需分别查询）
+            product_ids = [d.id for d in bound_docs if d.doc_type == "product"]
+            axure_ids = [d.id for d in bound_docs if d.doc_type == "axure"]
+            api_ids = [d.id for d in bound_docs if d.doc_type == "api"]
+
+            # 路径 2a：product 文档 → 共享模块
+            if product_ids:
                 results = BindingOps.get_partners_batch(
-                    session, "product", doc_sources, partner_type="module",
+                    session, "product", product_ids, partner_type="module",
                 )
-                for doc_id, partners in results.items():
+                for _doc_id, partners in results.items():
                     for _ptype, pname in partners:
                         if pname and pname != confirmed_module:
                             related.add(pname)
+                logger.info("   路径2a (product→module): %d 个文档参与查询", len(product_ids))
+
+            # 路径 2b：axure 文档 → 共享模块
+            if axure_ids:
+                results = BindingOps.get_partners_batch(
+                    session, "axure", axure_ids, partner_type="module",
+                )
+                for _doc_id, partners in results.items():
+                    for _ptype, pname in partners:
+                        if pname and pname != confirmed_module:
+                            related.add(pname)
+                logger.info("   路径2b (axure→module): %d 个文档参与查询", len(axure_ids))
+
+            # 路径 3：API 文档 → 共享模块
+            if api_ids:
+                results = BindingOps.get_partners_batch(
+                    session, "api", api_ids, partner_type="module",
+                )
+                for _doc_id, partners in results.items():
+                    for _ptype, pname in partners:
+                        if pname and pname != confirmed_module:
+                            related.add(pname)
+                logger.info("   路径3 (api→module): %d 个文档参与查询", len(api_ids))
 
         mods = sorted(related)
-        logger.info(f"   => 关联模块: {mods if mods else '无'}")
+        logger.info(f"   => 关联模块汇总: {mods if mods else '无'}")
         return {"related_modules": mods}
 
     # ---- 节点 4：关联数据检索（Hop 2a + 2b） ----

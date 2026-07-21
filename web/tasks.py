@@ -344,11 +344,38 @@ async def _confirm_plan_bg(task_id: str, excel_path: str | None,
         await _update_task(task_id, progress=50,
                            message="正在生成 YAML 数据文件...")
 
-        # LLM 调用 → 线程池
-        yaml_result = await asyncio.to_thread(
-            _phase_b_components._generate_all_yamls,
-            excel_path, api_defs_json, user_ctx,
-        )
+        # LLM 调用 → 线程池（带心跳，YAML 生成耗时长，避免前端轮询超时）
+        import asyncio as _asyncio
+        import time as _time
+
+        _heartbeat_stop = False
+
+        async def _heartbeat():
+            nonlocal _heartbeat_stop
+            _t0 = _time.time()
+            while not _heartbeat_stop:
+                await _asyncio.sleep(10)
+                if _heartbeat_stop:
+                    break
+                elapsed = int(_time.time() - _t0)
+                await _update_task(
+                    task_id, progress=55,
+                    message=f"正在生成 YAML 数据文件...（{elapsed}s）",
+                )
+
+        hb_task = _asyncio.create_task(_heartbeat())
+        try:
+            yaml_result = await asyncio.to_thread(
+                _phase_b_components._generate_all_yamls,
+                excel_path, api_defs_json, user_ctx,
+            )
+        finally:
+            _heartbeat_stop = True
+            hb_task.cancel()
+            try:
+                await hb_task
+            except _asyncio.CancelledError:
+                pass
 
         msg = f".py: {py_result['py_file_name']}（{py_result['modules']}模块）"
         if yaml_result["total"] > 0:
