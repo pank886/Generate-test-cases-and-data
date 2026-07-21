@@ -369,3 +369,11 @@ class PromptFactory:
         )
     ])
 
+    def generate_dependency_map(self):
+        """
+        Phase B-2: 生成 dependency_map.json（thinking 节点用）
+        返回带 format_messages(**kwargs) 接口的对象。
+        """
+        from prompts.extraction_prompts import generate_dependency_map_prompt
+        return generate_dependency_map_prompt()
+

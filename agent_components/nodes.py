@@ -791,7 +791,9 @@ class ChatTestAgentGraph(RetrievalMixin, GenerationMixin):
                     result = model_class(**result)
                 return result
             except (ValidationError, OutputParserException,
-                    openai.BadRequestError) as e:
+                    openai.BadRequestError,
+                    openai.APITimeoutError, openai.RateLimitError,
+                    openai.InternalServerError) as e:
                 last_error = e
                 if attempt < max_retries:
                     logger.warning("输出校验失败，第 %d 次重试: %s", attempt + 1, e, exc_info=True)

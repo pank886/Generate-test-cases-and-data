@@ -295,7 +295,7 @@ async def _confirm_plan_bg(task_id: str, excel_path: str | None,
     import glob
     import config
 
-    from web.app import _phase_b_components, _update_task
+    from web.app import _phase_b_components, _update_task, _chroma_db
 
     set_trace_id(task_id)
 
@@ -332,6 +332,61 @@ async def _confirm_plan_bg(task_id: str, excel_path: str | None,
             )
             return
         api_defs_json = resolved_defs
+
+        # ---- Phase C Step 0: 生成 dependency_map.json ----
+        await _update_task(task_id, status="running", progress=15,
+                           message="正在分析用例依赖关系...")
+        output_dir = os.path.dirname(excel_path)
+        try:
+            # 从 ChromaDB 检索 product_docs（用 confirmed_module 作为查询 key）
+            product_docs_json = "[]"
+            try:
+                if _chroma_db is not None:
+                    from agent_components.dual_chroma import get_chroma_db
+                    db = get_chroma_db()
+                    docs = db.search_product_docs(
+                        query=user_ctx,
+                        k=config.RETRIEVAL_K,
+                    )
+                    if docs:
+                        product_docs_json = _json.dumps(docs, ensure_ascii=False)
+            except Exception:
+                logger.warning("ChromaDB product_docs 检索失败，使用空文档继续", exc_info=True)
+
+            # 模块树
+            import agent_components.module_tree as mt
+            from database import get_session_ctx
+            with get_session_ctx() as session:
+                tree = mt.get_tree(session)
+            module_tree_json = _json.dumps(tree, indent=2, ensure_ascii=False)
+
+            # 异步生成 dep_map（LLM thinking 调用走线程池）
+            dep_map_path = await asyncio.to_thread(
+                _phase_b_components._generate_dependency_map,
+                excel_path, output_dir, api_defs_json,
+                module_tree_json, product_docs_json,
+                "（Phase C Step 0 生成）", user_ctx,
+            )
+        except Exception as e:
+            await _update_task(task_id, status="failed",
+                               error=f"dependency_map.json 生成失败: {e}")
+            return
+        logger.info("   📄 dependency_map.json 已生成: %s", dep_map_path)
+
+        # ---- Phase C Step 1: 加载 + 预校验 dep_map ----
+        try:
+            with open(dep_map_path, "r", encoding="utf-8") as f:
+                dep_map = _json.load(f)
+        except _json.JSONDecodeError as e:
+            await _update_task(task_id, status="failed",
+                               error=f"dependency_map.json 解析失败: {e}")
+            return
+        if not dep_map.get("stories"):
+            await _update_task(task_id, status="failed",
+                               error="dependency_map.json 无有效 story")
+            return
+        logger.info("   📄 dependency_map.json 已加载: %d 个 story",
+                     len(dep_map.get("stories", [])))
 
         await _update_task(task_id, status="running", progress=20,
                            message="正在生成 .py 测试文件...")

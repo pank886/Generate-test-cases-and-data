@@ -522,3 +522,129 @@ class TranslationResult(BaseModel):
     feature_en: Dict[str, str] = Field(default_factory=dict, description="feature 中文→英文")
     story_en: Dict[str, str] = Field(default_factory=dict, description="story 中文→英文")
     title_en: Dict[str, str] = Field(default_factory=dict, description="title 中文→英文")
+
+
+# ============================================================
+# Phase B-2 依赖映射表
+# ============================================================
+
+class DecisionStep(BaseModel):
+    """decision_map 中单个步骤的赋值指令"""
+    api: str = Field(description="接口标识: METHOD /url，如 'POST /order/create'")
+    params: Dict[str, Any] = Field(
+        default_factory=dict,
+        description="请求参数赋值指令。静态值直接写，动态值用 ${} 字符串",
+    )
+    assertions: List[Dict[str, Any]] = Field(
+        default_factory=list,
+        description="断言列表，YAML 原生格式 [{'eq': {...}}, {'contains': {...}}]",
+    )
+
+
+class InternalDependency(BaseModel):
+    """单条用例的变量提取与消费关系"""
+    output_var: Optional[str] = Field(
+        default=None,
+        description="本用例产出的变量名（如 'order_id'），不产出时为 null",
+    )
+    extract_path: Optional[str] = Field(
+        default=None,
+        description="从响应提取的 JSONPath，必须对齐 api_defs 的 returns 字段",
+    )
+    used_by: List[str] = Field(
+        default_factory=list,
+        description="消费此变量的 case_id 列表，如 ['TC-002', 'TC-003']",
+    )
+
+
+class CrossModuleDep(BaseModel):
+    """一条跨模块依赖。支持中英文 alias 访问。"""
+    model_config = {"populate_by_name": True}
+
+    module: str = Field(
+        alias="依赖模块",
+        description="依赖的外部模块名",
+    )
+    var: str = Field(
+        alias="需获取变量",
+        description="需要获取的变量名",
+    )
+    api: str = Field(
+        alias="获取接口",
+        description="获取接口: METHOD /url",
+    )
+
+
+class StoryDependencyMap(BaseModel):
+    """单个 story 的依赖映射"""
+    story_name: str = Field(description="中文 story 名，与 Excel @allure.story 列一致")
+    story_pre_api_sequence: List[str] = Field(
+        default_factory=list,
+        description="共享前置 API 序列，格式 ['步骤名:METHOD /url', ...]",
+    )
+    case_api_sequences: Dict[str, List[str]] = Field(
+        default_factory=dict,
+        description="case_id → api_sequence 映射",
+    )
+    decision_map: Dict[str, Dict[str, Any]] = Field(
+        default_factory=dict,
+        description="case_id → {'steps': [DecisionStep, ...]}",
+    )
+    internal_dependency: Dict[str, InternalDependency] = Field(
+        default_factory=dict,
+        description="case_id → 变量依赖关系",
+    )
+    cross_module_dependency: Dict[str, CrossModuleDep] = Field(
+        default_factory=dict,
+        description="前置步骤名 → 跨模块依赖",
+    )
+    teardown_api_sequence: List[str] = Field(
+        default_factory=list,
+        description="清理 API 序列。LLM 判断无需清理时为空数组 []",
+    )
+
+    @model_validator(mode="after")
+    def validate_key_consistency(self) -> "StoryDependencyMap":
+        """校验 case_api_sequences / internal_dependency / decision_map 的 key 集合一致。"""
+        keys_api = set(self.case_api_sequences.keys())
+        keys_dep = set(self.internal_dependency.keys())
+        keys_dec = set(self.decision_map.keys())
+
+        if keys_api != keys_dep or keys_api != keys_dec:
+            missing_api = keys_dec - keys_api
+            missing_dep = keys_dec - keys_dep
+            extra = keys_api - keys_dec
+            parts = []
+            if missing_api:
+                parts.append(f"case_api_sequences 缺少: {sorted(missing_api)}")
+            if missing_dep:
+                parts.append(f"internal_dependency 缺少: {sorted(missing_dep)}")
+            if extra:
+                parts.append(f"多余的 key: {sorted(extra)}")
+            raise ValueError("三个 map 的 case_id key 集合不一致: " + "; ".join(parts))
+
+        # case_api_sequences value 非空
+        empty_cases = [k for k, v in self.case_api_sequences.items() if not v]
+        if empty_cases:
+            raise ValueError(
+                f"case_api_sequences 中以下 case_id 的值为空数组（必须至少有一个 API）: {empty_cases}"
+            )
+
+        # used_by 引用的 case_id 必须存在
+        for case_id, dep in self.internal_dependency.items():
+            for used in dep.used_by:
+                if used not in keys_api:
+                    raise ValueError(
+                        f"internal_dependency['{case_id}'].used_by 引用了不存在的 case_id '{used}'"
+                    )
+
+        return self
+
+
+class DependencyMap(BaseModel):
+    """完整的依赖映射表（一个 feature 的所有 story）"""
+    stories: List[StoryDependencyMap] = Field(
+        min_length=1,
+        description="该 feature 下所有 story 的依赖映射",
+    )
+    file_name: str = Field(default="dependency_map.json")

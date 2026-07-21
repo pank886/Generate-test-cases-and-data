@@ -159,6 +159,18 @@ class Settings(BaseSettings):
         description="Excel 计划校验失败后自动修复的最大尝试次数。每轮仅重填失败行，增大可提高通过率但增加耗时",
     )
 
+    # -- Phase B-2 依赖映射生成 --
+    dependency_repair_attempts: int = Field(
+        default=2, ge=0, le=5,
+        description="dependency_map.json 校验失败后自动修复的最大尝试次数。与 EXCEL_REPAIR_ATTEMPTS 独立，仅影响 dep_map 生成节点",
+    )
+
+    # -- 思考节点 LLM 调用超时（Phase B-2 / Phase C thinking） --
+    thinking_timeout: int | None = Field(
+        default=None, ge=10, le=1200,
+        description="thinking LLM 调用超时（秒）。None=沿用 LangChain 客户端默认（约 600s）。Phase B-2 和 Phase C _thinking_per_story 共用此配置",
+    )
+
     # -- Phase B 资源冲突消解关键词 --
     resource_mutate_keywords: list[str] = Field(
         default=[

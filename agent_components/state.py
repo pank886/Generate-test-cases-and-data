@@ -43,6 +43,7 @@ class State(TypedDict):
     confirmed_module: Optional[str]           # 用户最终选择的模块名
 
 
+
 class ApiDefinitionList(BaseModel):
     """包装类：用于让 LLM 输出接口列表"""
     apis: List[ApiDefinition] = Field(..., description="提取到的所有接口定义列表")
