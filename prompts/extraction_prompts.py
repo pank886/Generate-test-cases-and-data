@@ -1,4 +1,4 @@
-"""Phase A: 文档提取 Prompt 模板"""
+"""Phase B/C: Excel 修复 + YAML 生成 Prompt 模板"""
 from langchain_core.prompts import ChatPromptTemplate
 
 
@@ -110,10 +110,10 @@ def api_def_extract_prompt() -> ChatPromptTemplate:
 
 
 def repair_excel_plan_prompt() -> ChatPromptTemplate:
-    """Excel 计划修复 prompt：只修复失败行，不返回已通过的用例。"""
+    """Excel 计划修复 prompt：按错误信息修正失败用例，代码侧根据 failed_ids 裁剪输出。"""
     return ChatPromptTemplate.from_messages([
         ("system",
-         "你正在修复一个 Excel 测试计划。**只输出以下失败用例的修复版本，不要包含已通过的用例**。\n\n"
+         "你正在修复一个 Excel 测试计划中的失败用例。按以下要求修正每个失败用例。\n\n"
          "### 输出 JSON 格式（必须严格遵循，一个字符都不能错）\n"
          "必须输出以下结构的 JSON 对象：\n\n"
          "  {{\n"
@@ -136,12 +136,16 @@ def repair_excel_plan_prompt() -> ChatPromptTemplate:
          "- steps 和 expected 的条数必须一致（\\n 分隔后 count 相等）\n"
          "- preconditions 是 PRE ID 数组，无则为 []\n"
          "- mutates_data/is_negative_test 为布尔值\n\n"
-         "### 原始测试分析报告（供补全缺失信息）\n{original_test_analysis}\n\n"
-         "### 失败的行及错误（仅需修复这些行）\n{failed_test_cases}\n\n"
+         "### 测试场景分析（参考上下文）\n{analysis_section}\n\n"
+         "### 完整用例描述（参考原始设计）\n{cases_section}\n\n"
+         "### 失败的行及错误\n{failed_test_cases}\n\n"
          "### 修复指南\n"
-         "1. 找到失败行对应的用例，补全缺失字段，修正步骤与预期条数不一致\n"
-         "2. 前置引用不存在则修正为正确的 PRE 编号\n"
-         "3. **必须保持的 TC ID**（只能输出以下 ID 的用例，不可新增、不可删除）：{failed_ids}\n"
+         "1. 逐条对照失败行的错误信息，只修复报错的字段，保持正确字段不变\n"
+         "2. 步骤与预期条数不一致：参照上方「完整用例描述」中该用例的原始设计，\n"
+         "   补全缺失的步骤（如原始设计包含多个操作），或按步骤条数对齐预期。\n"
+         "   使 steps \\n 分隔后的条数 = expected \\n 分隔后的条数\n"
+         "3. 字段为空：从用例标题和上下文中推断补全\n"
+         "4. 前置引用不存在：修正为正确的 PRE 编号\n"
          "5. shared_preconditions 留空数组 []\n"
          "6. 禁止 Markdown，只输出 JSON"),
         ("human", "请输出修正后的测试用例 JSON：")
@@ -179,17 +183,24 @@ def analyze_yaml_data_prompt() -> ChatPromptTemplate:
         ("system",
          "你是资深测试数据构造专家。根据【接口定义】和【用例逻辑】，深度分析需要生成的测试数据。\n\n"
          "请分析以下方面（自由文本，不要输出 JSON）：\n"
-         "1. **接口匹配**：每个步骤对应哪个接口（从接口定义中找匹配的 url/method）\n"
+         "1. **接口匹配**：每个步骤对应哪个接口（从接口定义中找匹配的 url/method）。"
+         "**分析中描述接口时，url 只写路径**（如 /payConfig/detail），不要写 ${{}} 或完整 URL，"
+         "动态参数通过 params 传递即可。\n"
          "2. **请求参数**：每个接口需要哪些请求参数，参数值从哪来（用例指定 / 上游提取 / 模拟）\n"
-         "3. **数据传递**：哪些步骤的返回值需要 extract，供下游步骤引用（使用 ${{get_extract_data(key)}}）\n"
+         "3. **数据传递**：哪些步骤的返回值需要 extract，供下游步骤引用（使用数据工厂清单中的提取函数）\n"
          "4. **断言设计**：每个步骤应该断言什么字段（从接口 returns 中选择），期望值是什么\n"
          "5. **工厂方法**：哪些参数值需要用工厂方法随机生成\n\n"
          "### 可用数据工厂方法\n{data_factory_methods}\n\n"
          "### 输出字段约束（json_mode 阶段会严格按以下 schema 输出，你的分析要覆盖这些字段）\n"
-         "- baseInfo: api_name/url/method/header（api_name 必须与接口定义一致，中文就中文）\n"
+         "- baseInfo: 仅含 api_name/url/method/header 四个字段。**header 必须存在**（GET 请求 header 为空字典，POST/PUT/PATCH 写 Content-Type: application/json）\n"
          "- testCase: case_name/json|params|data/extract|input_extract/validation\n"
-         "- json 对应 JSON 请求体（post/put/patch），params 对应 URL query（get/delete），data 对应表单\n"
-         "- validation 支持 eq/contains/ne/db 四种断言\n"
+         "- 请求参数按 HTTP 方法选择：GET/DELETE → params（query string），POST/PUT/PATCH → json（JSON body）\n"
+         "- **url 禁止动态占位符**——url 在框架中不经 replace_load() 解析，动态参数必须用 params 传递，url 保持静态路径\n"
+         "- **params/json/data 只能放在 testCase 内**，禁止放在 baseInfo 层级\n"
+         "- validation 支持 eq/contains/ne/db 四种断言（不等于是 ne 不是 neq）。**validation 不能为空数组**\n"
+         "- extract 从接口返回值中提取数据（JSONPath），供下游步骤用 ${{get_extract_data(key)}} 引用。"
+         "input_extract 极少使用，不要把它当数据暂存。禁止填入 PRE 编号或固定字面量\n"
+         "- extract/validation 的 JSONPath 必须以 $. 开头（如 $.data.id）\n"
          "- 动态占位符只能从上方数据工厂清单中选择并按 syntax 使用，禁止胡编函数或语法；"
          "清单不支持的能力用合理固定字面量（如远期日期直接写 \"2029-12-31 10:00:00\"）\n"
          "- 分析阶段就要为每个动态值判定：用哪个工厂函数，还是固定字面量"),
@@ -220,15 +231,13 @@ def repair_yaml_data_prompt() -> ChatPromptTemplate:
          "{data_factory_methods}\n\n"
          "### 修复要点\n"
          "- 逐条对照【校验错误明细】定位问题字段，说明错在哪、应改成什么\n"
-         "- 动态值只能用清单内函数；时间偏移用 ${{get_offset_time(fmt, days, ...)}}；"
+         "- 动态值只能用数据工厂清单内的函数（语法见清单），禁止自创函数或语法"
          "清单不支持的能力写合理固定字面量\n"
-         "- 无需提取时省略 extract/input_extract 字段，禁止 null 值条目\n"
-         "- ⚠️【最高频错误】json/params 同时出现 → method=get/delete 只保留 params，"
-         "method=post/put/patch 只保留 json，删掉另一个！\n"
-         "- ⚠️【高频错误】禁止 YAML 中输出双花括号 {{{{ 或 }}}} → 只用 ${{函数(参数)}}，"
-         "不要用 {{{{}}}} 包裹\n"
+         "- 无需提取时省略 extract/input_extract 字段，禁止 {{}} 占位与 null 值条目\n"
+         "- json/params/data 三选一，依据接口定义确定正确的请求方式\n"
          "- 修正时保持原有正确部分不动，只改错误部分"),
         ("human",
+         "{post_check_issues}"
          "### 接口定义\n{api_definitions}\n\n"
          "### 用例逻辑\n{test_case_logic}\n\n"
          "### 用户意图\n{user_context}\n\n"
@@ -245,64 +254,56 @@ def format_yaml_data_prompt() -> ChatPromptTemplate:
     """
     return ChatPromptTemplate.from_messages([
         ("system",
-         "你是数据格式化专家。根据【数据分析】和【接口定义】，输出测试数据的 JSON（代码会自动转为 YAML）。\n\n"
-         "### 输出 JSON 格式（必须严格遵循，与 Pydantic TestData 模型对齐）\n"
-         "  {{\n"
-         '    "data": [\n'
-         '      {{\n'
-         '        "baseInfo": {{\n'
-         '          "api_name": "接口名称",\n'
-         '          "url": "/path/to/api",\n'
-         '          "method": "post",\n'
-         '          "header": {{ "Content-Type": "application/json;charset=UTF-8" }}\n'
-         '        }},\n'
-         '        "testCase": [\n'
-         '          {{\n'
-         '            "case_name": "场景描述",\n'
-         '            "json": {{ "key": "value" }},\n'
-         '            "extract": {{ "key": "$.data.jsonpath" }},\n'
-         '            "validation": [\n'
-         '              {{ "eq": {{ "retCode": 0, "msg": "success" }} }},\n'
-         '              {{ "contains": {{ "$.msg": "期望值" }} }}\n'
-         '            ]\n'
-         '          }}\n'
-         '        ]\n'
-         '      }}\n'
-         '    ],\n'
-         '    "file_name": "test_data.yaml"\n'
-         '  }}\n\n'
+         "你是数据格式化专家。根据【数据分析】和【接口定义】，输出 TestData 模型结构的 JSON（Pydantic 校验）。\n\n"
          "### 可用数据工厂方法（动态占位符只能从此清单选择，严格按 syntax 填写）\n"
          "{data_factory_methods}\n\n"
-         "### 铁律（依据 YAML 规范）\n"
+         "### 铁律（依据 YAML 规范，违反任一条都会在 Schema 校验阶段被拦截）\n"
          "1. api_name/url/method 与接口定义完全一致，中文就中文，禁止翻译；"
-         "method 必须小写；url 只写路径，禁止带域名。\n"
+         "method 必须小写；url 只写路径，禁止带域名。"
+         "url 中的路径参数模板（如 /delete/{{id}}）必须替换为具体值——框架不对 {{xxx}} 做替换，{{code}} 会被原样发送。"
+         "**url 字段禁止使用动态占位符**——url 在框架中不经 replace_load() 解析，"
+         "动态占位符放在 url 中会被原样发送到服务端，"
+         "导致 404。"
+         "GET 请求的动态参数一律通过 testCase 内的 params 传递，URL 保持静态路径。\n"
+         "   ❌ 错误: url: /payConfig/detail/${{get_extract_data(code)}}\n"
+         "   ✅ 正确: url: /payConfig/detail, params: {{code: ${{get_extract_data(code)}}}}\n"
          "2. case_name 中文简要描述，禁止带 TC-xxx/PRE-xxx 前缀。\n"
-         "3.【最重要】请求体三选一，严格按 method 决定：\n"
-         "   - method=get/delete → 只用 params，禁止带 json/data\n"
-         "   - method=post/put/patch → 只用 json，禁止带 params（即使用了 params 也要删掉）\n"
-         "   - Content-Type 为 application/x-www-form-urlencoded 时 → 只用 data，禁止带 json/params\n"
-         "   ⚠️ json+params 同时出现是最高频错误，已拦截 24 次，你这次必须避免！\n"
-         "4. header 规则：json 体必须带 Content-Type application/json;charset=UTF-8；"
-         "表单 data 必须带 Content-Type application/x-www-form-urlencoded；"
-         "仅 params 或文件上传时不写 header；token 等公共头由框架注入，禁止手写。\n"
-         "5. 只输出实际用到的字段：extract/input_extract 无需提取时直接省略整个字段，"
-         "禁止输出值为 null 的条目。\n"
-         "6.【最重要】动态占位符只能用 ${{函数名(参数)}} 格式（一个美元符号 + 一对花括号），"
-         "函数必须来自上方数据工厂清单。\n"
-         "   ⚠️ 严禁在 YAML 中输出双花括号 {{{{ 或 }}}}！"
-         "双花括号是 LangChain 模板语法，YAML 框架用 ${{xxx}} 单花括号。"
-         "此项已拦截 12 次，你这次必须避免！\n"
-         "   ⚠️ 严禁在占位符内做运算或拼接（如 ${{{{get_current_time(ymd) + 1day}}}}），"
-         "禁止发明清单中不存在的函数。\n"
-         "7. 时间偏移一律用 ${{get_offset_time(fmt, days, ...)}}（偏移量可为负=过去，"
-         "如明天10点 = ${{get_offset_time(ydm, 1)}} 10:00:00）；"
+         "3. 请求参数传递方式按 HTTP 方法选择（三选一，禁止同时出现两种及以上）：\n"
+         "   - GET/DELETE → params（URL query string，参数拼接到 URL 后面）\n"
+         "   - POST/PUT/PATCH → json（JSON 请求体，放入 HTTP body）\n"
+         "   - 表单提交 → data（仅当 Content-Type 为 application/x-www-form-urlencoded）\n"
+         "   违反例：GET 请求用 json 传参 → 参数被放入 body，服务端不解析 GET body，参数丢失。\n"
+         "   POST 请求用 params 传参 → 参数被拼到 URL 上，而非放入 JSON body，API 收不到参数。\n"
+         "4. header 规则：**每个 baseInfo 必须有 header 字段**（框架直接读取该字段，缺失会报 KeyError）：\n"
+         "   - json 请求体（POST/PUT/PATCH）→ header: {{Content-Type: application/json;charset=UTF-8}}\n"
+         "   - 表单请求体 → header: {{Content-Type: application/x-www-form-urlencoded}}\n"
+         "   - GET/params 请求（无请求体）→ header: {{}}（空字典，让框架注入公共头）\n"
+         "   token/yq-app-code 等公共头由框架常量自动注入，禁止手写。\n"
+         "5. **params/json/data 只能放在 testCase 内的每条用例中**，baseInfo 只包含 api_name/url/method/header。"
+         "baseInfo 下出现的 params/json/data 框架不会读取，参数将静默丢失。\n"
+         "6. 只输出实际用到的字段：extract/input_extract 无需提取时直接省略整个字段，"
+         "禁止输出 {{}} 占位、禁止输出值为 null 的条目。\n"
+         "7. 动态值只能写成 ${{函数名(参数)}} 且函数必须来自上方数据工厂清单，"
+         "禁止 {{{{}}}} 双花括号、禁止在占位符内做运算或拼接（如 + 1day）、禁止发明函数。\n"
+         "8. 需要时间偏移或动态生成的值，使用上方数据工厂清单中的对应函数（语法和参数见清单）。"
          "清单不支持的能力写合理固定字面量（如 \"2029-12-31 10:00:00\"）。\n"
-         "8. 参数值从接口定义枚举中选取，禁止写中文值。\n"
-         "9. 断言字段从接口 returns 中选择，禁止捏造；extract 与断言的 JSONPath 必须以 $ 开头。\n"
-         "10. 同一断言类型只输出一个对象，多个字段合并其中（如 eq 同时断言 retCode 和 msg），"
-         "禁止拆成多条同类型断言。\n"
-         "11. data 数组不能为空，每个步骤至少输出一条。\n"
-         "12. 禁止 Markdown，只输出 JSON"),
+         "9. 参数值从接口定义枚举中选取，禁止写中文值。\n"
+         "10. 断言运算符只能用 [eq, contains, ne, db] 四种。**不等于是 ne 不是 neq**（neq 框架不支持）。"
+         "断言字段从接口 returns 中选择，禁止捏造。"
+         "**断言的 key（: 左边）禁止使用 ${{}} 动态值**——key 必须是静态字段名或 JSONPath（如 $.data.code）。"
+         "正例: {{$.data.code: ${{get_extract_data(code)}}}}，反例: ${{{{get_extract_data(code)}}}}: 200。\n"
+         "11. extract 用于从接口**返回值**中提取数据供下游步骤使用，值必须是 JSONPath（$.data.id）。"
+         "**input_extract 极少使用**——它是从请求输入中提取，不是用来传递步骤间数据的。"
+         "禁止将 PRE 编号、固定字面量、数据工厂表达式填入 extract/input_extract。"
+         "步骤间的数据传递只用 extract + ${{get_extract_data(key)}}："
+         "步骤1 extract: {{code: $.data.code}}，步骤2 json: {{code: ${{get_extract_data(code)}}}}。\n"
+         "12. validation 数组每步至少包含一条断言（如 {{eq: {{retCode: 0}}}}），"
+         "禁止 validation: [] 无断言。同一断言类型只输出一个对象，多个字段合并其中，禁止拆成多条同类型断言。\n"
+         "13. 导出/下载类接口（如 export、download、importTemplate）的 response 是二进制文件，"
+         "无法用 eq/contains 校验 body。此类接口的 validation 统一写："
+         "{{contains: {{status_code: 200}}}}。\n"
+         "12. data 数组不能为空，每个步骤至少输出一条。\n"
+         "13. 禁止 Markdown，只输出 JSON"),
         ("human",
          "### 数据分析\n{data_analysis}\n\n"
          "### 接口定义\n{api_definitions}\n\n"
@@ -310,142 +311,3 @@ def format_yaml_data_prompt() -> ChatPromptTemplate:
          "### 用户意图\n{user_context}\n\n"
          "请输出：")
     ])
-
-
-# ============================================================
-# Phase B-2 依赖映射表生成
-# ============================================================
-
-class _MsgBuilder:
-    """带 format_messages 方法的 prompt 包装器，绕过 ChatPromptTemplate 的花括号限制。"""
-    def __init__(self, system_text, human_template):
-        self._system = system_text
-        self._human = human_template
-
-    def format_messages(self, **kwargs):
-        from langchain_core.messages import SystemMessage, HumanMessage
-        human = self._human
-        for k, v in kwargs.items():
-            human = human.replace("{" + k + "}", str(v))
-        return [SystemMessage(content=self._system), HumanMessage(content=human)]
-
-
-def generate_dependency_map_prompt():
-    """Phase B-2: 生成 dependency_map.json 的 thinking prompt。
-
-    LLM 使用 thinking=on 模式，深度分析用例间的数据传递关系后输出 JSON。
-    返回带 format_messages(**kwargs) 接口的对象，兼容 thinking 节点调用模式。
-    """
-    import json as _json
-
-    _schema = _json.dumps({
-        "stories": [{
-            "story_name": "订单CRUD",
-            "story_pre_api_sequence": ["前置鉴权:POST /login"],
-            "case_api_sequences": {
-                "TC-001": ["创建订单:POST /order/create"],
-                "TC-002": ["查询订单:GET /order/query/{order_id}"]
-            },
-            "decision_map": {
-                "TC-001": {"steps": [{"api": "POST /order/create",
-                    "params": {"amount": 500, "plate": "${random_plates(1)}"},
-                    "assertions": [{"eq": {"retCode": 1}}]}]},
-                "TC-002": {"steps": [{"api": "GET /order/query/{order_id}",
-                    "params": {"order_id": "${get_extract_data(order_id)}"},
-                    "assertions": [{"eq": {"retCode": 1}}]}]}
-            },
-            "internal_dependency": {
-                "TC-001": {"output_var": "order_id", "extract_path": "$.data.id", "used_by": ["TC-002"]},
-                "TC-002": {"output_var": None, "extract_path": None, "used_by": []}
-            },
-            "cross_module_dependency": {
-                "前置鉴权": {"依赖模块": "用户模块", "需获取变量": "user_token", "获取接口": "POST /login"}
-            },
-            "teardown_api_sequence": ["取消订单:POST /order/cancel"]
-        }]
-    }, indent=2, ensure_ascii=False)
-
-    _system = (
-        "你是测试数据架构师。根据【Excel 测试计划】、【接口定义】、【产品文档】和【模块树】，"
-        "分析整个 feature 下所有 story 的用例依赖关系，输出完整的 dependency_map.json。\n\n"
-
-        "### 四条铁律\n\n"
-
-        "**1) 输出 teardown_api_sequence（按数据流判断）**\n"
-        "对每个 story，判断写操作（POST/PUT/DELETE）的产物是否需要清理:\n"
-        "- 下游 case 需消费本 case 的产物 -> 不清理，teardown_api_sequence 留空 []\n"
-        "- 有合法的清理路径（产品规则允许删除/回滚）-> 填写具体步骤\n"
-        "- 不存在合法清理路径（如被引用实体不可删除）-> 留空 []\n"
-        "禁止编造无法执行的清理步骤。\n\n"
-
-        "**2) decision_map 中 params 的赋值原则**\n"
-        "- 用例步骤中明确写死的值 -> 直接输出（如 pageSize: 10）\n"
-        "- 需要动态生成的值 -> 输出 ${} 字符串（如 plate: ${random_plates(1)}）\n"
-        "- 依赖前置步骤的值 -> 输出 ${get_extract_data(xxx)} 占位符\n"
-        "- 禁止编造任何非确定性值（随机字符串、假手机号等），一律用 ${} 交给框架\n\n"
-
-        "**3) internal_dependency 中 extract_path 的来源**\n"
-        "extract_path 必须从【接口定义】的 returns 字段中提取，与响应 schema 严格对齐。\n"
-        "禁止凭空猜测 JSONPath。如果 returns 中找不到对应字段，不填 extract_path，\n"
-        "在 used_by 中标注依赖关系即可。\n\n"
-
-        "**4) case_id 格式一致性（禁止格式转换）**\n"
-        "所有 key（case_api_sequences / decision_map / internal_dependency）中的 case_id\n"
-        "必须与 Excel 中 用例编号 列的值逐字符一致，严禁做任何格式转换。\n"
-        "例如: Excel 中写 TC-1 则 JSON 中必须写 TC-1，不能写成 TC-001。\n\n"
-
-        "### 输出 JSON Schema\n\n"
-        + _schema + "\n\n"
-
-        "### 关键规则\n"
-        "- stories 数组按业务优先级排列（如 登录->下单->支付）\n"
-        "- story_pre_api_sequence 列出该 story 所有用例共享的前置 API 序列\n"
-        "- case_api_sequences / decision_map / internal_dependency 三者的 key 集合必须完全一致\n"
-        "- case_api_sequences 中每个 case_id 的值必须是非空数组\n"
-        "- api_sequence 格式统一为 步骤名:HTTP方法 URL，步骤名从 Excel title/steps 中提取\n"
-        "- assertions 直接使用 YAML 原生结构，如 [{eq: {retCode: 1}}, {contains: {msg: success}}]\n"
-        "- 禁止 Markdown，只输出纯 JSON（不要 ```json 包裹）\n"
-        "- output_var / extract_path 为 null 时 JSON 中写 null，不是字符串 \"null\""
-    )
-
-    _human = (
-        "### 模块树\n{module_tree}\n\n"
-        "### 接口定义\n{api_definitions}\n\n"
-        "### 测试分析\n{test_analysis}\n\n"
-        "### Excel 计划\n{excel_plan}\n\n"
-        "### 数据工厂方法（methods.yaml，生成 ${} 引用时使用）\n{factory_methods}\n\n"
-        "### 用户意图\n{user_context}\n\n"
-        "请分析整个 feature 的用例依赖关系并输出 JSON："
-    )
-
-    return _MsgBuilder(_system, _human)
-
-
-def repair_dependency_map_prompt():
-    """Phase B-2 修复轮 prompt：带错误上下文重新输出 dependency_map.json。"""
-    _system = (
-        "你是测试数据架构师。之前生成的 dependency_map.json 校验失败，"
-        "请根据错误详情修复后重新输出完整的 JSON。\n\n"
-
-        "### 四条铁律\n"
-        "1) teardown_api_sequence 按数据流判断（下游需消费不清理，有合法路径才填写）\n"
-        "2) decision_map params 赋值原则（静态直接写，动态用 ${}，禁止编造）\n"
-        "3) extract_path 必须从接口定义 returns 中提取，禁止凭空猜测\n"
-        "4) case_id 格式与 Excel 逐字符一致，禁止格式转换\n\n"
-
-        "输出格式与 generate_dependency_map_prompt 完全一致。\n"
-        "严格按 Schema 输出修复后的完整 JSON，禁止 Markdown 包裹。"
-    )
-
-    _human = (
-        "### 接口定义\n{api_definitions}\n\n"
-        "### 测试分析\n{test_analysis}\n\n"
-        "### Excel 计划\n{excel_plan}\n\n"
-        "### 数据工厂方法\n{factory_methods}\n\n"
-        "### 用户意图\n{user_context}\n\n"
-        "### 上次输出\n{prior_output}\n\n"
-        "### 校验错误\n{error_detail}\n\n"
-        "请修复上述错误并重新输出完整 JSON："
-    )
-
-    return _MsgBuilder(_system, _human)

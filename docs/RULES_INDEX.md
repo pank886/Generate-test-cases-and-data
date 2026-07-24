@@ -1,18 +1,18 @@
 # 架构规则索引
 
-> 最后编译: 2026-07-20 | 元规则数: 8 | 覆盖问题: 79 项 (P0×29, P1×32, P2×15, 架构改进×2, 死代码清理×1)
+> 最后编译: 2026-07-22 | 元规则数: 8 | 覆盖问题: 86 项 (P0×32, P1×35, P2×16, 架构改进×2, 死代码清理×1)
 
 ## 第一部分：元规则速查
 
 | # | 名称 | 口诀 |
 |---|------|------|
-| M1 | 事务边界与数据一致性 | 关系库先写向量库后写，删三处(SQLite+ChromaDB+内存)，删时Chrom缺失也清理，补偿必回滚且返回bool |
-| M2 | LLM/Embedding 交互规范 | thinking 不碰结构化，Pydantic 控输出，解析失败必降级，ChatPromptTemplate 双大括号转义，Embedding 端点版本不匹配必降级 |
-| M3 | 异常处理与日志 | 禁裸 except，禁空 catch，禁静默吞，自定义序列化全覆盖(含Decimal/UUID)，exc_info=True 不遗漏 |
+| M1 | 事务边界与数据一致性 | 关系库先写向量库后写，删三处(SQLite+ChromaDB+内存)，删时Chrom缺失也清理，补偿必回滚且返回bool，批量生成必唯一性校验去重 |
+| M2 | LLM/Embedding 交互规范 | thinking 不碰结构化，Pydantic 类型覆盖框架能力边界，校验失败不静默修正(抛教学级错误)，LLM 输出裁剪由代码侧执行(禁 prompt 控制)，解析失败必降级，ChatPromptTemplate 双大括号转义，Embedding 端点版本不匹配必降级，修复 prompt 仅传失败条目(禁全量上下文) |
+| M3 | 异常处理与日志 | 禁裸 except，禁空 catch，禁静默吞，自定义序列化全覆盖(含Decimal/UUID)，exc_info=True 不遗漏，日志存全量非补丁，Schema 校验失败必进可观测体系(计数+样本) |
 | M4 | 并发安全 | 双检锁副作用归锁内，单例必上锁，线程池必有界，跨工作流 HTTP Client 必重建 |
 | M5 | 文件与路径安全 | BASE_DIR 为根，basename 洗输入，os.remove 包 OSError，临时目录含标识，路径包含用 commonpath 非 startswith，resolve_path 拒空值 |
 | M6 | 代码结构与配置 | .env 仅放模型地址/Key，其余参数 settings.py 管；lifespan 配 global；全局单例判 None；to_thread 配心跳；无引用代码必清 |
-| M7 | 前端安全与交互 | 静态 JS 禁模板语法，catch 禁空，变量注入用 var，try/catch/finally 共享变量声明在顶层，动态路径用 data-* 禁 onclick 拼接 |
+| M7 | 前端安全与交互 | 静态 JS 禁模板语法，catch 禁空，变量注入用 var，try/catch/finally 共享变量声明在顶层，动态路径用 data-* 禁 onclick 拼接，轮询超时必须 > 后端最长任务时间 |
 | M8 | 数据真实性与缺失阻断 | 数据缺失必显式失败(requires_review/failed/错误清单)，禁 mock/示例/占位假数据托底，禁静默降级续跑；测试 MagicMock 豁免 |
 
 ## 第二部分：关键词 → 规则映射表
@@ -26,12 +26,19 @@
 | `for ... in ...:` 内 `session.merge`/`session.add` 交替 ChromaDB 写入 | M1 | P0 |
 | delete 端点 `if not doc:` 未调 `_chroma_db.delete_by_doc_id` | M1 | P1 |
 | 补偿函数不返回 bool/不检查返回值 | M1 | P1 |
+| `seen_ids`, `_already_confirmed`, 批量生成缺去重逻辑 | M1 | P0 |
 | `_invoke_structured`, `with_structured_output`, `METHOD_FEATURES` | M2 | P0 |
 | `thinking`, `extra_body`, `model_validator(mode="before")` | M2 | P0 |
 | `ChatPromptTemplate.from_messages`, `prompt.input_variables`, `{{` 转义 | M2 | P0 |
 | `llm.invoke(...` 传 `extra_body`（应为 `llm.bind(**kw).invoke()`） | M2 | P0 |
 | `/api/embed`, `/api/embeddings`, `FallbackOllamaEmbeddings` | M2 | P1 |
 | `_embed_via_old_api`, `_mark_old_api`, `_should_use_old_api` | M2 | P1 |
+| `request_body` / `json` 字段 Pydantic 类型过窄（框架能力边界 > Schema 约束） | M2 | P0 |
+| Schema validator 中 `ValueError` 不含教学信息（错在哪+为什么+正确做法） | M2 | P1 |
+| Prompt 铁律与框架实际行为矛盾（如"不写 header"而框架要求必须存在） | M2 | P0 |
+| LLM 修复 prompt 含 `{failed_ids}` "只能输出以下 ID"等模型侧输出范围控制 | M2 | P1 |
+| 修复 prompt 注入 `{original_test_analysis}` 全量上下文 → 非失败用例泄漏 | M2 | P1 |
+| 前置门禁校验失败直接 `return` 阻断生成（应为 warn + 跳过问题行） | M2 | P0 |
 | `except:`, `except Exception:`, `except Exception: pass` | M3 | P0 |
 | `except Exception:\\s*pass` (无日志的静默吞) | M3 | P0 |
 | `catch (e) {}`, `catch(e){}` | M3, M7 | P0 |
@@ -75,6 +82,7 @@
 | `<script>` 块中 `var INITIAL_FILES` 首屏注入 | M7 | P0 |
 | `onclick="...' + esc(path) + '..."` 拼接 JS（应用 `data-*`+委托） | M7 | P1 |
 | `<script src="...">` 无 cache-busting `?v=` 参数 | M7 | P2 |
+| 前端 `pollTask` 轮询循环 `for (let i = 0; i < N; i++)` 上限 < 后端最长任务时间 | M7 | P2 |
 | `asyncio.create_task` + `_retry_delete_later` 延迟补偿 | M1, M5 | P2 |
 | `_docx_img_dir`, `file_stem` 临时目录文件级隔离 | M5 | P2 |
 | 单 `upload-progress-card` 被多文件并发覆盖（应动态创建独立卡片） | M7 | P1 |
@@ -87,6 +95,9 @@
 | 检索/查询结果为空后未 return/raise 仍继续主流程 | M8 | P0 |
 | `api_defs_json` 等关键输入为空串/空列表直传生成节点 | M8 | P0 |
 | "兜底"/"fallback 数据"注释 + 硬编码业务样例 | M8 | P0 |
+| `ValidationInterceptor.record`, 校验失败未入可观测体系 | M3 | P1 |
+| `_log_node_output` 存中间补丁非全量 `valid_cases` | M3 | P1 |
+| 摘要读取 `plan.get("rows")` 不兼容活跃模型版本（缺 `test_cases` 回退） | M3, M6 | P1 |
 
 ## 第三部分：风险等级总览
 

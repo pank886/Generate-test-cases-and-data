@@ -372,7 +372,7 @@ class RetrievalMixin:
             llm_kwargs["extra_body"] = {"thinking": {"type": "enabled"}}
         else:
             llm_kwargs["extra_body"] = {"thinking": {"type": "disabled"}}
-        bound_llm = self.llm.bind(**llm_kwargs)
+        bound_llm = self.llm.bind(temperature=0.6, **llm_kwargs)
         result = bound_llm.invoke(
             prompt.format_messages(
                 user_context=state["original_input"],

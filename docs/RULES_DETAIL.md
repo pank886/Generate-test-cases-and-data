@@ -1,6 +1,6 @@
 # 架构规则详情
 
-> 最后编译: 2026-07-20 | 覆盖问题: 79 项 (P0×29, P1×32, P2×15, 架构改进×2, 死代码清理×1) | [Ref: 1~57]
+> 最后编译: 2026-07-22 | 覆盖问题: 86 项 (P0×32, P1×35, P2×16, 架构改进×2, 死代码清理×1) | [Ref: 1~64]
 
 <!-- RULE: M1 -->
 <!-- PRIORITY: P0 -->
@@ -8,9 +8,9 @@
 
 ## M1：事务边界与数据一致性
 
-**核心定义**：跨存储介质写入必须保证数据一致性——SQLite 先写、ChromaDB 后写，失败时补偿回滚；删除操作必须同时清理 SQLite + ChromaDB + 内存三处。
+**核心定义**：跨存储介质写入必须保证数据一致性——SQLite 先写、ChromaDB 后写，失败时补偿回滚；删除操作必须同时清理 SQLite + ChromaDB + 内存三处。批量数据生成必须对唯一标识字段做去重校验。
 
-**涵盖原规则**：DC-1~26, CS-7, CS-8, CS-9, [Ref: 21~23], [Ref: 25], [Ref: 27]
+**涵盖原规则**：DC-1~26, CS-7, CS-8, CS-9, [Ref: 21~23], [Ref: 25], [Ref: 27], [Ref: 60]
 
 ✅ **正确示例**：
 ```python
@@ -65,6 +65,7 @@ async def lifespan(app):
 - **新增**：删除端点中 SQLite 记录缺失时，须从 `.meta.json` 读取 doc_id 尝试清理 ChromaDB，防止检索污染
 - **新增**：补偿函数必须返回 bool 或抛出异常，调用方必须检查返回值并记录失败
 - `get_session_ctx()` 内部已处理 commit/rollback，不需要在业务代码中手动调用
+- **新增**：批量数据生成（Excel、YAML、数据库记录）必须对唯一标识字段做去重校验（`seen_ids` set），LLM 可能输出重复 ID——首轮校验和修复轮校验均须检查唯一性，重复 ID 标记错误进修复轮或直接丢弃。禁止仅校验字段格式而忽略唯一性 [Ref: 60]
 
 ---
 
@@ -74,9 +75,9 @@ async def lifespan(app):
 
 ## M2：LLM 交互规范
 
-**核心定义**：LLM 结构化输出必须用 Pydantic 模型 SSOT 约束；字段漂移用 `model_validator` 兼容；解析失败必须降级而非抛 500。thinking 与 json_mode/function_calling 互斥。ChatPromptTemplate 中 JSON 示例必须用双大括号转义 `{key}`。
+**核心定义**：LLM 结构化输出必须用 Pydantic 模型 SSOT 约束，类型须覆盖框架实际能力边界；字段漂移用 `model_validator` 兼容；解析失败必须降级而非抛 500。thinking 与 json_mode/function_calling 互斥。校验失败不静默修正，抛教学级错误。LLM 输出裁剪由代码侧执行（禁 prompt 控制）。ChatPromptTemplate 中 JSON 示例必须用双大括号转义 `{key}`。
 
-**涵盖原规则**：LLM-1~12, [Ref: 26], [Ref: 31]
+**涵盖原规则**：LLM-1~12, [Ref: 26], [Ref: 31], [Ref: 58], [Ref: 59], [Ref: 62]
 
 ✅ **正确示例**：
 ```python
@@ -165,6 +166,12 @@ prompt = ChatPromptTemplate.from_messages([
 - ChatPromptTemplate 中 JSON 格式字符串的 `{key}` 须用 `{{key}}` 双大括号转义；新增或修改 prompt 后须通过 `prompt.input_variables` 确认无意外变量泄漏
 - `${{get_extract_data(...)}}` 等合法双括号引用不受影响（LangChain 将 `{{` 渲染为字面量 `{`）
 - Embedding API 端点版本不匹配时必须降级：Ollama 服务端 v0.1.x 仅支持 `/api/embeddings`，Python 客户端 v0.6+ 调 `/api/embed` 返回 404 时，调用方必须自动降级到 `/api/embeddings`；降级状态按 URL 缓存至模块级存储（非 Pydantic 字段），避免同服务端重复探测
+- **新增**：LLM 输出字段的 Pydantic 类型必须覆盖框架实际能力边界（如 `json` 参数接受 dict/list/str 三种形态），禁止 Schema 比运行时更狭窄——会导致 LLM 被迫捏造假结构绕过约束 [Ref: 58]
+- **新增**：Schema 校验器（`model_validator`）失败时必须抛带有教学意义的 `ValueError`（包含：错在哪、为什么错、正确做法是什么），严禁静默修正（如 neq→ne 自动替换、extract 自动补 `$.` 前缀）。错误信息是修复轮中 LLM 自查的唯一线索，不含教学意义的错误信息等同于盲修 [Ref: 58]
+- **新增**：Prompt 铁律必须与框架实际行为一致。禁止出现与框架行为矛盾的指令（如"仅 params 时不写 header"但框架直接读 `case_info['baseInfo']['header']` 缺键即 KeyError）[Ref: 58]
+- **新增**：LLM 输出范围的裁剪必须由代码侧根据确定性的 ID 集合（如 `failed_ids`、`_already_confirmed`）执行，禁止依赖 prompt 指令（如"只能输出以下 ID"）让 LLM 自我约束。Prompt 只管"怎么修"，代码管"取哪些" [Ref: 62]
+- **新增**：修复 prompt 只传入需要修复的条目（失败用例 + 错误原因 + 通过条件），禁止注入全量上下文（如 `original_test_analysis` 包含全部 53 条用例）。全量上下文浪费 token 且诱发 LLM 重复输出已通过用例 [Ref: 62]
+- **新增**：前置门禁校验（如断言格式检查）失败不能硬阻断整个生成流程（`return result`），应降级为 `logger.warning` + 跳过问题行。阻断性校验必须放在生成循环内，借助修复轮兜底 [Ref: 59]
 
 ---
 
@@ -176,7 +183,7 @@ prompt = ChatPromptTemplate.from_messages([
 
 **核心定义**：禁止裸 except、禁止空 catch、禁止静默吞异常、禁止将可能为 None 的值直接传给下游。所有 except 块必须至少记录日志。
 
-**涵盖原规则**：EL-1~14, FP-9, FP-10, [Ref: 34], [Ref: 35], [Ref: 36], [Ref: 39], [Ref: 40]
+**涵盖原规则**：EL-1~14, FP-9, FP-10, [Ref: 34], [Ref: 35], [Ref: 36], [Ref: 39], [Ref: 40], [Ref: 61], [Ref: 63]
 
 ✅ **正确示例**：
 ```python
@@ -226,6 +233,8 @@ catch (e) {}  # 用户永远看不到错误
 - API 端点顶层 `except Exception` 返回 JSONResponse 是可接受的（最后一道防线），但必须记录日志
 - `finally` 块中不应 return/raise（会覆盖 try 块异常）
 - **新增**：非关键路径（如读取可选日志文件、解析可选元数据文件）失败时，必须 `logger.warning(..., exc_info=True)` 后继续流程，严禁 `except Exception: pass` 静默跳过 [Ref: 48, 49]
+- **新增**：所有 Schema 校验器的失败必须进入可观测体系——独立于 `_generation_errors.json`，单独统计各规则的拦截次数、占比与错误样本，写入 `logs/VALIDATION_INTERCEPT.md`。用于持续优化提示词：命中次数最多的规则 → 优先强化对应铁律 [Ref: 63]
+- **新增**：日志/摘要存储的数据必须是最终产出物全量（如 `valid_cases` 累计 53 条），禁止存储中间补丁（如最后一轮修复 LLM 输出的 8 条修复版）。摘要读取必须兼容所有活跃的模型版本（如 ExcelPlanV2 的 `test_cases` 和 ExcelPlan 的 `rows` 双 key 读取）[Ref: 61]
 
 ---
 
@@ -496,7 +505,7 @@ def get_error_snapshot_logger():  # ← 无任何调用方，属于死代码
 
 **核心定义**：静态 JS 文件禁止包含 Jinja2 模板语法；服务端数据必须通过 HTML `<script>` 块注入；异步操作 catch 禁止为空；页面初始化必须渲染首屏数据。
 
-**涵盖原规则**：EL-14, CSL-14, CSL-15, CSL-17, [Ref: 24]
+**涵盖原规则**：EL-14, CSL-14, CSL-15, CSL-17, [Ref: 24], [Ref: 64]
 
 ✅ **正确示例**：
 
@@ -564,6 +573,7 @@ function init() {
 - **新增**：并发文件上传必须为每个文件创建独立进度卡片（`up-{timestamp}-{random}` ID），禁止多文件共享全局单例进度指示器
 - **新增**：HTML 文本内容展示用轻量 `escText()`（仅转义 `&` `<` `>`），HTML 属性值用完整 `esc()`（含 `\` `'` `"`），禁止混用导致反斜杠双重转义
 - **新增**：所有 `catch` 块必须输出 `console.error(e)` 保留错误堆栈，禁止仅弹 toast 不记录原始错误（如 `catch (e) { toast('❌ 失败'); }` 缺少排查手段） [Ref: 54]
+- **新增**：前端轮询（`pollTask`）的循环上限（`for (let i = 0; i < N; i++)`）乘以轮询间隔必须大于后端任务最长可能执行时间。YAML 生成等多轮 LLM 调用可能耗时 10-20 分钟，轮询上限 4 分钟（120×2s）会导致前端提前报"任务超时"而实际后端仍在跑。必须配合后端心跳 `_update_task` 每 10s 更新进度，前端展示实时进度文本 [Ref: 64]
 
 <!-- RULE: M8 -->
 <!-- PRIORITY: P0 -->

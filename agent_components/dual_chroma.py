@@ -1,4 +1,4 @@
-"""Phase A: 双集合向量数据库封装（纯检索引擎）。
+"""双集合向量数据库封装（纯检索引擎，供 Phase B 使用）。
 
 ChromaDB 只存 chunk 文本、向量和检索必要的 metadata（doc_id, chunk_index, api_name）。
 所有业务关系（模块、绑定、文档元数据）由 SQLite database/ 层管理。

@@ -9,7 +9,7 @@
 from __future__ import annotations
 import logging
 import re
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Union
 from pydantic import BaseModel, Field, field_validator, model_validator, ValidationInfo
 
 logger = logging.getLogger(__name__)
@@ -17,6 +17,94 @@ logger = logging.getLogger(__name__)
 # LLM 字段漂移统计（data→json），用于监控 prompt 质量
 _drift_total = 0
 _drift_count = 0
+
+
+# ========================================================================
+# 拦截统计：校验失败计数器，用于分析提示词优化方向
+# 每次 generation run 开始前由 generators.py 调用 reset()，
+# 结束后调用 write_report() 写入 logs/VALIDATION_INTERCEPT.md
+# ========================================================================
+
+class ValidationInterceptor:
+    """Schema 校验拦截统计。
+
+    每次 Pydantic 校验失败（validator 抛出 ValueError）时调用 record()，
+    汇总后写入 logs/VALIDATION_INTERCEPT.md，用于：
+      - 发现高频拦截规则 → 优化 Prompt
+      - 发现 LLM 常见错误模式 → 强化 Schema 错误提示
+    """
+    _counts: dict = {}        # rule_name → 累计次数
+    _samples: dict = {}       # rule_name → 最近 3 条错误信息样本
+
+    @classmethod
+    def reset(cls):
+        cls._counts.clear()
+        cls._samples.clear()
+
+    @classmethod
+    def record(cls, rule: str, message: str):
+        cls._counts[rule] = cls._counts.get(rule, 0) + 1
+        if rule not in cls._samples:
+            cls._samples[rule] = []
+        if len(cls._samples[rule]) < 3:
+            cls._samples[rule].append(message[:300])
+
+    @classmethod
+    def get_summary(cls) -> dict:
+        return {"counts": dict(cls._counts), "samples": dict(cls._samples)}
+
+    @classmethod
+    def write_report(cls, output_dir: str = "logs"):
+        """写入拦截报告到 logs/VALIDATION_INTERCEPT.md"""
+        import os as _os
+        from datetime import datetime as _dt
+        if not cls._counts:
+            return
+
+        log_dir = _os.path.join(output_dir)
+        _os.makedirs(log_dir, exist_ok=True)
+        path = _os.path.join(log_dir, "VALIDATION_INTERCEPT.md")
+
+        total = sum(cls._counts.values())
+        lines = [
+            "# Schema 校验拦截报告",
+            f"> 生成时间: {_dt.now().strftime('%Y-%m-%d %H:%M:%S')}",
+            f"> 总拦截次数: {total}",
+            "",
+            "## 拦截统计",
+            "",
+            "| 规则 | 次数 | 占比 | 示例错误信息 |",
+            "|------|------|------|-------------|",
+        ]
+        for rule, count in sorted(cls._counts.items(), key=lambda x: -x[1]):
+            pct = f"{count / total * 100:.1f}%"
+            samples = cls._samples.get(rule, [])
+            sample = samples[0][:120] if samples else "-"
+            lines.append(f"| `{rule}` | {count} | {pct} | {sample} |")
+
+        lines += [
+            "",
+            "## 各规则详情",
+            "",
+        ]
+        for rule in sorted(cls._counts.keys()):
+            lines.append(f"### `{rule}`（{cls._counts[rule]} 次）")
+            lines.append("")
+            for i, s in enumerate(cls._samples.get(rule, []), 1):
+                lines.append(f"{i}. {s}")
+            lines.append("")
+
+        lines.append("---")
+        lines.append("> 提示词优化建议：优先处理拦截次数最多的规则，分析错误信息样本中的共性模式，")
+        lines.append("> 在 `prompts/extraction_prompts.py` 对应铁律中强化说明。")
+
+        with open(path, "w", encoding="utf-8") as f:
+            f.write("\n".join(lines) + "\n")
+
+        logger.info("📊 拦截报告: %s（%d 条，%d 类规则）", path, total, len(cls._counts))
+        return path
+
+
 
 # 动态占位符解析（框架 replace_load() 只解析 ${func(args)}）。
 # 函数白名单与实参规则以 data_factory/methods.yaml 注册表为单一事实源
@@ -26,7 +114,7 @@ _PLACEHOLDER_CALL_RE = re.compile(r"^([A-Za-z_]\w*)\(([^()]*)\)$")
 
 
 # ============================================================
-# Phase A 对话响应
+# 对话响应（Phase B 意图确认 + Excel 计划生成）
 # ============================================================
 
 class ProperResponse(BaseModel):
@@ -142,7 +230,7 @@ class ClassCode(BaseModel):
 
 
 # ============================================================
-# 测试数据（YAML 生成，Phase A 确认后执行）
+# 测试数据（YAML 生成，Phase B 确认计划后执行 → Phase C）
 # ============================================================
 
 class TestCase(BaseModel):
@@ -150,9 +238,9 @@ class TestCase(BaseModel):
     model_config = {"populate_by_name": True}
 
     case_name: str = Field(description="用例名，如 test_CarEntry_001")
-    request_body: Optional[Dict[str, Any]] = Field(
+    request_body: Optional[Union[Dict[str, Any], List[Any], str]] = Field(
         default=None,
-        description="请求体 JSON 数据",
+        description="HTTP 请求体，支持对象(Dict)、数组(List)、字符串(str)三种形态，与 requests 库 json 参数能力一致",
         serialization_alias="json",  # YAML 输出时仍用 json 字段名
         validation_alias="json",     # LLM 输入时接受 json 字段名
     )
@@ -273,6 +361,54 @@ class TestCase(BaseModel):
             data["validation"] = result
         return data
 
+    @model_validator(mode="after")
+    def validate_no_neq_operator(self) -> "TestCase":
+        """validation 中禁止使用 neq——框架只支持 ne。"""
+        for i, item in enumerate(self.validation):
+            if isinstance(item, dict) and "neq" in item:
+                rule = "断言运算符neq"
+                msg = (
+                    f"validation[{i}] 使用了 'neq' 断言运算符，框架不支持。"
+                    "框架只支持四种断言运算符: [eq, contains, ne, db]。"
+                    "不等于是 'ne' 不是 'neq'，请将 neq 改为 ne。"
+                )
+                ValidationInterceptor.record(rule, msg)
+                raise ValueError(msg)
+        return self
+
+    @model_validator(mode="after")
+    def validate_extract_jsonpath(self) -> "TestCase":
+        """extract 字段的 JSONPath 必须以 $. 开头——否则框架走正则降级，大概率提取失败。"""
+        for field_name in ("extract", "extract_list", "input_extract"):
+            d = getattr(self, field_name, None)
+            if isinstance(d, dict):
+                for k, v in d.items():
+                    if isinstance(v, str) and not v.startswith("$"):
+                        rule = "extract缺$前缀"
+                        msg = (
+                            f"{field_name}.{k} = '{v}' 缺少 '$.' 前缀。"
+                            "框架中只有以 '$' 开头的路径才走 JSONPath 解析（$.data.id），"
+                            "不以 '$' 开头的路径走正则降级匹配，大概率提取失败。"
+                            "请改为 '$.{v}'（如 $.data.code）。"
+                        )
+                        ValidationInterceptor.record(rule, msg)
+                        raise ValueError(msg)
+        return self
+
+    @model_validator(mode="after")
+    def validate_validation_not_empty(self) -> "TestCase":
+        """validation 数组不能为空——至少应有一条断言。"""
+        if len(self.validation) == 0:
+            rule = "validation为空"
+            msg = (
+                f"case '{self.case_name}' 的 validation 为空数组。"
+                "validation 每步至少包含一条断言（如 {eq: {retCode: 0}}），禁止 validation: []。"
+                "导出/下载类接口不便校验响应体时，也至少校验状态码: {eq: {retCode: 0}}。"
+            )
+            ValidationInterceptor.record(rule, msg)
+            raise ValueError(msg)
+        return self
+
 
 class StepData(BaseModel):
     """单步测试数据 — data 数组中的一个元素"""
@@ -344,6 +480,122 @@ class StepData(BaseModel):
                         c["form_data"] = c.pop("data")
         return data
 
+    @model_validator(mode="after")
+    def validate_url_no_placeholder(self) -> "StepData":
+        """url 字段禁止使用 ${} 动态占位符——框架不对 URL 调用 replace_load()。
+
+        ${get_extract_data(xxx)} 会被原样拼接到 HTTP 请求中导致 404。
+        GET 请求的动态参数应通过 testCase 内的 params 传递。
+        """
+        url = str(self.baseInfo.get("url", ""))
+        # 检测 {xxx} 字面量路径参数（如 /delete/{code}）
+        _literal = re.search(r'\{(\w+)\}', url)
+        if _literal:
+            rule = "url含字面量路径参数"
+            msg = (
+                f"url 字段含路径参数模板 '{{{_literal.group(1)}}}'，当前 url='{url}'。"
+                "框架不对 {{xxx}} 做变量替换，{code} 会被原样发送到服务端。"
+                "请将 {{{_literal.group(1)}}} 替换为具体值或 ${{get_extract_data(...)}} 表达式"
+            )
+            ValidationInterceptor.record(rule, msg)
+            raise ValueError(msg)
+        if "${" in url:
+            rule = "url含动态占位符"
+            msg = (
+                f"url 字段禁止使用 ${{}} 动态占位符，当前 url='{url}'。"
+                "框架不对 URL 调用 replace_load()，${get_extract_data(...)} 会被原样发送。"
+                "GET 请求的动态参数必须通过 testCase 内的 params 传递，URL 保持静态路径。"
+                "例如：/electricMeter/getEle 而非 /electricMeter/getEle/${get_extract_data(code)}"
+            )
+            ValidationInterceptor.record(rule, msg)
+            raise ValueError(msg)
+        return self
+
+    @model_validator(mode="after")
+    def validate_header_exists(self) -> "StepData":
+        """每个 baseInfo 必须包含 header 字段。
+
+        框架在 apiutil.py 中直接读取 case_info['baseInfo']['header']，
+        缺键直接 KeyError。GET/params 请求应写 header: {}（空字典）。
+        """
+        if "header" not in self.baseInfo:
+            rule = "baseInfo缺header"
+            url = self.baseInfo.get("url", "?")
+            method = self.baseInfo.get("method", "?")
+            msg = (
+                f"baseInfo 缺少 'header' 字段（{method.upper()} {url}）。"
+                "框架直接读取 case_info['baseInfo']['header']，缺键会 KeyError。"
+                "GET/params 请求写 'header: {}'（空字典让框架注入公共头），"
+                "POST/PUT/PATCH json 请求写 'header: {Content-Type: application/json;charset=UTF-8}'。"
+            )
+            ValidationInterceptor.record(rule, msg)
+            raise ValueError(msg)
+        return self
+
+    @model_validator(mode="after")
+    def validate_no_params_in_baseinfo(self) -> "StepData":
+        """params 只能放在 testCase 内每条用例中，baseInfo 下的 params 框架不读取。"""
+        base_keys = set(self.baseInfo.keys())
+        illegal = base_keys & {"params", "json", "data"}
+        if illegal:
+            rule = "params错放baseInfo"
+            url = self.baseInfo.get("url", "?")
+            msg = (
+                f"baseInfo 层级出现了 {'/'.join(sorted(illegal))} 字段（{url}），"
+                "框架只遍历 testCase 内的 params/json/data，baseInfo 下的会被忽略，参数将静默丢失。"
+                "baseInfo 只能包含 api_name/url/method/header 四个字段，"
+                "params/json/data 必须放在 testCase 内的每条用例中。"
+            )
+            ValidationInterceptor.record(rule, msg)
+            raise ValueError(msg)
+        return self
+
+    @model_validator(mode="after")
+    def validate_method_body_match(self) -> "StepData":
+        """请求参数传递方式必须与 HTTP 方法匹配。
+
+        - GET/DELETE → params，禁止用 json（服务端不解析 GET body）
+        - POST/PUT/PATCH + header 声明 JSON → json，禁止用 params（参数会丢到 URL 上）
+        """
+        method = str(self.baseInfo.get("method", "")).lower()
+        header = self.baseInfo.get("header", {})
+        ct = ""
+        if isinstance(header, dict):
+            for k, v in header.items():
+                if str(k).lower() == "content-type":
+                    ct = str(v).lower()
+                    break
+
+        for tc in self.testCase:
+            has_json = tc.request_body is not None
+            has_params = tc.params is not None
+
+            # GET/DELETE 不应有 json body
+            if method in ("get", "delete") and has_json:
+                rule = "GET/DELETE误用json"
+                msg = (
+                    f"{method.upper()} {self.baseInfo.get('url', '?')} "
+                    "使用了 json 字段传递参数。GET/DELETE 请求的参数应通过 params（URL query string）传递，"
+                    "服务端通常不解析 GET 请求的 body，参数将不会被读取。请将 json 改为 params。"
+                )
+                ValidationInterceptor.record(rule, msg)
+                raise ValueError(msg)
+
+            # POST/PUT/PATCH + header 声明 JSON + 用 params 而非 json
+            if (method in ("post", "put", "patch")
+                    and "application/json" in ct
+                    and has_params and not has_json):
+                rule = "POST误用params"
+                msg = (
+                    f"{method.upper()} {self.baseInfo.get('url', '?')} "
+                    "header 声明了 Content-Type: application/json，但 testCase 使用了 params 而非 json。"
+                    "params 会将数据放入 URL query string 而非 JSON 请求体，服务端收到的 body 为空。"
+                    "请将 params 改为 json。"
+                )
+                ValidationInterceptor.record(rule, msg)
+                raise ValueError(msg)
+        return self
+
 
 class TestData(BaseModel):
     """测试数据（序列化为 YAML 文件）"""
@@ -411,6 +663,12 @@ class TestData(BaseModel):
                     _check_call(m.group(1).strip(), m.group(0), path)
             elif isinstance(node, dict):
                 for k, v in node.items():
+                    # 检查 key 中是否包含 ${} 模板变量（断言 key 必须静态）
+                    if _PLACEHOLDER_RE.search(k):
+                        issues.append(
+                            path + f": 断言 key 中禁止使用 ${{}} 占位符 '{k}'，"
+                            "key 必须是静态字段名或 JSONPath（如 $.data.code），"
+                            "动态值放在 : 右边")
                     _walk(v, f"{path}.{k}")
             elif isinstance(node, list):
                 for idx, v in enumerate(node):
@@ -426,7 +684,7 @@ class TestData(BaseModel):
 
 
 # ============================================================
-# 场景数据规划（Phase A 数据依赖分析）
+# 场景数据规划（Phase C YAML 生成 — 数据依赖分析）
 # ============================================================
 
 class DataPlanStep(BaseModel):

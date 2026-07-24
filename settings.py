@@ -117,7 +117,7 @@ class Settings(BaseSettings):
 
     # -- 检索召回数量 --
     retrieval_k: int = Field(
-        default=50, ge=1, le=200,
+        default=200, ge=1, le=200,
         description="向量检索返回的文本块数量。增大可提升召回覆盖率，但 LLM 上下文消耗增加",
     )
 

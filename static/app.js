@@ -48,7 +48,7 @@ async function openLocalFile(path) {
 }
 
 async function pollTask(taskId, onProgress, onDone) {
-  for (let i = 0; i < 120; i++) {
+  for (let i = 0; i < 900; i++) {
     try {
       const r = await fetch('/task/' + taskId);
       const d = await r.json();

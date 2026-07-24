@@ -343,7 +343,7 @@ async def lifespan(app: FastAPI):
                 print("=" * 60)
                 raise RuntimeError("Ollama 连接失败") from e
 
-    # 3. Agent 初始化（Phase A + Phase B）
+    # 3. Agent 初始化（Phase B 工作流 + Phase C 生成组件）
     logger.info(">>> 启动智能测试助手 Web 服务 ...")
     from agent_components.graph_builder import build_workflow
     _phase_b_graph, _phase_b_components = build_workflow()

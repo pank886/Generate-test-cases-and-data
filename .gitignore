@@ -71,7 +71,5 @@ wheels/
 # Python 版本管理
 .python-version
 
-# 开发计划
-changelog/
 
 

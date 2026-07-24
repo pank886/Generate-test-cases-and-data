@@ -715,3 +715,99 @@
 - **问题根因**：`get_error_snapshot_logger()` 函数及配套的 `_repair_logger` 全局变量已无任何调用方，属于死代码。`repair_failures.log` 文件不再生成，残留的 RotatingFileHandler 配置造成代码阅读干扰。
 - **架构决策**：删除 `get_error_snapshot_logger()` 函数定义（~30 行）及 `nodes.py`/`retrievers.py` 中对应的无用 import。`repair_failures.log` 引用从 `settings.py` 日志目录描述中移除。
 - **衍生规则**：删除任何全局可访问的函数/类/变量前，必须用 grep 确认零调用方；禁止保留已确认无引用的死代码
+
+---
+
+## 12. 2026-07-22 YAML 合规审查 + Phase B/C 生成链路修复（Skill C 执行）
+
+### [58] [P0] `request_body` 类型过窄 + Schema 校验体系缺失 → YAML 9 类合规问题无人拦截
+
+- **涉及模块**：`prompts/response_model.py`, `prompts/extraction_prompts.py`, `agent_components/generators.py`
+- **问题根因**：
+  1. `request_body: Optional[Dict[str, Any]]` 只能接受 dict，LLM 遇到数组型 body（如 `/electricMeter/delete` 的 `["id1","id2"]`）时被夹在中间：API 要数组，Schema 要 dict → LLM 被迫捏造 `{body: [...]}` 包裹层
+  2. StepData/TestCase 无校验器，URL `${}` 占位符、`neq` 运算符、header 缺键、params 错放 baseInfo、GET/POST 方法-参数不匹配、extract JSONPath 缺 `$` 前缀、validation 为空 等 7 类问题进入 YAML 后运行时才暴露
+  3. 原有 prompt 铁律 #4 "仅 params 时不写 header" 是误导指令，教 LLM 省略 header 导致框架 KeyError
+- **架构决策**：
+  - `request_body` 放宽为 `Optional[Union[Dict[str, Any], List[Any], str]]`，与 requests 库 `json` 参数能力对齐
+  - StepData 新增 4 个 validator：url 禁 `${}`、header 必存在、params 禁放 baseInfo、方法-参数类型匹配
+  - TestCase 新增 3 个 validator：neq 非法（应为 ne）、extract JSONPath 必须 `$.` 开头、validation 不能为空
+  - 全部 validator 不静默修正，抛 ValueError 附完整错误原因+正确做法，倒逼 LLM 修复轮自查
+  - `format_yaml_data_prompt` 铁律全面重写（12→13 条），修正"不写 header"误导指令，新增 url 禁 `${}`、params 归属 testCase、断言运算符白名单、JSONPath `$.` 前缀等硬约束
+- **衍生规则**：
+  - LLM 输出字段的 Pydantic 类型必须覆盖框架实际能力边界（如 `json` 参数接受 dict/list/str），禁止 Schema 比运行时更狭窄
+  - 框架合规校验应在生成阶段（Schema validators）兜底，禁止依赖运行时暴露
+  - Schema 校验失败不静默修正，必须抛带教学意义（错在哪+为什么+正确做法）的错误信息
+  - Prompt 铁律必须与框架实际行为一致，禁止包含"XX 情况不写 YY"等与框架行为矛盾的指令
+
+### [59] [P0] 断言格式前置校验硬阻断 Phase C 全部 YAML 生成
+
+- **涉及模块**：`agent_components/generators.py`
+- **问题根因**：`_generate_all_yamls()` 在 YAML 生成循环前执行断言格式校验（`_parse_assertion`），校验失败直接 `return result`，`total=0, success=0`。后续 `_run_yaml_rounds()` 修复逻辑永远不可达。同时 `_parse_assertion` 禁止同一步骤出现多个断言关键词（如 `[contains]...，[ne]...`），但这是合理的复合断言语义。
+- **架构决策**：
+  - 删除多断言关键词拦截规则
+  - 校验失败从硬阻断 `return result` 改为仅 `logger.warning`，不阻断后续 YAML 生成
+  - 真正的断言结构校验交由 `response_model.py` 的 TestCase validators 在生成阶段拦截
+- **衍生规则**：前置门禁校验失败不能阻断整个流程，应降级为 warn + 跳过问题行；阻断性校验必须放在生成循环内（借助修复轮兜底）
+
+### [60] [P0] Excel 生成缺少 case_id 去重 → 6 组重复用例写入 Excel
+
+- **涉及模块**：`agent_components/nodes.py`
+- **问题根因**：LLM 在初始生成中输出了重复的 case_id（同一 ID 出现两次），校验逻辑检查了字段非空、前置引用、步骤/预期数量匹配，唯独没有 case_id 去重检查。同一 `TC-012` 通过所有校验 → `all_confirmed.append()` 两次 → 写入 Excel 两行。
+- **架构决策**：
+  - 首轮校验新增 `seen_ids` set，遇到重复 ID 标记错误进入修复轮
+  - 修复轮校验新增 `_already_confirmed` 检查，拒绝已通过用例的重复输出
+- **衍生规则**：批量数据生成（Excel、YAML、数据库记录）必须对唯一标识字段做去重校验；禁止仅校验字段格式而忽略唯一性
+
+### [61] [P1] Excel 工作流日志摘要与实际数据脱节（三重偏差）
+
+- **涉及模块**：`agent_components/nodes.py`
+- **问题根因**（链式偏差）：
+  1. **模型不兼容**：摘要代码读 `plan.get("rows", [])` 但实际模型是 `ExcelPlanV2`（字段名 `test_cases`），永远读到空列表 → 前端显示"0 条用例，0 模块"
+  2. **全量 vs 补丁**：`_log_node_output` 存的 `plan` 是最后一轮修复 LLM 的输出（仅失败行的修复版，如 8 条），而非累计写入 Excel 的 `valid_cases` 全量（53 条）→ 前端显示"共 8 条用例"
+  3. 实际 Excel 写入的是 `valid_cases`（全量累计，53 条），与日志完全不一致
+- **架构决策**：
+  - 摘要兼容 `test_cases`（ExcelPlanV2）和 `rows`（ExcelPlan）两种模型
+  - `_log_node_output` 改为存储 `valid_cases` 全量（`[tc.model_dump() for tc in valid_cases]`）而非最后一轮 `plan`
+  - story 字段名兼容两种模型（`r.get("story", r.get("module_name", ""))`）
+- **衍生规则**：日志/摘要存储的数据必须是最终产出物（全量），禁止存储中间补丁或部分快照；摘要读取必须兼容所有活跃的模型版本
+
+### [62] [P1] Excel 修复 prompt 模型侧控制 + 全量上下文泄漏 → LLM 输出已通过用例
+
+- **涉及模块**：`prompts/extraction_prompts.py`, `agent_components/nodes.py`
+- **问题根因**：
+  1. 修复 prompt 通过 `{failed_ids}` 和"只能输出以下 ID"指令要求 LLM 自我约束输出范围——这是模型侧控制，不可靠。LLM 忽略指令仍输出已通过用例，代码虽拦截但 token 已浪费
+  2. `{original_test_analysis}` 传入完整 53 条用例的全量分析报告，修复 8 条失败用例时 LLM 看到全部上下文 → 诱发"热心"重生成已通过用例
+- **架构决策**：
+  - 剥离 prompt 中所有模型侧输出范围控制（删除 `{failed_ids}` 占位符、删除"只能输出以下 ID"/"不要包含已通过的用例"指令）
+  - 输出裁剪完全由代码负责：`failed_ids` 过滤 + `_already_confirmed` 去重，LLM 输出什么 ID 都行，代码只取合法部分
+  - 移除 `{original_test_analysis}` 全量上下文，修复 prompt 仅传入 `{failed_test_cases}`（失败用例 + 错误原因 + 通过条件）
+- **衍生规则**：LLM 输出范围的裁剪必须由代码侧根据确定性的 ID 集合执行，禁止依赖 prompt 指令让 LLM 自我约束；修复 prompt 只传入需要修复的条目，禁止传入全量数据作为"上下文"
+
+### [63] [P1] ValidationInterceptor — Schema 校验拦截可观测性
+
+- **涉及模块**：`prompts/response_model.py`, `agent_components/generators.py`
+- **问题根因**：Schema validators 校验失败后错误信息仅流向修复轮和 `_generation_errors.json`，无汇总统计。无法回答"哪个规则命中最多""提示词哪条最需要优化"。
+- **架构决策**：
+  - 新增 `ValidationInterceptor` 类（类级别计数器 + 样本收集）
+  - 每个 validator 失败时调用 `ValidationInterceptor.record(rule_name, error_message)`
+  - `_run_yaml_rounds` 开始时 `reset()`，结束时 `write_report("logs")` 写入 `logs/VALIDATION_INTERCEPT.md`
+  - 报告含：总拦截次数、各规则次数与占比、各规则错误信息样本（最多 3 条）
+- **衍生规则**：所有 Schema 校验器的失败必须进入可观测体系（计数 + 样本），用于持续优化提示词；禁止校验失败后仅抛异常不统计
+
+### [64] [P2] 前端轮询超时 4 分钟 → YAML 生成超时误报
+
+- **涉及模块**：`static/app.js`
+- **问题根因**：`pollTask()` 循环上限 120 次 × 2 秒 = 4 分钟，YAML 生成阶段多轮 LLM 调用远超 4 分钟，前端提前报"任务超时"而实际后端还在跑。
+- **架构决策**：循环上限 120→900（30 分钟），覆盖 YAML 生成最长时间。后端心跳继续每 10s 更新进度。
+- **衍生规则**：前端轮询超时必须大于后端任务最长可能执行时间；长时间任务必须有后端心跳 + 前端长轮询双重保障
+
+---
+
+## 13. 统计数据更新
+
+| 等级 | 本次新增 | 累计 |
+|------|---------|------|
+| P0 | 3 | 17 |
+| P1 | 3 | 19 |
+| P2 | 1 | 9 |
+| 架构改进 | 0 | 2 |

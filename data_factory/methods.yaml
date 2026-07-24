@@ -17,42 +17,42 @@ categories:
     description: 每次生成都会使用 —— 跨步骤数据传递。写入侧为用例的 extract（返回数据提取，保存至公共参数列表）/ input_extract（输入数据提取，保存至公共参数列表）字段；本类方法负责读取与拆分公共参数列表。
     methods:
       - name: get_extract_data
-        syntax: '${get_extract_data(key)}'
+        syntax: "${get_extract_data('key')}"
         description: 从公共参数列表（extract.yaml）读取已保存的变量值；值为列表时返回第一个元素；可传二级 key 读取嵌套字典
         params:
-          key: 公共参数列表中的一级 key（必填）
+          key: 公共参数列表中的一级 key（必填，字符串需加引号）
           sec_node_name: 二级 key，访问嵌套字典（可选）
           randoms: 列表取值方式，0=随机取一个, -1=逗号拼接（可选）
         usage_tips:
-          - '读取上游保存的ID: ${get_extract_data(resourceId)}'
-          - '跨步骤引用车牌: ${get_extract_data(carInNumber)}'
-          - '读取嵌套字段: ${get_extract_data(configData, host)}'
+          - "读取上游保存的ID: ${get_extract_data('resourceId')}"
+          - "跨步骤引用车牌: ${get_extract_data('carInNumber')}"
+          - "读取嵌套字段: ${get_extract_data('configData', 'host')}"
         validation:
           min_args: 1
           max_args: 3
 
       - name: get_extract_data_list
-        syntax: '${get_extract_data_list(key, randoms)}'
+        syntax: "${get_extract_data_list('key', randoms)}"
         description: 从公共参数列表读取列表值；randoms 缺省=取第一个, 0=随机取一个, -1=全部逗号拼接为字符串
         params:
-          key: 公共参数列表中的 key（必填）
+          key: 公共参数列表中的 key（必填，字符串需加引号）
           randoms: 取值方式（可选）
         usage_tips:
-          - '默认取第一个: ${get_extract_data_list(carInNumber)}'
-          - '随机取一个: ${get_extract_data_list(plates, 0)}'
-          - '全部拼接: ${get_extract_data_list(plates, -1)}'
+          - "默认取第一个: ${get_extract_data_list('carInNumber')}"
+          - "随机取一个: ${get_extract_data_list('plates', 0)}"
+          - "全部拼接: ${get_extract_data_list('plates', -1)}"
         validation:
           min_args: 1
           max_args: 2
 
       - name: split_extract_data
-        syntax: '${split_extract_data(key, index)}'
+        syntax: "${split_extract_data('key', index)}"
         description: 从公共参数列表读取逗号拼接的字符串，按索引拆分取其中一个（索引从 0 开始，缺省 0）
         params:
-          key: 公共参数列表中的 key（必填）
+          key: 公共参数列表中的 key（必填，字符串需加引号）
           index: 拆分后的索引，0 开始（可选，默认 0）
         usage_tips:
-          - '取拼接串的第2个: ${split_extract_data(plates, 1)}'
+          - "取拼接串的第2个: ${split_extract_data('plates', 1)}"
         validation:
           min_args: 1
           max_args: 2

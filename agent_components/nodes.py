@@ -19,7 +19,7 @@ from agent_components.llm.deepseek import DeepSeekChatOpenAI
 import config
 from observability import get_logger
 from agent_components.dual_chroma import get_chroma_db
-from agent_components.state import State, ApiDefinitionList
+from agent_components.state import State
 from prompts.response_model import (
     ProperResponse,
     ApiDefinition,
@@ -71,6 +71,7 @@ def _get_llm() -> DeepSeekChatOpenAI:
                     base_url=config.LLM_BASE_URL,
                     api_key=config.LLM_API_KEY(),
                     temperature=config.LLM_TEMPERATURE,
+                    max_tokens=16384,
                 )
     return _llm_instance
 
@@ -78,7 +79,7 @@ def _get_llm() -> DeepSeekChatOpenAI:
 class ChatTestAgentGraph(RetrievalMixin, GenerationMixin):
     """智能测试助手——LangGraph 节点方法的容器类
 
-    Phase A 节点 + 核心工具方法（本文件）
+    Excel 计划生成 + 核心工具方法（本文件）
     Phase B 检索节点 → RetrievalMixin (retrievers.py)
     Phase C PY/YAML 生成节点 → GenerationMixin (generators.py)
     """
@@ -97,77 +98,6 @@ class ChatTestAgentGraph(RetrievalMixin, GenerationMixin):
 
     # ==================== 图内节点方法 ====================
 
-    def _retrieve_node(self, state: State):
-        """检索知识库"""
-        # 新运行开始，重置日志累积器
-        self._run_data = {}
-        self._run_timestamp = None
-
-        logger.info("🔍 [节点] 正在调用外部工具检索...")
-        try:
-            context = self.dual_chroma.search_context(
-                query=state["user_input"],
-                k=config.RETRIEVAL_K,
-            )
-        except Exception as e:
-            logger.error("ChromaDB 检索失败: %s", e, exc_info=True)
-            context = f"【向量库异常】{e}，请检查 Ollama 服务状态后重试"
-        self._log_node_output("retrieve", {"context": context})
-        return {"context": context}
-
-    def _parse_api_node(self, state: State):
-        """分析接口定义"""
-        logger.info("\n正在分析文档，提取接口定义...")
-
-        prompt = self.prompt_factory.parse_api_node()
-        result = self._invoke_structured(
-            prompt, ApiDefinitionList, method="json_mode",
-            content=state["context"],
-            user_context=state["original_input"],
-        )
-
-        # json_mode 有时会返回 [{...}] 而非 {"apis": [{...}]}
-        if isinstance(result, list):
-            result = ApiDefinitionList(apis=result)
-        api_list = result.apis
-        if isinstance(api_list, list):
-            logger.info(f"   🛠️ 成功提取到 {len(api_list)} 个接口:")
-            for api in api_list:
-                logger.info(f"      - {api.name}: {api.url}")
-        else:
-            logger.info(f"   ⚠️ 提取结果异常: {result}")
-            api_list = []
-
-        self._log_node_output("parse_api", {"api_definition_list": api_list})
-        return {"api_definition_list": api_list}
-
-    def _analyze_scenarios_node(self, state: State):
-        """场景分析（thinking 节点）：输出自由文本分析报告供 format 节点使用。"""
-        logger.info("\n🧠 正在分析测试场景（深度思考）...")
-        prompt = self.prompt_factory.analyze_scenarios()
-        all_apis_dict = [api.model_dump() for api in state["api_definition_list"]]
-        if not all_apis_dict:
-            logger.warning("接口列表为空，场景分析将无内容")
-        all_apis_json = json.dumps(all_apis_dict, indent=2, ensure_ascii=False)
-
-        # 显式控制 thinking 开关（bind 方式，invoke 的 **kwargs 会被 LangChain 路由到 RunnableConfig）
-        llm_kwargs = {}
-        if config.ENABLE_THINKING:
-            llm_kwargs["extra_body"] = {"thinking": {"type": "enabled"}}
-        else:
-            llm_kwargs["extra_body"] = {"thinking": {"type": "disabled"}}
-        bound_llm = self.llm.bind(**llm_kwargs)
-        result = bound_llm.invoke(
-            prompt.format_messages(
-                all_apis_info=all_apis_json,
-                user_context=state["original_input"],
-            ),
-        )
-        analysis = result.content if hasattr(result, "content") else str(result)
-        logger.info(f"   => 场景分析完成（{len(analysis)} 字符）")
-        self._log_node_output("analyze_scenarios", {"scenario_analysis": analysis[:200]})
-        return {"scenario_analysis": analysis, "all_apis_json": all_apis_json}
-
     def _generate_excel_plan_node(self, state: State):
         """生成 Excel 测试计划 V2（双 Sheet：测试计划 + 共享前置）。"""
         logger.info("\n📊 正在生成 Excel 测试计划...")
@@ -177,29 +107,29 @@ class ChatTestAgentGraph(RetrievalMixin, GenerationMixin):
         from prompts.response_model import ApiDefinition
 
         prompt = self.prompt_factory.generate_excel_plan_node()
-        api_list = state.get("api_definition_list")
-        if api_list is None:
-            api_list = [
-                ApiDefinition(
-                    name=d.get("name", "?"), url=d.get("url", ""),
-                    method=d.get("method", "GET"), description=d.get("description", ""),
-                    parameters=d.get("parameters", {}), returns=d.get("returns", {}),
-                )
-                for d in (state.get("api_definitions") or [])
-            ]
+        api_list = [
+            ApiDefinition(
+                name=d.get("name", "?"), url=d.get("url", ""),
+                method=d.get("method", "GET"), description=d.get("description", ""),
+                parameters=d.get("parameters", {}), returns=d.get("returns", {}),
+            )
+            for d in (state.get("api_definitions") or [])
+        ]
         all_apis_dict = [api.model_dump() for api in api_list]
-        all_apis_json = state.get("all_apis_json")
-        if not all_apis_json:
-            all_apis_json = json.dumps(all_apis_dict, indent=2, ensure_ascii=False)
+        all_apis_json = json.dumps(all_apis_dict, indent=2, ensure_ascii=False)
         import agent_components.module_tree as mt
         from database import get_session_ctx
         with get_session_ctx() as session:
             tree = mt.get_tree(session)
         module_tree_json = json.dumps(tree, indent=2, ensure_ascii=False)
-        test_analysis = state.get("test_point_analysis") or state.get("scenario_analysis") or "（无）"
+        test_analysis = state.get("test_point_analysis") or "（无）"
+        # 三段落拆分：分析报告 / 共享前置 / 测试用例，各自独立注入 prompt
+        _sections = self._split_thinking_sections(test_analysis)
         prompt_vars = {
             "module_tree": module_tree_json,
-            "test_analysis": test_analysis,
+            "analysis_section": _sections["analysis"],
+            "shared_pre_section": _sections["preconditions"],
+            "cases_section": _sections["cases"],
             "all_apis_info": all_apis_json,
             "user_context": state["original_input"],
         }
@@ -210,27 +140,47 @@ class ChatTestAgentGraph(RetrievalMixin, GenerationMixin):
         all_confirmed: list = []
         all_shared_pres: list = []  # 首轮共享前置，重试时复用
         failed_ids: set = set()  # 失败行 TC ID 集合，重试时只接受这些 ID 的修复
+        _gen_attempt = 1          # 全量生成次数（含质量不达标重试）
+        _gen_warning = ""         # 质量不达标时的警告信息
 
         for attempt in range(config.EXCEL_REPAIR_ATTEMPTS):
-            if attempt == 0:
+            if attempt == 0 or _gen_warning:
+                # === 全量生成（首轮 / 质量不达标重试） ===
+                _vars = dict(prompt_vars)
+                _vars["gen_warning"] = _gen_warning
+                _gen_warning = ""  # 只用一次
                 plan = self._invoke_structured(prompt, ExcelPlanV2,
-                    method="json_mode", **prompt_vars)
+                    method="json_mode", temperature=0.4,
+                    log_label="generate_excel_plan_RAW", **_vars)
                 if isinstance(plan, list):
                     plan = ExcelPlanV2(shared_preconditions=[], test_cases=plan)
                 all_shared_pres = plan.shared_preconditions
 
                 # 首轮校验全部用例
                 pre_ids = {p.id for p in plan.shared_preconditions}
+                _missing_pres_in_plan = False
+                if not pre_ids and "## 共享前置" in test_analysis:
+                    _missing_pres_in_plan = True
                 _new_failed: list = []
+                seen_ids: set = set()
+                all_confirmed = []
                 for i, tc in enumerate(plan.test_cases, 1):
                     errs = []
+                    if tc.id in seen_ids:
+                        continue
                     for fld, lbl in [("id", "编号"), ("story", "子模块"), ("title", "标题"),
                                      ("steps", "步骤"), ("expected", "预期")]:
                         if not getattr(tc, fld, ""):
                             errs.append(f"{lbl}为空")
                     for pid in tc.preconditions:
                         if pid not in pre_ids:
-                            errs.append(f"引用前置 {pid} 不存在")
+                            if _missing_pres_in_plan:
+                                errs.append(
+                                    f"引用前置 {pid} 不存在——测试分析报告中已列出 {pid} 的定义，"
+                                    "但 shared_preconditions 为空。请将 {pid} 的步骤和预期添加到 "
+                                    "shared_preconditions 数组中，禁止删除用例的 preconditions 引用")
+                            else:
+                                errs.append(f"引用前置 {pid} 不存在")
                     if tc.steps and tc.expected:
                         ns = tc.steps.count("\n") + 1
                         ne = tc.expected.count("\n") + 1
@@ -240,18 +190,46 @@ class ChatTestAgentGraph(RetrievalMixin, GenerationMixin):
                         _new_failed.append((i, tc.model_dump(), errs))
                     else:
                         all_confirmed.append(tc)
+                        seen_ids.add(tc.id)
+
+                # 质量门禁：首轮通过率 < 50% 时重新全量生成（非修复）
+                n_total = len(plan.test_cases)
+                n_pass = len(all_confirmed)
+                if n_total > 0 and n_pass < n_total / 2 and _gen_attempt < 3:
+                    _gen_attempt += 1
+                    logger.warning(
+                        f"   ⚠️ 质量门禁：首轮通过率 {n_pass}/{n_total} < 50%，"
+                        f"触发第 {_gen_attempt} 次全量重新生成"
+                    )
+                    _gen_warning = (
+                        f"⚠️ 【系统警告：生成质量未达标，触发强制重试】\n"
+                        f"这是你的第 {_gen_attempt} 次生成尝试。上一轮 {n_total} 条用例中仅有 {n_pass} 条通过校验，"
+                        f"通过率 {n_pass}/{n_total}，未达到 100% 的格式要求。\n"
+                        "所有用例的步骤与预期必须 100% 精确对齐，不允许任何不对齐的情况。\n\n"
+                        "在本次生成中，你必须：\n"
+                        "1. 严格回顾并遵守上述所有格式规则，绝对不要偏离。\n"
+                        "2. 仔细检查步骤（Steps）和预期（Expected）的数量，必须精确一一对应。\n"
+                        "3. 参考上方提供的 ✅ 正确示例 和 ❌ 错误示例 进行自我校验。\n"
+                    )
+                    failed_details = []
+                    continue
+                if n_total > 0 and n_pass < n_total / 2 and _gen_attempt >= 3:
+                    raise RuntimeError(
+                        f"Excel 生成质量不达标：连续 {_gen_attempt} 次全量生成通过率 < 50%"
+                        f"（本次 {n_pass}/{n_total}），已终止"
+                    )
 
                 # 记录失败行 ID（重试时只有匹配这些 ID 的修复才被接受）
                 failed_ids = {f[1].get("id", "") for f in _new_failed}
                 failed_details = _new_failed
                 logger.warning(
-                    f"   ⚠️ 校验: {len(all_confirmed)} 用例通过, "
-                    f"{len(failed_details)} 失败 (第1次)"
+                    f"   ⚠️ 校验: {n_pass} 用例通过, "
+                    f"{len(failed_details)} 失败 (第{_gen_attempt}次)"
                 )
                 if not failed_details:
                     break
             else:
-                # 重试：LLM 只返回失败行的修复版
+                # 重试：LLM 获得完整上下文修复，代码侧根据 failed_ids 裁剪输出
                 attempt_label = f"第{attempt+1}次重试"
                 failed_tc_list = []
                 for f_idx, f_dict, f_errs in failed_details:
@@ -264,15 +242,13 @@ class ChatTestAgentGraph(RetrievalMixin, GenerationMixin):
                         f"  错误: {'; '.join(f_errs)}"
                     )
                 failed_tc_text = "\n---\n".join(failed_tc_list)
-                # 把必须保持不变的 TC ID 列表写入 prompt
                 repair_prompt = repair_excel_plan_prompt()
-                failed_ids_str = ", ".join(sorted(failed_ids))
-
                 plan = self._invoke_structured(repair_prompt, ExcelPlanV2,
                     method="json_mode",
-                    original_test_analysis=test_analysis,
                     failed_test_cases=failed_tc_text,
-                    failed_ids=failed_ids_str,
+                    analysis_section=_sections["analysis"],
+
+                    cases_section=_sections["cases"],
                 )
                 if isinstance(plan, list):
                     plan = ExcelPlanV2(shared_preconditions=[], test_cases=plan)
@@ -284,11 +260,22 @@ class ChatTestAgentGraph(RetrievalMixin, GenerationMixin):
 
                 _new_failed = []
                 fixed_ids = set()
+                _already_confirmed = {tc.id for tc in all_confirmed}
+                _seen_in_retry = set()  # 防止同一批次内 LLM 输出重复 TC ID
                 for tc in plan.test_cases:
                     # 拒绝不在失败 ID 集合中的行（LLM 幻觉出新的用例）
                     if tc.id not in failed_ids:
                         logger.warning(f"   ⚠️ 重试返回了不在失败列表中的 TC {tc.id}，已丢弃")
                         continue
+                    # 拒绝重复输出已通过校验的用例
+                    if tc.id in _already_confirmed:
+                        logger.warning(f"   ⚠️ 重试返回了已通过的 TC {tc.id}，已丢弃")
+                        continue
+                    # 拒绝同一批次内的重复（LLM 在单次输出中生成多个相同 ID）
+                    if tc.id in _seen_in_retry:
+                        logger.warning(f"   ⚠️ 重试批次内重复 TC {tc.id}，已丢弃")
+                        continue
+                    _seen_in_retry.add(tc.id)
                     errs = []
                     for fld, lbl in [("id", "编号"), ("story", "子模块"), ("title", "标题"),
                                      ("steps", "步骤"), ("expected", "预期")]:
@@ -296,7 +283,9 @@ class ChatTestAgentGraph(RetrievalMixin, GenerationMixin):
                             errs.append(f"{lbl}为空")
                     for pid in tc.preconditions:
                         if pid not in pre_ids_all:
-                            errs.append(f"引用前置 {pid} 不存在")
+                            errs.append(
+                                f"引用前置 {pid} 不存在。请将 {pid} 的定义（步骤和预期结果）"
+                                "添加到 shared_preconditions 数组中，禁止删除用例的 preconditions 引用")
                     if tc.steps and tc.expected:
                         ns = tc.steps.count("\n") + 1
                         ne = tc.expected.count("\n") + 1
@@ -315,6 +304,13 @@ class ChatTestAgentGraph(RetrievalMixin, GenerationMixin):
                     if f_dict.get("id", "") not in fixed_ids
                 ]
                 failed_details = _still_failed + _new_failed
+                # 去重：同一 ID 在旧版和新版同时存在时保留最新版
+                _seen_ids = {}
+                for _item in failed_details:
+                    _seen_ids[_item[1].get("id", "")] = _item
+                if len(_seen_ids) < len(failed_details):
+                    logger.warning(f"   ⚠️ 修复轮去重: {len(failed_details)} → {len(_seen_ids)}")
+                failed_details = list(_seen_ids.values())
                 logger.warning(
                     f"   ⚠️ 校验: {len(all_confirmed)} 用例通过（本次修复 {len(plan.test_cases)} 行, "
                     f"接受 {len(fixed_ids)}, 仍失败 {len(failed_details)}）, "
@@ -325,7 +321,7 @@ class ChatTestAgentGraph(RetrievalMixin, GenerationMixin):
 
         # 最终校验 + 引用完整性
         if failed_details:
-            pre_ids = {p.id for p in plan.shared_preconditions} if plan else set()
+            pre_ids = {p.id for p in all_shared_pres}
             valid_cases = [tc for tc in all_confirmed]
             for f_idx, f_dict, f_errs in failed_details:
                 orphan = [p for p in (f_dict.get("preconditions") or []) if p not in pre_ids]
@@ -341,6 +337,22 @@ class ChatTestAgentGraph(RetrievalMixin, GenerationMixin):
                 ))
         else:
             valid_cases = all_confirmed
+
+        # === 最终安全阀：valid_cases 按 ID 去重（防御多路径聚合的重复） ===
+        _seen_vc = set()
+        _deduped = []
+        _dup_count = 0
+        for tc in valid_cases:
+            if tc.id in _seen_vc:
+                _dup_count += 1
+                continue
+            _seen_vc.add(tc.id)
+            _deduped.append(tc)
+        if _dup_count:
+            logger.warning(
+                f"   ⚠️ 最终去重安全阀触发: 移除 {_dup_count} 条重复用例 "
+                f"（{len(valid_cases)} → {len(_deduped)}）")
+        valid_cases = _deduped
 
         if failed_details:
             from observability import log_thinking
@@ -408,8 +420,8 @@ class ChatTestAgentGraph(RetrievalMixin, GenerationMixin):
         excel_path = os.path.join(output_dir, "test_plan.xlsx")
 
         # Phase B 资源冲突消解（纯代码，LLM 输出 → Excel 写入之间）
-        if plan is not None and plan.shared_preconditions:
-            self._resolve_resource_conflicts(plan)
+        if all_shared_pres:
+            self._resolve_resource_conflicts(plan, all_shared_pres)
 
         # 写双 Sheet
         n_confirmed = len(valid_cases)
@@ -445,7 +457,26 @@ class ChatTestAgentGraph(RetrievalMixin, GenerationMixin):
         for tc in valid_cases:
             for pid in tc.preconditions:
                 pre_to_cases.setdefault(pid, []).append(tc.id)
-        for i, pre in enumerate((plan.shared_preconditions if plan else []), 2):
+        # 去重: PRE 关联用例列表按首次出现顺序去重
+        for pid in pre_to_cases:
+            _seen_linked = set()
+            _deduped_linked = []
+            for cid in pre_to_cases[pid]:
+                if cid not in _seen_linked:
+                    _seen_linked.add(cid)
+                    _deduped_linked.append(cid)
+            pre_to_cases[pid] = _deduped_linked
+        # 去重: shared_preconditions 按 ID 去重
+        _seen_pre = set()
+        _deduped_pres = []
+        for pre in all_shared_pres:
+            if pre.id not in _seen_pre:
+                _seen_pre.add(pre.id)
+                _deduped_pres.append(pre)
+        if len(_deduped_pres) < len(all_shared_pres):
+            logger.warning(f"   ⚠️ 共享前置去重: {len(all_shared_pres)} → {len(_deduped_pres)}")
+        all_shared_pres = _deduped_pres
+        for i, pre in enumerate(all_shared_pres, 2):
             linked = ", ".join(pre_to_cases.get(pre.id, []))
             vals = [pre.id, pre.name, pre.steps, pre.expected, linked or "（无引用）"]
             for col, val in enumerate(vals, 1):
@@ -458,8 +489,7 @@ class ChatTestAgentGraph(RetrievalMixin, GenerationMixin):
         wb.save(excel_path); wb.close()
 
         # 接口定义快照与 Excel 同目录落盘 —— Phase C 生成 YAML 的数据来源。
-        # 规则 M8：接口定义靠产物传递（快照随计划走），禁止依赖内存态跨阶段交接；
-        # 此前 api_definition_list 在 _resume_workflow_bg 交接时丢失，导致 Phase C 空定义盲写。
+        # 规则 M8：接口定义靠产物传递（快照随计划走），禁止依赖内存态跨阶段交接。
         api_defs_path = os.path.join(output_dir, "api_defs.json")
         try:
             with open(api_defs_path, "w", encoding="utf-8") as f:
@@ -471,11 +501,14 @@ class ChatTestAgentGraph(RetrievalMixin, GenerationMixin):
 
         fail_warn = f"（{len(failed_details)} 行未通过校验，需人工审查）" if failed_details else ""
         n_modules = len(set(tc.story for tc in valid_cases))
-        n_pres = len(plan.shared_preconditions) if plan else 0
+        n_pres = len(all_shared_pres)
         logger.info(f"   📄 Excel 已保存: {excel_path} ({n_confirmed}条/{n_modules}模块, {n_pres}共享前置){fail_warn}")
 
         self._log_node_output("generate_excel_plan",
-                              {"excel_plan": plan, "excel_path": excel_path, "output_dir": output_dir})
+                              {"excel_plan": {
+                                  "shared_preconditions": [p.model_dump() for p in all_shared_pres],
+                                  "test_cases": [tc.model_dump() for tc in valid_cases],
+                              }, "excel_path": excel_path, "output_dir": output_dir})
         file_ok, file_errors = validate_excel_file(excel_path)
         if not file_ok:
             logger.warning(f"   ⚠️ 文件校验失败: {len(file_errors)} 个错误")
@@ -534,10 +567,12 @@ class ChatTestAgentGraph(RetrievalMixin, GenerationMixin):
                 return pre
         return None
 
-    def _resolve_resource_conflicts(self, plan: ExcelPlanV2) -> None:
+    def _resolve_resource_conflicts(self, plan: ExcelPlanV2,
+                                     shared_pres: list = None) -> None:
         """资源冲突消解：检测同一 PRE 被多个正向写操作用例引用时，克隆隔离。
 
         纯代码节点，不调用 LLM。嵌入在 _generate_excel_plan_node 内部，
+        shared_pres 为初始轮保存的共享前置列表（修复轮 plan 可能为空）。
         LLM 生成 → 校验 → 消解 → 写 Excel 的流程中执行。
 
         算法:
@@ -572,7 +607,8 @@ class ChatTestAgentGraph(RetrievalMixin, GenerationMixin):
         for pre_id, ref_list in pre_refs.items():
             if len(ref_list) <= 1:
                 continue
-            original = self._find_pre(plan, pre_id)
+            _pre_list = shared_pres if shared_pres else plan.shared_preconditions
+            original = next((p for p in _pre_list if p.id == pre_id), None)
             if original is None:
                 logger.warning("消解器: PRE %s 被 %d 个用例引用但未在 shared_preconditions 中找到，跳过",
                                pre_id, len(ref_list))
@@ -580,7 +616,7 @@ class ChatTestAgentGraph(RetrievalMixin, GenerationMixin):
             # 第一个用例保持引用原始 PRE，其余克隆隔离
             for tc in ref_list[1:]:
                 clone_id = f"{pre_id}_isolated_{tc.id}"
-                plan.shared_preconditions.append(SharedPrecondition(
+                _pre_list.append(SharedPrecondition(
                     id=clone_id,
                     name=f"{original.name}（{tc.id}专用）",
                     steps=original.steps,
@@ -599,6 +635,37 @@ class ChatTestAgentGraph(RetrievalMixin, GenerationMixin):
                         isolation_count)
 
     # ==================== 日志辅助方法 ====================
+
+    @staticmethod
+    def _split_thinking_sections(text: str) -> dict:
+        """将 thinking 分析输出按三个段落拆分为独立输入。
+
+        段落标记（thinking prompt 约定的输出模板）:
+          ## 测试场景分析 → analysis
+          ## 共享前置     → preconditions
+          ## 测试用例     → cases
+        """
+        markers = [
+            ("## 测试场景分析", "analysis"),
+            ("## 共享前置", "preconditions"),
+            ("## 测试用例", "cases"),
+        ]
+        result = {"analysis": "（无）", "preconditions": "（无）", "cases": "（无）"}
+        for i, (marker, key) in enumerate(markers):
+            if marker not in text:
+                continue
+            parts = text.split(marker, 1)
+            if len(parts) < 2:
+                continue
+            rest = parts[1]
+            # 截取到下一个段落标记之前
+            end = len(rest)
+            for j in range(i + 1, len(markers)):
+                pos = rest.find(markers[j][0])
+                if pos != -1 and pos < end:
+                    end = pos
+            result[key] = marker + "\n" + rest[:end].strip()
+        return result
 
     @staticmethod
     def _serialize_for_log(obj):
@@ -643,7 +710,7 @@ class ChatTestAgentGraph(RetrievalMixin, GenerationMixin):
             f"{self._run_timestamp[9:11]}:{self._run_timestamp[11:13]}:{self._run_timestamp[13:15]}",
             "",
         ]
-        node_order = ["retrieve", "parse_api", "analyze_scenarios", "generate_excel_plan",
+        node_order = ["generate_excel_plan",
                        "analyze_test_points_raw", "format_test_points",
                        "generate_py_file", "generate_all_yamls"]
         for nname in node_order:
@@ -652,26 +719,12 @@ class ChatTestAgentGraph(RetrievalMixin, GenerationMixin):
             data = self._run_data[nname]
             md_lines.append(f"## {nname}")
 
-            if nname == "retrieve":
-                ctx = data.get("context", "")
-                summary = f"检索到 {len(ctx)} 字符" if ctx and ctx != "未检索到知识库" else "未检索到知识库"
-                md_lines.append(f"**摘要**: {summary}")
-                md_lines.append("```")
-                md_lines.append(f"{ctx[:3000]}{'…(截断)' if len(ctx) > 3000 else ''}")
-                md_lines.append("```")
-            elif nname == "parse_api":
-                apis = data.get("api_definition_list", [])
-                md_lines.append(f"**摘要**: 提取了 {len(apis)} 个接口\n")
-                for i, api in enumerate(apis, 1):
-                    md_lines.append(f"### {i}. {api.get('name', '未命名')}")
-                    md_lines.append(f"- **路径**: `{api.get('url', '')}`")
-                    md_lines.append(f"- **方法**: {api.get('method', '')}")
-                    ret = api.get("returns", {})
-                    md_lines.append(f"- **返回字段**: {json.dumps(ret, ensure_ascii=False) if ret else '未提取'}")
-            elif nname == "generate_excel_plan":
+            if nname == "generate_excel_plan":
                 plan = data.get("excel_plan", {})
-                rows = plan.get("rows", []) if isinstance(plan, dict) else []
-                modules = len(set(r.get("module_name", "") for r in rows)) if rows else 0
+                # 兼容 ExcelPlanV2 (test_cases) 和 ExcelPlan (rows) 两种模型
+                rows = (plan.get("test_cases", []) or plan.get("rows", [])
+                        if isinstance(plan, dict) else [])
+                modules = len(set(r.get("story", r.get("module_name", "")) for r in rows)) if rows else 0
                 md_lines.append(f"**摘要**: {len(rows)} 条用例，{modules} 个模块")
                 md_lines.append(f"- **文件**: {data.get('excel_path', '')}")
                 if rows:
@@ -754,6 +807,8 @@ class ChatTestAgentGraph(RetrievalMixin, GenerationMixin):
                            max_retries: int = config.MAX_RETRIES,
                            method: str = "function_calling",
                            thinking: bool = False,
+                           temperature: float | None = None,
+                           log_label: str = "",
                            **kwargs) -> BaseModel:
         """调用 LLM 并校验结构化输出，失败时自动重试。
 
@@ -763,6 +818,8 @@ class ChatTestAgentGraph(RetrievalMixin, GenerationMixin):
             max_retries: 最大重试次数（默认 2）
             method: 结构化输出方法，可选 "function_calling" / "json_mode" / "json_schema"
             thinking: 是否使用深度思考模式（由 METHOD_FEATURES 判定兼容性）
+            temperature: 温度参数，None 使用全局默认值
+            log_label: 不为空时将原始输出写入 thinking_trace.log
             **kwargs: prompt 模板变量
         """
         # 根据 method 特性配置 thinking 开关
@@ -779,25 +836,32 @@ class ChatTestAgentGraph(RetrievalMixin, GenerationMixin):
             llm_kwargs["extra_body"] = {"thinking": {"type": "enabled"}}
 
         last_error = None
+        # 按需绑定 temperature
+        _llm = self.llm.bind(temperature=temperature) if temperature is not None else self.llm
         # chain 在重试间不变，只需构建一次
-        chain = prompt | self.llm.with_structured_output(
+        chain = prompt | _llm.with_structured_output(
             model_class, method=method, **llm_kwargs
         )
 
         for attempt in range(1 + max_retries):
             try:
                 result = chain.invoke(kwargs)
+                if result is None:
+                    raise ValueError("LLM 返回了空结果（None）")
+                if log_label:
+                    from observability import log_thinking
+                    _raw = result.model_dump() if hasattr(result, "model_dump") else str(result)
+                    log_thinking(log_label, "", f"shared_preconditions={len(_raw.get('shared_preconditions',[]))}条, test_cases={len(_raw.get('test_cases',[]))}条\n{json.dumps(_raw, indent=2, ensure_ascii=False)[:8000]}",
+                                 prompt_label=log_label)
                 if isinstance(result, dict):
                     result = model_class(**result)
                 return result
-            except (ValidationError, OutputParserException,
-                    openai.BadRequestError,
-                    openai.APITimeoutError, openai.RateLimitError,
-                    openai.InternalServerError) as e:
+            except Exception as e:
                 last_error = e
                 if attempt < max_retries:
-                    logger.warning("输出校验失败，第 %d 次重试: %s", attempt + 1, e, exc_info=True)
+                    logger.warning("输出校验失败，第 %d 次重试 (%s): %s",
+                                   attempt + 1, type(e).__name__, e, exc_info=True)
 
         raise RuntimeError(
-            f"LLM 结构化输出校验失败（已重试 {max_retries} 次）: {last_error}"
+            f"LLM 结构化输出校验失败（本调用内重试 {max_retries} 次，外层修复轮独立计数）: {last_error}"
         )

@@ -9,37 +9,6 @@ from langchain_core.prompts import ChatPromptTemplate
 
 class PromptFactory:
 
-    def parse_api_node(self) -> ChatPromptTemplate:
-        """
-        分析接口
-        """
-        return ChatPromptTemplate.from_messages([
-        ("system",
-         "你是一个资深API架构师。请仔细阅读文档内容，提取其中定义的所有API接口信息。\n"
-         "### 提取规则\n"
-         "1. **全面性**：提取文档中出现的每一个接口，不要遗漏。\n"
-         "2. **结构化**：严格按照 `ApiDefinition` 的字段要求提取（name, url, method, description, parameters, returns）。\n"
-         "3. **准确性**：\n"
-         "   - `method` 必须是大写的 GET, POST, PUT, DELETE 等。\n"
-         "   - `url` **只提取路径部分，不含域名和基础地址**（测试框架会自动拼接 base_url）。\n"
-         "     正确示例: `/api/login`、`/park-access-parking-rule-new/mock/delAllForMock`\n"
-         "     错误示例: `http://localhost:8000/api/login`、`https://dev.damaiiot.com:40443/api/login`\n"
-         "   - `parameters` 提取关键的请求参数结构，如果文档未提及可留空或填 {{}}。\n"
-         "   - **`returns` 提取接口响应的返回字段结构**，包括字段名、类型、说明。\n"
-         "     ⚠️ returns 必须是 JSON 对象（dict），即使响应是纯数组也要用 {{\"data\": [...]}} 包装，绝不能直接输出数组。\n"
-         "     例如响应为 {{\"success\": true, \"code\": 0, \"data\": {{...}}}} 则 returns = {{\"success\": \"boolean\", \"code\": \"integer\", \"data\": \"object\"}}\n"
-         "4. **数据清洗（重要）**：提取 `description` 时，**必须去除所有的换行符**，将其合并为一行文本，使用空格或标点分隔。\n"
-         "5. **输出格式**：必须输出一个 JSON **对象**，对象中包含 `apis` 键，值为接口列表。\n"
-         '   ✅ 正确格式: {{"apis": [{{"name": "接口名", "url": "路径", "method": "POST", "description": "描述", "parameters": {{}}, "returns": {{}}}}]}}\n'
-         "   注意：最外层必须是 `{{...}}` 对象，不是 `[...]` 数组。"
-        ),
-        ("human",
-         "### 用户需求:\n{user_context}\n\n"
-         "### 文档内容:\n{content}\n\n"
-         "请结合用户需求，开始提取所有接口定义："
-        )
-    ])
-
     def generate_data_node(self) -> ChatPromptTemplate:
         """
         生成结构化测试数据（由 function_calling 约束输出结构，无需 prompt 内嵌 Schema）
@@ -92,34 +61,14 @@ class PromptFactory:
          "请输出测试数据："
         )
     ])
-    def analyze_scenarios(self) -> ChatPromptTemplate:
-        """
-        Phase A — 场景分析（thinking 节点用）：输出自由文本分析报告。
-        """
-        return ChatPromptTemplate.from_messages([
-            ("system",
-             "你是高级测试设计专家。根据【接口定义】和【用户意图】，分析测试场景。\n\n"
-             "请分析以下方面（自由文本输出，不要输出 JSON）：\n"
-             "1. **场景划分**：根据接口功能划分测试场景，列出每个场景的标题和包含的接口\n"
-             "2. **用例设计思路**：每个场景需要哪些测试用例（边界值、异常、主流程）\n"
-             "3. **数据依赖**：接口间的数据传递关系和依赖顺序\n"
-             "4. **前置条件**：需要哪些前置数据准备\n\n"
-             "分析要全面、详细，后续将基于你的分析生成 Excel 测试计划。"
-            ),
-            ("human",
-             "### 接口定义列表:\n{all_apis_info}\n\n"
-             "### 用户测试意图:\n{user_context}\n\n"
-             "请分析以上接口的测试场景："
-            )
-        ])
-
     def generate_excel_plan_node(self) -> ChatPromptTemplate:
         """
         生成 Excel 测试计划 V2（双 Sheet，format 节点用，thinking off + json_mode）。
         """
         return ChatPromptTemplate.from_messages([
         ("system",
-         "你是数据转换专家。根据【测试分析报告】，提取所有共享前置和测试用例，输出严格 JSON。\n\n"
+         "你是数据转换专家。根据下方【共享前置】和【测试用例描述】，"
+         "照此填入 shared_preconditions 和 test_cases，输出严格 JSON。\n\n"
          "### 输出 JSON 格式\n"
          "必须输出以下结构的 JSON 对象：\n\n"
          "  {{\n"
@@ -149,7 +98,7 @@ class PromptFactory:
          '    "file_name": "test_plan.xlsx"\n'
          '  }}\n\n'
          "### 字段说明\n"
-         "**shared_preconditions**：id/name/steps/expected，从测试分析报告中直接提取\n"
+         "**shared_preconditions**：id/name/steps/expected，直接复制下方【共享前置】中的内容\n"
          "**test_cases**：\n"
          "- id: TC 编号\n"
          "- story: 子模块名（对应 @allure.story），从文档提取的模块名，如「设施管理」\n"
@@ -164,17 +113,20 @@ class PromptFactory:
          "- steps 和 expected 必须是**字符串**（\\n 分隔），禁止输出数组/列表\n"
          "- steps 和 expected 条数必须一致\n\n"
          "### 规则\n"
-         "1. 每个 PRE-xxx → 一个 shared_preconditions 对象\n"
+         "1. 每个 PRE-xxx → 一个 shared_preconditions 对象，直接复制不修改\n"
          "2. 每个 TC-xxx → 一个 test_cases 对象\n"
          "3. preconditions 的 PRE 必须存在于 shared_preconditions\n"
          "4. 禁止 Markdown、禁止解释，只输出 JSON"
         ),
         ("human",
+         "{gen_warning}"
+         "### 测试场景分析（参考，理解模块间关系和数据流）:\n{analysis_section}\n\n"
+         "### 共享前置（照此填入 shared_preconditions，不可遗漏任何一条）:\n{shared_pre_section}\n\n"
+         "### 测试用例描述（照此填入 test_cases）:\n{cases_section}\n\n"
          "### 模块树:\n{module_tree}\n\n"
-         "### 测试分析报告:\n{test_analysis}\n\n"
          "### 接口定义列表:\n{all_apis_info}\n\n"
          "### 用户测试意图:\n{user_context}\n\n"
-         "请提取所有共享前置和测试用例，输出 JSON："
+         "输出 JSON："
         )
     ])
 
@@ -186,42 +138,51 @@ class PromptFactory:
             ("system",
              "你是一位资深测试架构师，专注于**接口自动化测试用例设计**。\n\n"
              "根据【产品文档】和【接口定义】，设计详细的测试用例，按以下**固定模板**输出。\n\n"
-             "### 输出模板（必须严格遵守）\n\n"
+             "### 输出模板（必须严格遵守，三个段落缺一不可）\n\n"
+             "## 测试场景分析\n"
+             "按模块逐一分析：模块功能概述、涉及接口、测试策略（正向/反向/边界），"
+             "以及该模块与其他模块的数据依赖关系。\n\n"
              "## 共享前置\n"
              "列出所有模块共用的数据准备步骤。每个前置使用**全局唯一编号**（PRE-001 开始递增）。\n"
-             "格式：\n"
-             "- PRE-001: 前置名称（模块：所属模块名）\n"
-             "    步骤: 1.具体操作步骤1\n2.具体操作步骤2\n"
-             "    预期: 操作完成后的预期状态\n"
-             "示例：\n"
-             "- PRE-001: 已创建测试跑步机（模块：设施管理）\n"
-             "    步骤: 1.调用新增设施接口，名称\"测试跑步机\"\n2.校验创建成功\n"
-             "    预期: 设施列表中出现\"测试跑步机\"\n\n"
+             "- PRE-xxx: 前置名称（模块：所属模块名）\n"
+             "    步骤: 1.具体操作步骤1\\n2.具体操作步骤2\n"
+             "    预期: 操作完成后的预期状态\n\n"
              "## 测试用例\n"
              "每个用例一个条目，使用**全局唯一编号**（TC-001 开始递增）。\n"
-             "格式：\n"
              "- TC-xxx: 用例标题\n"
-             "    子模块: 从文档中提取的模块名（如「设施管理」，不是功能点「设施添加」）。嵌套时用 A-a 格式\n"
+             "    子模块: 从文档中提取的模块名（如「设施管理」，不是功能点「设施添加」）\n"
              "    前置: PRE-xxx 或 无\n"
-             "    步骤: 1.操作步骤1\n2.操作步骤2\n"
-             "    预期: 1.[eq]预期结果1\n2.[eq]预期结果2\n"
-             "示例：\n"
-             "- TC-001: 设施管理-新增设施-正向\n"
-             "    子模块: 设施管理\n"
+             "    步骤: 1.操作步骤1\\n2.操作步骤2\n"
+             "    预期: 1.[eq]预期结果1\\n2.[eq]预期结果2\n\n"
+             "### 🏆 黄金参考模板（唯一标准，严格模仿此格式）\n"
+             "<reference>\n"
+             "## 共享前置\n"
+             "- PRE-001: 已创建测试电表（模块：设备管理-电表管理）\n"
+             "    步骤: 1.调用新增电表接口，电表分类选择\"单一费率电表\"，填写必填字段\\n2.校验创建成功，获取电表 code\n"
+             "    预期: 接口返回成功，code 不为空\n"
+             "\n"
+             "## 测试用例\n"
+             "- TC-001: 电表管理-新增单一费率电表-正向\n"
+             "    子模块: 设备管理-电表管理\n"
              "    前置: 无\n"
-             "    步骤: 1.调用新增设施接口，传入名称、介绍及图片\n2.调用查询详情接口查看设施信息\n3.调用分页查询接口搜索设施\n"
-             "    预期: 1.[eq]接口返回成功，生成ID\n2.[eq]设施信息与新增一致\n3.[contains]分页列表包含该设施\n\n"
+             "    步骤: 1.调用新增电表接口，名称\"测试电表A\"\\n2.调用查询详情接口查看电表信息\\n3.调用分页查询接口搜索电表\n"
+             "    预期: 1.[eq]接口返回成功，生成ID\\n2.[eq]电表信息与新增时一致\\n3.[contains]分页列表包含\"测试电表A\"\n"
+             "</reference>\n\n"
              "### 断言关键词（预期结果中必须使用，下游按关键词生成断言数据）\n"
              "- [eq] 相等断言：验证返回值与预期完全相等，用于增删改返回的标识字段（如 success/retCode）\n"
              "- [contains] 包含断言：验证返回值包含预期内容，用于查询结果校验\n"
              "- [ne] 不相等断言：验证返回值不等于预期值，用于确认删除/变更后旧数据不存在\n"
              "- [db] 数据库断言：验证数据库中是否存在对应记录，用于数据持久化校验\n\n"
-             "### 强制规则（违反将导致用例被丢弃）\n"
-             "- PRE-xxx 从 PRE-001 开始，全局唯一，递增\n"
-             "- TC-xxx 从 TC-001 开始，全局唯一，递增\n"
+             "### ⚠️ 强制规则（违反将导致用例被丢弃）\n"
+             "- **共享前置段落绝对不能为空！** 每个测试计划至少有一条共享前置。"
+             "常见的共享前置：创建测试数据（测试电表、测试住户、测试企业）、"
+             "创建配置（结算配置、计费方案、公摊配置）。"
+             "参照 <reference> 中 PRE-001 的格式，至少输出一条。\n"
+             "- PRE-xxx 从 PRE-001 开始，全局唯一，递增。TC-xxx 同理\n"
              "- 前置字段直接引用 PRE 编号（如 PRE-001, PRE-002），禁止写「执行共享前置X」\n"
-             "- 步骤和预期必须一一对应、条数精确相等：步骤有 N 条 → 预期必须有 N 条。每个用例写完立即自查\n"
-             "- 前置引用只能是 PRE-xxx，禁止写 TC-xxx 或其他格式\n\n"
+             "- 前置引用只能是 PRE-xxx，禁止写 TC-xxx 或其他格式\n"
+             "- **严禁步骤与预期不对齐！** 严格遵守上方 <reference> 的格式：步骤有 N 条 → 预期必须有 N 条。"
+             "若步骤只有 1 条，预期绝对不能写 3 条——必须拆分步骤或合并预期。每个用例写完立即自查\n\n"
              "### 用例设计规范（必须严格遵守）\n\n"
              "**模块与功能点识别**：\n"
              "- 必须先从产品文档中识别出所有子模块和子模块下的嵌套模块\n"
