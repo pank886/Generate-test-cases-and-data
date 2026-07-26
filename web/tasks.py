@@ -278,7 +278,12 @@ async def _confirm_plan_bg(task_id: str, excel_path: str | None,
                         k=config.RETRIEVAL_K,
                     )
                     if docs:
-                        product_docs_json = _json.dumps(docs, ensure_ascii=False)
+                        # ChromaDB 返回 LangChain Document 对象，需转为 dict 才能 json.dumps
+                        product_docs_json = _json.dumps(
+                            [{"content": d.page_content, "metadata": d.metadata}
+                             for d in docs],
+                            ensure_ascii=False,
+                        )
             except Exception:
                 logger.warning("ChromaDB product_docs 检索失败，使用空文档继续", exc_info=True)
 
@@ -317,12 +322,58 @@ async def _confirm_plan_bg(task_id: str, excel_path: str | None,
         logger.info("   📄 dependency_map.json 已加载: %d 个 story",
                      len(dep_map.get("stories", [])))
 
+        # ---- Phase C Step 2: URL 预校验 ----
+        # 遍历所有 story 的 api_sequence，逐一在 api_defs 中查找（URL 归一化匹配）
+        # 注意：cross_module_dependency 中的 URL 属于外部模块，跳过校验（预期不匹配）
+        from agent_components.generators import (
+            normalize_url, build_api_index, _collect_story_urls,
+        )
+        api_defs_list = _json.loads(api_defs_json)
+        api_index = build_api_index(api_defs_list)
+        unmatched_urls: list[str] = []
+        cross_module_urls: set[str] = set()
+        total_urls = 0
+        for story in dep_map.get("stories", []):
+            # 收集 cross_module_dependency 的 URL（预期不在本模块 api_defs 中）
+            for cdep in story.get("cross_module_dependency", {}).values():
+                api = cdep.get("获取接口", cdep.get("api", ""))
+                if api:
+                    parts = api.strip().split()
+                    if len(parts) >= 2:
+                        cross_module_urls.add(f"{parts[0].upper()} {parts[1]}")
+            story_urls = _collect_story_urls(story)
+            total_urls += len(story_urls)
+            for method, url in story_urls:
+                key = (method.upper(), normalize_url(url))
+                if key not in api_index:
+                    # 区分：跨模块 URL（预期行为）vs 同模块 URL（真正的错误）
+                    unmatched_urls.append(f"{method} {url}")
+        # 过滤掉 cross_module_dependency 中的 URL（预期不匹配，不告警）
+        same_module_unmatched = [u for u in unmatched_urls if u not in cross_module_urls]
+        cross_module_unmatched = [u for u in unmatched_urls if u in cross_module_urls]
+        if cross_module_unmatched:
+            logger.info("   🔗 跨模块 URL（不在本模块 api_defs，正常）: %s",
+                        list(set(cross_module_unmatched))[:10])
+        if same_module_unmatched:
+            logger.warning("   ⚠️ %d/%d 个同模块 URL 在 api_defs 中未找到: %s",
+                           len(same_module_unmatched), total_urls, same_module_unmatched[:10])
+        if total_urls > 0 and len(same_module_unmatched) == total_urls:
+            await _update_task(task_id, status="failed",
+                               error=f"dep_map 中所有 {total_urls} 个 URL 在 api_defs 中均未找到")
+            return
+        logger.info("   🔗 URL 预校验: %d/%d 匹配（同模块），%d 跨模块",
+                     total_urls - len(unmatched_urls), total_urls, len(cross_module_unmatched))
+
+        # ---- Phase C Step 3: 完整 api_sequence 拼接 ----
+        # 代码层拼接：每条用例的 full_sequence = story_pre_api_sequence + case_api_sequences[cid]
+        # （实际拼接在 generators.py 的 _build_story_yaml_tasks 中完成）
+
         await _update_task(task_id, status="running", progress=20,
                            message="正在生成 .py 测试文件...")
 
-        # LLM 调用 → 线程池
+        # LLM 调用 → 线程池（传入 dep_map 判断 teardown 是否需要生成）
         py_result = await asyncio.to_thread(
-            _phase_b_components._generate_py_file, excel_path,
+            _phase_b_components._generate_py_file, excel_path, None, dep_map,
         )
 
         await _update_task(task_id, progress=50,
@@ -351,7 +402,7 @@ async def _confirm_plan_bg(task_id: str, excel_path: str | None,
         try:
             yaml_result = await asyncio.to_thread(
                 _phase_b_components._generate_all_yamls,
-                excel_path, api_defs_json, user_ctx,
+                excel_path, api_defs_json, user_ctx, dep_map,
             )
         finally:
             _heartbeat_stop = True
@@ -369,6 +420,12 @@ async def _confirm_plan_bg(task_id: str, excel_path: str | None,
             if yaml_result.get("failed"):
                 msg += (f"，仍失败 {yaml_result['failed']} 个"
                         f"（详见 _generation_errors.json 与 logs/thinking_trace.log）")
+        # 变量读写审计警告
+        audit_warnings = yaml_result.get("warnings", [])
+        if audit_warnings:
+            p1_count = sum(1 for w in audit_warnings if w.get("severity") == "P1")
+            msg += (f" | ⚠️ 变量审计: {len(audit_warnings)} 个警告"
+                    f"（P1={p1_count}），详见前端 warnings 字段")
 
         result = {
             "success": True,
@@ -381,6 +438,7 @@ async def _confirm_plan_bg(task_id: str, excel_path: str | None,
             "yaml_failed": yaml_result.get("failed", 0),
             "yaml_rounds": yaml_result.get("rounds", 0),
             "errors_file": yaml_result.get("errors_file"),
+            "warnings": audit_warnings,
             "excel_path": excel_path,
             "output_dir": os.path.dirname(excel_path),
         }

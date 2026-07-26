@@ -137,6 +137,12 @@ class Settings(BaseSettings):
         description="LLM 温度。0=确定性最强，1=最随机。测试用例生成建议 0.3~0.5",
     )
 
+    llm_max_tokens: int = Field(
+        default=65536, ge=1024, le=131072,
+        description="LLM API max_tokens。大 Excel 计划 JSON 输出可能超 8192 默认值导致截断，"
+                    "此处显式设置并在每次 API 调用时 bind，防止 LangChain 链式 bind() 丢失该参数",
+    )
+
     # -- 结构化输出重试 --
     max_retries: int = Field(
         default=2, ge=0, le=5,
@@ -200,6 +206,12 @@ class Settings(BaseSettings):
     yaml_repair_rounds: int = Field(
         default=1, ge=0, le=3,
         description="YAML 修复轮数。失败项集中送思考节点自查后重生成；0=不修复直接计失败",
+    )
+
+    # -- Phase C 全局熔断 --
+    yaml_failure_circuit_breaker: float = Field(
+        default=0.5, ge=0.1, le=1.0,
+        description="YAML 全量轮失败率熔断阈值。首轮失败率超过此值 → 终止并报错（防止 prompt/骨架缺陷导致批量失败、token 失控）",
     )
 
     # -- 后台任务线程池 --

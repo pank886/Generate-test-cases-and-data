@@ -1,6 +1,7 @@
 """LangGraph 各个节点方法"""
 import json
 import os
+import re
 import threading
 from collections import defaultdict
 from datetime import datetime
@@ -8,6 +9,11 @@ from typing import Optional, Type
 
 import openai
 from pydantic import BaseModel, ValidationError
+
+# Phase B 断言格式校验正则（P0-2）
+_ASSERT_OK = re.compile(r'^\d+\.\s*\[(eq|contains|ne|db)\]', re.IGNORECASE)
+_ASSERT_BAD_SPACE = re.compile(r'\[\s+(eq|contains|ne|db)\s*\]|\[\s*(eq|contains|ne|db)\s+\]')
+_ASSERT_DOUBLE = re.compile(r'\[\[|\]\]')
 
 import yaml
 from openpyxl import Workbook
@@ -71,7 +77,7 @@ def _get_llm() -> DeepSeekChatOpenAI:
                     base_url=config.LLM_BASE_URL,
                     api_key=config.LLM_API_KEY(),
                     temperature=config.LLM_TEMPERATURE,
-                    max_tokens=16384,
+                    max_tokens=65536,
                 )
     return _llm_instance
 
@@ -186,6 +192,16 @@ class ChatTestAgentGraph(RetrievalMixin, GenerationMixin):
                         ne = tc.expected.count("\n") + 1
                         if ns != ne:
                             errs.append(f"步骤({ns}条)与预期({ne}条)数量不一致")
+                        for ei, line in enumerate(tc.expected.split("\n"), 1):
+                            line_s = line.strip()
+                            if not line_s:
+                                errs.append(f"预期第{ei}条为空行")
+                            elif _ASSERT_DOUBLE.search(line_s):
+                                errs.append(f"预期第{ei}条含双层括号: {line_s[:40]}")
+                            elif _ASSERT_BAD_SPACE.search(line_s):
+                                errs.append(f"预期第{ei}条断言关键词含空格: {line_s[:40]}")
+                            elif not _ASSERT_OK.search(line_s):
+                                errs.append(f"预期第{ei}条缺少断言关键词: {line_s[:40]}")
                     if errs:
                         _new_failed.append((i, tc.model_dump(), errs))
                     else:
@@ -246,8 +262,10 @@ class ChatTestAgentGraph(RetrievalMixin, GenerationMixin):
                 plan = self._invoke_structured(repair_prompt, ExcelPlanV2,
                     method="json_mode",
                     failed_test_cases=failed_tc_text,
+                    shared_pre_section=_sections.get("preconditions", "（无）"),
+                    module_tree=module_tree_json,
+                    all_apis_info=all_apis_json,
                     analysis_section=_sections["analysis"],
-
                     cases_section=_sections["cases"],
                 )
                 if isinstance(plan, list):
@@ -291,6 +309,16 @@ class ChatTestAgentGraph(RetrievalMixin, GenerationMixin):
                         ne = tc.expected.count("\n") + 1
                         if ns != ne:
                             errs.append(f"步骤({ns}条)与预期({ne}条)数量不一致")
+                        for ei, line in enumerate(tc.expected.split("\n"), 1):
+                            line_s = line.strip()
+                            if not line_s:
+                                errs.append(f"预期第{ei}条为空行")
+                            elif _ASSERT_DOUBLE.search(line_s):
+                                errs.append(f"预期第{ei}条含双层括号: {line_s[:40]}")
+                            elif _ASSERT_BAD_SPACE.search(line_s):
+                                errs.append(f"预期第{ei}条断言关键词含空格: {line_s[:40]}")
+                            elif not _ASSERT_OK.search(line_s):
+                                errs.append(f"预期第{ei}条缺少断言关键词: {line_s[:40]}")
                     if errs:
                         _new_failed.append((0, tc.model_dump(), errs))
                     else:
@@ -420,8 +448,13 @@ class ChatTestAgentGraph(RetrievalMixin, GenerationMixin):
         excel_path = os.path.join(output_dir, "test_plan.xlsx")
 
         # Phase B 资源冲突消解（纯代码，LLM 输出 → Excel 写入之间）
+        # 使用包含全部 confirmed 用例的临时 plan，确保所有轮次的 TC 都经过消解
         if all_shared_pres:
-            self._resolve_resource_conflicts(plan, all_shared_pres)
+            _full_plan = ExcelPlanV2(
+                shared_preconditions=list(all_shared_pres),
+                test_cases=list(valid_cases),
+            )
+            self._resolve_resource_conflicts(_full_plan, all_shared_pres)
 
         # 写双 Sheet
         n_confirmed = len(valid_cases)
@@ -640,31 +673,32 @@ class ChatTestAgentGraph(RetrievalMixin, GenerationMixin):
     def _split_thinking_sections(text: str) -> dict:
         """将 thinking 分析输出按三个段落拆分为独立输入。
 
-        段落标记（thinking prompt 约定的输出模板）:
-          ## 测试场景分析 → analysis
-          ## 共享前置     → preconditions
-          ## 测试用例     → cases
+        宽松匹配：包含关键词即视为段落起始，不要求精确标题。
+        LLM 输出标题略有偏差（如「测试分析」vs「测试场景分析」）时仍能正确解析。
         """
-        markers = [
-            ("## 测试场景分析", "analysis"),
-            ("## 共享前置", "preconditions"),
-            ("## 测试用例", "cases"),
-        ]
         result = {"analysis": "（无）", "preconditions": "（无）", "cases": "（无）"}
-        for i, (marker, key) in enumerate(markers):
-            if marker not in text:
-                continue
-            parts = text.split(marker, 1)
-            if len(parts) < 2:
-                continue
-            rest = parts[1]
-            # 截取到下一个段落标记之前
-            end = len(rest)
-            for j in range(i + 1, len(markers)):
-                pos = rest.find(markers[j][0])
-                if pos != -1 and pos < end:
-                    end = pos
-            result[key] = marker + "\n" + rest[:end].strip()
+        if not text:
+            return result
+
+        patterns = [
+            ("analysis",      re.compile(r'测试场景分析|场景分析|测试分析', re.IGNORECASE)),
+            ("preconditions", re.compile(r'共享前置|前置条件|前置准备', re.IGNORECASE)),
+            ("cases",         re.compile(r'测试用例|用例设计|用例列表', re.IGNORECASE)),
+        ]
+
+        positions = []
+        for key, pat in patterns:
+            m = pat.search(text)
+            if m:
+                positions.append((m.start(), key))
+        if not positions:
+            return result
+        positions.sort()
+
+        for i, (pos, key) in enumerate(positions):
+            next_pos = positions[i + 1][0] if i + 1 < len(positions) else len(text)
+            result[key] = text[pos:next_pos].strip()
+
         return result
 
     @staticmethod
@@ -836,8 +870,12 @@ class ChatTestAgentGraph(RetrievalMixin, GenerationMixin):
             llm_kwargs["extra_body"] = {"thinking": {"type": "enabled"}}
 
         last_error = None
-        # 按需绑定 temperature
-        _llm = self.llm.bind(temperature=temperature) if temperature is not None else self.llm
+        # 显式 bind max_tokens + temperature，防止 LangChain 多层 bind() 嵌套
+        # 丢失构造函数中的 max_tokens（回退到 API 默认 8192，导致大 JSON 被截断）
+        _bind_kwargs: dict = {"max_tokens": config.LLM_MAX_TOKENS}
+        if temperature is not None:
+            _bind_kwargs["temperature"] = temperature
+        _llm = self.llm.bind(**_bind_kwargs)
         # chain 在重试间不变，只需构建一次
         chain = prompt | _llm.with_structured_output(
             model_class, method=method, **llm_kwargs

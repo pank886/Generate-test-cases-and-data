@@ -464,17 +464,34 @@ class TestPhaseCEndToEnd:
                 f"回执报失败 {yaml_failed} 个但缺少错误清单: {errors_json}")
             with open(errors_json, encoding="utf-8") as f:
                 entries = json.load(f)
-            assert len(entries) == yaml_failed, (
-                f"错误清单条数 {len(entries)} 与回执 failed {yaml_failed} 不一致")
+            # V2 追加格式：{story_name: [...], "_audit": [...]}，排除审计告警
+            real_entries = {k: v for k, v in entries.items() if k != "_audit"}
+            real_count = sum(len(v) for v in real_entries.values())
+            assert real_count == yaml_failed, (
+                f"错误清单真实条数 {real_count} 与回执 failed {yaml_failed} 不一致"
+                f"（总 section {len(entries)}，含 _audit）")
+            # 展开为平列表用于展示
+            flat_entries = []
+            for story_name, err_list in real_entries.items():
+                for e in err_list:
+                    flat_entries.append(e)
             listing = "\n".join(
-                f"  - {e['placeholder_id']} | {e['case_id']} | {e['yaml_path']} | "
-                f"{e['error'][:100]}" for e in entries)
+                f"  - {e.get('placeholder_id','?')} | {e.get('case_id','?')} | "
+                f"{e.get('yaml_path','?')} | {str(e.get('error',''))[:100]}"
+                for e in flat_entries)
             pytest.fail(
                 f"Phase C 有 {yaml_failed} 个 YAML 经 {rounds} 轮仍生成失败（已知失败清单）:\n"
                 f"{listing}")
         else:
-            assert not os.path.exists(errors_json), (
-                "回执 failed=0 但存在 _generation_errors.json 残留")
+            # failed=0 时 _generation_errors.json 可包含 _audit 审计警告（§4.6），不含真实失败
+            if os.path.exists(errors_json):
+                with open(errors_json, encoding="utf-8") as f:
+                    entries = json.load(f)
+                # V2 追加格式：{story_name: [...], "_audit": [...]}
+                real_failures = {k: v for k, v in entries.items() if k != "_audit"}
+                assert not real_failures, (
+                    f"回执 failed=0 但 _generation_errors.json 含非审计条目: {list(real_failures.keys())}"
+                )
 
         # ---- 4. 磁盘产物校验 ----
         feature_dirs = [d for d in _load_feature_dirs() if os.path.isdir(d)]

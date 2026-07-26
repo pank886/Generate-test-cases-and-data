@@ -147,6 +147,35 @@ def _safe_doc_id(prefix: str, *parts: str) -> str:
     return raw
 
 
+def _extract_valid_api_paths(full_text: str) -> set[tuple[str, str]]:
+    """从 yapi 导出的 MD 文档中提取所有合法的 (METHOD, URL) 白名单。
+
+    以 ``**Path：** `` 为锚点，向后搜索最近 500 字符内的 ``**Method：** ``。
+    返回 {(METHOD_UPPER, url), ...} 集合，用于过滤 LLM 幻觉的接口。
+
+    设计意图：LLM 可能因参数字段名（deviceId）或记忆污染（跨项目接口）
+    编造不存在的接口。白名单直接扫描原始文档的 Path/Method 行，
+    不依赖 LLM 质量，提供一道独立防线。
+    """
+    path_re = re.compile(r'\*\*Path[：:]\*\*\s+(/\S+)')
+    method_re = re.compile(r'\*\*Method[：:]\*\*\s+(\w+)')
+
+    valid: set[tuple[str, str]] = set()
+    for path_m in path_re.finditer(full_text):
+        url = path_m.group(1).strip().rstrip("/")
+        if not url:
+            continue
+        pos = path_m.end()
+        # 向后搜索最近 500 字符内的 Method（yapi 格式 Path 在前 Method 在后）
+        search_end = min(len(full_text), pos + 500)
+        search_text = full_text[pos:search_end]
+        method_m = method_re.search(search_text)
+        if method_m:
+            method = method_m.group(1).strip().upper()
+            valid.add((method, url))
+    return valid
+
+
 def _cascade_bind_to_module_docs(session, doc_type: str, doc_id: str, module_name: str):
     """级联关联：文档绑定模块时，自动与该模块下所有异类文档建立 doc↔doc 绑定。"""
     from database.operations import BindingOps
@@ -447,8 +476,31 @@ def process_api_doc_extract(file_path: str, default_module: str = None,
         apis = [a.model_dump() if hasattr(a, "model_dump") else a for a in apis_raw]
         all_apis.extend(apis)
 
+    # ---- 白名单校验：过滤 LLM 幻觉的接口 ----
+    # 扫描原始文档，提取所有 **Path：** + **Method：** 对作为白名单。
+    # LLM 可能因参数字段名（如 deviceStatus→编造 /device/info）或记忆污染
+    # （跨项目接口混淆）而输出不存在的接口，白名单提供独立防线。
+    valid_paths = _extract_valid_api_paths(full_text)
+    if valid_paths:
+        before = len(all_apis)
+        hallucinated = []
+        filtered_apis = []
+        for a in all_apis:
+            key = (a.get("method", "").strip().upper(), a.get("url", "").rstrip("/"))
+            if key in valid_paths:
+                filtered_apis.append(a)
+            else:
+                hallucinated.append(key)
+        all_apis = filtered_apis
+        removed = before - len(all_apis)
+        if removed:
+            logger.warning(
+                "⚠️ 白名单校验: 过滤 %d 个文档中不存在的接口: %s",
+                removed, [f"{m} {u}" for m, u in hallucinated[:15]],
+            )
+    # ---- 白名单校验结束 ----
+
     # 合并去重：method+url 相同时合并参数和返回值，而非简单覆盖
-    # TODO(多用户): 在前端展示两个版本的 diff，让用户选择保留哪个
     merged = {}
     dup_count = 0
     for api in all_apis:

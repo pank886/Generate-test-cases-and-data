@@ -948,10 +948,11 @@ class TestYamlRepairLoop:
     def test_all_success_single_round(self, tmp_path):
         agent = ChatTestAgentGraph()
         result = agent._run_yaml_rounds(
-            self._tasks(str(tmp_path)), "[]", "", str(tmp_path),
+            self._tasks(str(tmp_path)), "[]", "", str(tmp_path), "",
             gen_func=self._ok_gen, repair_rounds=1)
-        assert result == {"total": 3, "success": 3, "failed": 0,
-                          "repaired": 0, "rounds": 1, "errors_file": None}
+        assert result["total"] == 3 and result["success"] == 3
+        assert result["failed"] == 0 and result["repaired"] == 0
+        assert result["rounds"] == 1 and result["errors_file"] is None
         assert not os.path.exists(os.path.join(str(tmp_path), "_generation_errors.json"))
 
     def test_fail_once_repaired_in_round2(self, tmp_path):
@@ -969,7 +970,7 @@ class TestYamlRepairLoop:
 
         agent = ChatTestAgentGraph()
         result = agent._run_yaml_rounds(
-            self._tasks(str(tmp_path)), "[]", "", str(tmp_path),
+            self._tasks(str(tmp_path)), "[]", "", str(tmp_path), "",
             gen_func=flaky, repair_rounds=1)
         assert result["success"] == 3
         assert result["repaired"] == 1
@@ -990,7 +991,7 @@ class TestYamlRepairLoop:
 
         agent = ChatTestAgentGraph()
         result = agent._run_yaml_rounds(
-            self._tasks(str(tmp_path)), "[]", "", str(tmp_path),
+            self._tasks(str(tmp_path)), "[]", "", str(tmp_path), "",
             gen_func=always_fail_one, repair_rounds=1)
         assert result["success"] == 2
         assert result["failed"] == 1
@@ -1008,17 +1009,29 @@ class TestYamlRepairLoop:
         assert not os.path.exists(os.path.join(str(tmp_path), "case_2", "test_data.yaml"))
 
     def test_zero_repair_rounds(self, tmp_path):
-        """repair_rounds=0 → 只跑全量轮，失败直接终态。"""
+        """repair_rounds=0 → 只跑全量轮，失败直接终态。（关熔断，故意全失败）"""
         def fail_all(row, api, ctx, path, repair_ctx=None):
             raise RuntimeError("boom")
 
         agent = ChatTestAgentGraph()
         result = agent._run_yaml_rounds(
-            self._tasks(str(tmp_path), n=2), "[]", "", str(tmp_path),
-            gen_func=fail_all, repair_rounds=0)
+            self._tasks(str(tmp_path), n=2), "[]", "", str(tmp_path), "",
+            gen_func=fail_all, repair_rounds=0, circuit_breaker_threshold=1.0)
         assert result["rounds"] == 1
         assert result["failed"] == 2
         assert result["success"] == 0
+
+    def test_circuit_breaker_triggers_on_mass_failure(self, tmp_path):
+        """首轮失败率超过阈值 → 熔断终止，抛 RuntimeError。"""
+        def fail_all(row, api, ctx, path, repair_ctx=None):
+            raise RuntimeError("boom")
+
+        agent = ChatTestAgentGraph()
+        with pytest.raises(RuntimeError, match="熔断"):
+            agent._run_yaml_rounds(
+                self._tasks(str(tmp_path), n=5), "[]", "", str(tmp_path), "",
+                gen_func=fail_all, repair_rounds=1,
+                circuit_breaker_threshold=0.3)  # 5 个全败 = 100% > 30% → 熔断
 
 
 # ============================================================

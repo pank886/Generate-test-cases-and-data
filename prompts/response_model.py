@@ -243,8 +243,13 @@ class TestCase(BaseModel):
         description="HTTP 请求体，支持对象(Dict)、数组(List)、字符串(str)三种形态，与 requests 库 json 参数能力一致",
         serialization_alias="json",  # YAML 输出时仍用 json 字段名
         validation_alias="json",     # LLM 输入时接受 json 字段名
+        json_schema_extra={"example_keys": {}},  # {} 占位 → 骨架渲染为 {}，LLM 按接口定义填充
     )
-    params: Optional[Dict[str, Any]] = Field(default=None, description="URL query 参数")
+    params: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description="URL query 参数",
+        json_schema_extra={"example_keys": {}},
+    )
     form_data: Optional[Dict[str, Any]] = Field(
         default=None,
         description="表单编码请求体（仅 Content-Type 为 x-www-form-urlencoded 时合法），"
@@ -378,22 +383,47 @@ class TestCase(BaseModel):
 
     @model_validator(mode="after")
     def validate_extract_jsonpath(self) -> "TestCase":
-        """extract 字段的 JSONPath 必须以 $. 开头——否则框架走正则降级，大概率提取失败。"""
+        """extract 值必须以 $. 开头（JSONPath）或 \" 开头（正则），其余格式框架无法解析。"""
         for field_name in ("extract", "extract_list", "input_extract"):
             d = getattr(self, field_name, None)
             if isinstance(d, dict):
                 for k, v in d.items():
-                    if isinstance(v, str) and not v.startswith("$"):
+                    if isinstance(v, str) and v and not v.startswith("$") and not v.startswith('"'):
                         rule = "extract缺$前缀"
                         msg = (
                             f"{field_name}.{k} = '{v}' 缺少 '$.' 前缀。"
                             "框架中只有以 '$' 开头的路径才走 JSONPath 解析（$.data.id），"
-                            "不以 '$' 开头的路径走正则降级匹配，大概率提取失败。"
+                            "或以 '\"' 开头走正则匹配（\"token\":\"(.*?)\"）。"
                             "请改为 '$.{v}'（如 $.data.code）。"
                         )
                         ValidationInterceptor.record(rule, msg)
                         raise ValueError(msg)
         return self
+
+    @model_validator(mode="before")
+    @classmethod
+    def auto_fix_extract_jsonpath(cls, data: Any) -> Any:
+        """自动补全 extract 值中缺失的 $. 前缀。
+
+        LLM 偶发输出 extract: {key: \"data.records[0].code\"}，
+        缺 $. 前缀。确定性修复：不以 $ 开头的路径（且不是正则格式）自动补 $.
+
+        不处理正则格式（以 \" 开头），如 \"token\":\"(.*?)\"。
+        """
+        if not isinstance(data, dict):
+            return data
+        for field_name in ("extract", "extract_list", "input_extract"):
+            val = data.get(field_name)
+            if isinstance(val, dict):
+                fixed = {}
+                for k, v in val.items():
+                    if isinstance(v, str) and v and not v.startswith("$") and not v.startswith('"'):
+                        fixed[k] = "$." + v
+                    else:
+                        fixed[k] = v
+                if fixed != val:
+                    data[field_name] = fixed
+        return data
 
     @model_validator(mode="after")
     def validate_validation_not_empty(self) -> "TestCase":
@@ -412,7 +442,12 @@ class TestCase(BaseModel):
 
 class StepData(BaseModel):
     """单步测试数据 — data 数组中的一个元素"""
-    baseInfo: Dict[str, Any] = Field(description="接口基础信息（api_name, url, method, header 等）")
+    baseInfo: Dict[str, Any] = Field(
+        description="接口基础信息（api_name, url, method, header 等）",
+        json_schema_extra={
+            "example_keys": {"api_name": "", "url": "", "method": "", "header": {}}
+        },
+    )
     testCase: List[TestCase] = Field(
         min_length=1,
         description="测试用例列表（每个元素含 case_name, request_body, validation 等），至少 1 条",
