@@ -134,15 +134,17 @@ class ApiDefinition(BaseModel):
     url: str = Field(description="接口路径部分（不含域名和基础地址），如 /api/login")
     method: str = Field(description="HTTP方法: GET/POST/PUT/DELETE/PATCH")
     description: str = Field(description="接口功能描述")
-    parameters: Dict[str, Any] = Field(description="请求参数结构示例")
-    returns: Dict[str, Any] = Field(description="返回数据结构示例，包含所有响应字段的名称和类型")
+    headers: Union[List[Dict[str, Any]], Dict[str, Any]] = Field(
+        default_factory=list, description="请求头参数列表")
+    parameters: Union[List[Dict[str, Any]], Dict[str, Any]] = Field(
+        default_factory=list, description="请求参数列表")
+    returns: Union[List[Dict[str, Any]], Dict[str, Any]] = Field(
+        default_factory=list, description="响应字段列表")
 
     @classmethod
     @field_validator("returns", mode="before")
     def normalize_returns(cls, v, info: ValidationInfo):
-        """LLM 有时会把纯数组返回值输出为 list，自动包装成 {"data": [...]}。"""
-        if isinstance(v, list):
-            return {"data": v}
+        """LLM 有时会把纯数组返回值输出为 list，新版 prompt 已要求输出数组，直接返回。"""
         return v
 
 

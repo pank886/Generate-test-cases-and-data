@@ -5,6 +5,7 @@ let selectedDocId = null, selectedDocType = null;
 let allModules = [], currentChunks = [], currentChunkIdx = 0;
 let editorPath = '', editorDirty = false, resultFiles = [];
 let _currentFileList = [], _currentFileFilter = 'all';
+var _pendingApiConfirm = null;  // 待确认的 API 提取结果
 
 // ===== 工具 =====
 function toast(m) {
@@ -169,15 +170,96 @@ async function uploadWithFile(file, type) {
       async result => {
         _uploadDone = true;
         bar.style.width = '100%';
-        if (type === 'api' && result && result.apis) { txt.textContent = '提取完成'; showApiConfirmModal(result, file.name); }
-        else if (result && !result.error) { txt.textContent = '✅ 处理完成'; toast('✅ ' + file.name + ' 处理完成'); showUploadResult(result); }
+        if (type === 'api' && result && result.needs_extract_choice) {
+          txt.textContent = '等待选择提取方式';
+          _llmResultCache = result;
+          showExtractChoiceModal(result, file.name);
+        } else if (type === 'api' && result && result.apis) {
+          txt.textContent = '提取完成';
+          showExtractChoiceModal(result, file.name);
+        } else if (result && !result.error) { txt.textContent = '✅ 处理完成'; toast('✅ ' + file.name + ' 处理完成'); showUploadResult(result); }
         else { card.querySelector('h3').innerHTML = '❌ ' + escText(file.name); txt.textContent = result.error || '处理失败'; }
         refreshFileList();
       });
   } catch (e) { txt.textContent = '❌ ' + e.message; _uploadDone = true; }
   finally { setTimeout(() => { if (_uploadDone) { card.style.opacity = '0'; card.style.transition = 'opacity 0.5s'; setTimeout(() => card.remove(), 500); } }, 3000); }
 }
+function renderPendingBanner() {
+  /* 渲染待确认 API 的横幅提示 */
+  var banner = document.getElementById('pending-api-banner');
+  if (!banner) return;
+  if (!_pendingApiConfirm) {
+    banner.style.display = 'none';
+    return;
+  }
+  var p = _pendingApiConfirm;
+  banner.innerHTML = '<h3>⚠️ 有待确认的接口</h3>'
+    + '<p style="font-size:12px;margin:4px 0">文件: <b>' + esc(p.fileName) + '</b> | 模块: <b>' + esc(p.result.module_name || '') + '</b> | 接口数: ' + (p.result.apis || []).length + '</p>'
+    + '<p style="font-size:11px;color:var(--text-dim)">点击此处重新打开确认弹窗</p>';
+  banner.style.display = '';
+}
+
+var _llmResultCache = null;  // LLM 提取结果缓存，供选择弹窗使用
+
+function showExtractChoiceModal(data, fileName) {
+  /* 选择提取方式：代码提取（YApi MD）vs LLM 提取 */
+  _llmResultCache = data;
+  var hasLLM = data.apis && data.apis.length;
+  showModal('<h3>📡 选择接口提取方式</h3>'
+    + '<p style="font-size:12px;color:var(--text-dim);margin-bottom:12px">文件: <b>' + esc(fileName) + '</b></p>'
+    + '<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:12px">'
+    + '<div class="card" style="padding:16px;cursor:pointer;border:2px solid var(--primary)" id="choice-code" onclick="selectExtractMethod(\'code\')">'
+    + '<h3 style="color:var(--success)">⚡ 代码提取</h3>'
+    + '<p style="font-size:11px;color:var(--text-dim)">适用于 <b>YApi 导出的 MD 文档</b>。纯解析提取，秒级完成，无遗漏、无幻觉。</p>'
+    + '</div>'
+    + '<div class="card" style="padding:16px;cursor:pointer;border:2px solid var(--border)" id="choice-llm" onclick="selectExtractMethod(\'llm\')">'
+    + '<h3 style="color:var(--primary)">🤖 LLM 提取</h3>'
+    + '<p style="font-size:11px;color:var(--text-dim)">适用于其他格式的 MD 文档。DeepSeek 分析提取，约需 1-5 分钟。</p>'
+    + '</div></div>'
+    + '<div class="btn-row"><button class="btn btn-outline" id="cancel-extract-btn">取消</button></div>');
+  document.getElementById('cancel-extract-btn').onclick = function() {
+    closeModal();
+    _llmResultCache = null;
+    // 清理上传的临时文件
+    if (data.file_path) {
+      var fd = new FormData(); fd.append('filename', data.file_name || '');
+      fetch('/api/files/delete-file', { method: 'POST', body: fd }).catch(function(){});
+    }
+    var banner = document.getElementById('pending-api-banner');
+    if (banner) banner.style.display = 'none';
+  };
+}
+
+function selectExtractMethod(method) {
+  var data = _llmResultCache;
+  if (!data) { toast('数据丢失，请重新上传'); closeModal(); return; }
+  closeModal();
+  var banner = document.getElementById('pending-api-banner');
+  if (banner) { banner.style.display = ''; banner.innerHTML = '<h3>⏳ ' + (method === 'llm' ? 'LLM 提取中（DeepSeek，约需 1-5 分钟）...' : '代码提取中...') + '</h3>'; }
+  var url = method === 'llm' ? '/api/upload/extract-api' : '/api/upload/extract-api-code';
+  var fd = new FormData();
+  fd.append('file_path', data.file_path);
+  fetch(url, { method: 'POST', body: fd }).then(r => r.json()).then(d => {
+    if (d.success) {
+      showApiConfirmModal(d, data.file_name || '');
+    } else {
+      toast('❌ 提取失败: ' + (d.message || '未知错误'));
+      if (banner) banner.style.display = 'none';
+    }
+  }).catch(e => {
+    toast('❌ 提取失败: ' + e.message);
+    if (banner) banner.style.display = 'none';
+  });
+}
+
 function showApiConfirmModal(result, fileName) {
+  // 保存待确认状态（防止误关弹窗后丢失）
+  _pendingApiConfirm = { result: result, fileName: fileName };
+  renderPendingBanner();
+  _renderApiConfirmModal(result, fileName);
+}
+
+function _renderApiConfirmModal(result, fileName) {
   const apis = result.apis || [], mod = result.module_name || '';
   const rows = apis.map((a, i) => `<label style="display:flex;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid #eee"><input type="checkbox" checked data-idx="${i}"><b>${esc(a.method || '?')}</b> ${esc(a.url || '')} — ${esc(a.name || '')}</label>`).join('');
   showModal(`<h3>📡 接口拆分确认</h3><p style="font-size:12px;color:var(--text-dim);margin-bottom:8px">模块: <b>${esc(mod)}</b> | 文件: ${esc(fileName)}</p><div style="max-height:400px;overflow-y:auto">${rows}</div>
@@ -188,14 +270,34 @@ function showApiConfirmModal(result, fileName) {
       if (cb.checked) selected.push(apis[parseInt(cb.dataset.idx)]); else allChecked = false;
     });
     closeModal();
+    _pendingApiConfirm = null; renderPendingBanner();
+    // 显示入库进度
+    var banner = document.getElementById('pending-api-banner');
+    if (banner) { banner.style.display = ''; banner.innerHTML = '<h3>⏳ 向量化入库中... 0/' + selected.length + '</h3>'; }
     const r = await fetch('/api/upload/commit-api', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ file_path: result.file_path, module_name: mod, apis: selected, all_selected: allChecked }) });
-    const d = await r.json(); toast(d.success ? '✅ ' + selected.length + ' 个接口已入库' : '❌ 入库失败');
-    refreshFileList();
+    const d = await r.json();
+    if (d.success && d.task_id) {
+      await pollTask(d.task_id,
+        (p, m) => { if (banner) banner.innerHTML = '<h3>⏳ ' + m + '</h3>'; },
+        result => {
+          if (banner) banner.style.display = 'none';
+          if (result && !result.error) {
+            toast('✅ ' + selected.length + ' 个接口已入库');
+          } else {
+            toast('❌ ' + (result ? result.error : '入库失败'));
+          }
+          refreshFileList();
+        });
+    } else {
+      if (banner) banner.style.display = 'none';
+      toast(d.success ? '✅ 已入库' : '❌ ' + (d.message || '入库失败'));
+      refreshFileList();
+    }
   };
   document.getElementById('retry-api-btn').onclick = async () => {
     closeModal();
     const r = await fetch('/api/upload/retry-api', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ file_path: result.file_path, module_name: mod }) });
-    const d = await r.json(); if (d.success) showApiConfirmModal(d, fileName); else toast('❌ 重试失败');
+    const d = await r.json(); if (d.success) showExtractChoiceModal(d, fileName); else toast('❌ 重试失败');
   };
 }
 function showUploadResult(result) {
@@ -227,13 +329,14 @@ function setFileFilter(f, btn) {
   _currentFileFilter = f;
   document.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'));
   if (btn) btn.classList.add('active');
-  document.getElementById('file-filter-input').value = '';
   renderFileSections();
 }
-function filterFileList() { renderFileSections(); }
+function filterFileList() {
+  // 仅当用户手动清空搜索框或按回车时才重新渲染
+  renderFileSections();
+}
 function renderFileList(files) {
   _currentFileList = files || [];
-  document.getElementById('file-filter-input').value = '';
   _currentFileFilter = 'all';
   document.querySelectorAll('.filter-btn').forEach(b => b.classList.toggle('active', b.dataset.filter === 'all'));
   renderFileSections();
@@ -260,14 +363,59 @@ function renderFileSections() {
 function renderFileSection(s) {
   const files = s.files;
   if (!files.length) return `<div class="file-section"><div class="file-section-header"><span>${s.icon} ${s.label}</span><span class="count">0 个文件</span></div></div>`;
-  const rows = files.map(f => `<tr><td><span class="name-row"><span>${esc(f.name)}</span></span></td><td>${f.size || '—'}</td><td>${f.chunks || 0}</td><td>${f.time || ''}</td><td style="white-space:nowrap"><button class="btn btn-sm btn-outline js-view-file" data-filename="${esc(f.name)}">查看</button> <button class="btn btn-sm btn-danger-outline js-delete-file" data-filename="${esc(f.name)}">删除</button></td></tr>`).join('');
+  const rows = files.map(f => `<tr>
+    <td style="width:32px"><input type="checkbox" class="file-check" data-filename="${esc(f.name)}" data-section="${s.key}" onchange="updateSelectAllState('${s.key}')"></td>
+    <td><span class="name-row"><span>${esc(f.name)}</span></span></td><td>${f.size || '—'}</td><td>${f.chunks || 0}</td><td>${f.time || ''}</td>
+    <td style="white-space:nowrap"><button class="btn btn-sm btn-outline js-view-file" data-filename="${esc(f.name)}">查看</button> <button class="btn btn-sm btn-danger-outline js-delete-file" data-filename="${esc(f.name)}">删除</button></td>
+  </tr>`).join('');
   return `<div class="file-section">
     <div class="file-section-header" onclick="this.querySelector('.arrow').classList.toggle('open');this.nextElementSibling.classList.toggle('hidden')">
       <span class="arrow open">▶</span><span>${s.icon} ${s.label}</span><span class="count">${files.length} 个文件</span>
     </div>
     <div class="file-section-body">
-      <table class="file-table"><thead><tr><th>文件名</th><th>大小</th><th>文本块</th><th>时间</th><th>操作</th></tr></thead><tbody>${rows}</tbody></table>
+      <table class="file-table"><thead><tr>
+        <th style="width:32px"><input type="checkbox" class="file-check-all" data-section="${s.key}" onchange="toggleSelectAll('${s.key}',this.checked)"></th>
+        <th>文件名</th><th>大小</th><th>文本块</th><th>时间</th><th>操作</th>
+      </tr></thead><tbody>${rows}</tbody></table>
     </div></div>`;
+}
+
+function toggleSelectAll(sectionKey, checked) {
+  document.querySelectorAll('.file-check[data-section="' + sectionKey + '"]').forEach(function(cb) {
+    cb.checked = checked;
+  });
+}
+
+function updateSelectAllState(sectionKey) {
+  var all = document.querySelectorAll('.file-check[data-section="' + sectionKey + '"]');
+  var checked = document.querySelectorAll('.file-check[data-section="' + sectionKey + '"]:checked');
+  var master = document.querySelector('.file-check-all[data-section="' + sectionKey + '"]');
+  if (master) master.checked = all.length > 0 && checked.length === all.length;
+}
+
+function getSelectedFiles() {
+  var names = [];
+  document.querySelectorAll('.file-check:checked').forEach(function(cb) {
+    names.push(cb.dataset.filename);
+  });
+  return names;
+}
+
+async function batchDeleteFiles() {
+  var selected = getSelectedFiles();
+  if (!selected.length) { toast('请先勾选要删除的文件'); return; }
+  if (!confirm('确定删除 ' + selected.length + ' 个文件？\n\n此操作不可撤销，将同时清理 ChromaDB 和 SQLite 中的关联数据。')) return;
+  var failed = 0;
+  for (var i = 0; i < selected.length; i++) {
+    try {
+      var fd = new FormData(); fd.append('filename', selected[i]);
+      var r = await fetch('/api/files/delete-file', { method: 'POST', body: fd });
+      var d = await r.json();
+      if (!d.success) { failed++; console.error('Delete failed:', selected[i], d.message); }
+    } catch (e) { failed++; console.error('Delete error:', selected[i], e); }
+  }
+  toast(failed ? '✅ 删除 ' + (selected.length - failed) + ' / ' + selected.length + ' 个（' + failed + ' 个失败）' : '✅ 已删除 ' + selected.length + ' 个文件');
+  refreshFileList();
 }
 function viewFile(name) {
   const f = _currentFileList.find(x => x.name === name);
@@ -318,12 +466,14 @@ function selectModule(id, name) {
   loadBoundDocs(name);
   loadUnassociatedDocs();
   loadRelatedModules(name);
-  // 显示分析区域
   var sec = document.getElementById('analysis-section');
   sec.style.display = 'block';
   document.getElementById('analyze-scenarios-btn').style.display = '';
   document.getElementById('analysis-status').textContent = '';
   loadModuleAnalysis(name);
+  // 预加载 annotation 类型列表
+  _annotationModName = name; _currentAnnotationTypes = [];
+  loadAnnotationTypes(name);
 }
 function flattenTree(tree) {
   let out = [];
@@ -345,9 +495,10 @@ function showGlossaryPanel() {
 async function createModule() {
   let inp = document.getElementById('new-module-input'), name = inp.value.trim();
   if (!name) { name = prompt('模块名称:'); if (!name) return; }
-  const pid = selectedModuleId || 'root';
+  const body = { name: name };
+  if (selectedModuleId) body.parent_id = selectedModuleId;
   try {
-    const r = await fetch('/api/modules', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name, parent_id: pid }) });
+    const r = await fetch('/api/modules', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
     const d = await r.json(); if (d.success) { inp.value = ''; refreshModuleTree(); toast('✅ 模块已创建'); } else toast('❌ ' + d.message);
   } catch (e) { console.error(e); toast('❌ 创建失败'); }
 }
@@ -422,19 +573,69 @@ async function loadUnassociatedDocs() {
 }
 function showDocDetail(docId, docType) {
   selectedDocId = docId; selectedDocType = docType;
+  if (docType === 'api') {
+    toggleApiDocDetail(docId);
+    return;
+  }
+  // 产品文档/axure：展开/收起文档块
+  toggleDocChunkDetail(docId, docType);
+}
+
+var _docChunks = [], _docChunkIdx = 0;
+
+async function toggleDocChunkDetail(docId, docType) {
+  var detailEl = document.getElementById('doc-chunk-detail-' + docId);
+  if (detailEl) {
+    detailEl.remove();
+    var btn = document.querySelector('.js-doc-detail[data-doc-id="' + docId + '"]');
+    if (btn) btn.textContent = '详情';
+    if (docType === 'product') { document.getElementById('glossary-content').classList.add('hidden'); }
+    return;
+  }
+  var btn = document.querySelector('.js-doc-detail[data-doc-id="' + docId + '"]');
+  if (btn) btn.textContent = '⏳';
   // 加载文档块
-  fetch('/api/docs/' + encodeURIComponent(docId) + '/chunks').then(r => r.json()).then(d => {
-    currentChunks = d.chunks || []; currentChunkIdx = 0;
-    const el = document.getElementById('chunk-viewer');
-    el.classList.remove('hidden');
-    renderCurrentChunk();
-  }).catch(() => toast('加载文档块失败'));
-  // 产品文档额外加载术语表
+  try {
+    var r = await fetch('/api/docs/' + encodeURIComponent(docId) + '/chunks');
+    var d = await r.json();
+    _docChunks = d.chunks || [];
+    _docChunkIdx = 0;
+  } catch (e) {
+    toast('加载文档块失败');
+    if (btn) btn.textContent = '详情';
+    return;
+  }
+  if (btn) btn.textContent = '收起';
   if (docType === 'product') {
     showGlossaryPanel();
     document.getElementById('glossary-content').classList.remove('hidden');
     loadDocGlossary(docId);
   }
+  var rowEl = document.querySelector('.js-doc-detail[data-doc-id="' + docId + '"]').closest('.doc-assoc-item');
+  if (!rowEl) return;
+  var html = '<div class="api-doc-detail" id="doc-chunk-detail-' + docId + '">';
+  html += renderChunkDetail(docId);
+  html += '</div>';
+  rowEl.insertAdjacentHTML('afterend', html);
+}
+
+function renderChunkDetail(docId) {
+  var c = _docChunks[_docChunkIdx];
+  if (!c) return '<div class="empty-hint">无内容</div>';
+  var total = _docChunks.length;
+  var nav = '<div class="chunk-nav">'
+    + '<button class="btn btn-sm btn-outline" onclick="event.stopPropagation();_docChunkIdx=Math.max(0,_docChunkIdx-1);refreshChunkDetail(\'' + docId + '\')">◀ 上一个</button>'
+    + '<span> ' + (_docChunkIdx + 1) + ' / ' + total + ' </span>'
+    + '<button class="btn btn-sm btn-outline" onclick="event.stopPropagation();_docChunkIdx=Math.min(' + (total - 1) + ',_docChunkIdx+1);refreshChunkDetail(\'' + docId + '\')">下一个 ▶</button>'
+    + (c.api_name ? ' <span style="color:var(--primary)">' + esc(c.api_name) + '</span>' : '')
+    + '</div>';
+  return nav + '<pre style="white-space:pre-wrap;line-height:1.7;margin:8px 0 0;font-size:12px;max-height:300px;overflow-y:auto">' + esc(c.content || '') + '</pre>'
+    + '<div style="text-align:right;margin-top:6px"><button class="btn btn-sm btn-outline" onclick="event.stopPropagation();toggleDocChunkDetail(\'' + docId + '\')">▲ 收起</button></div>';
+}
+
+function refreshChunkDetail(docId) {
+  var detailEl = document.getElementById('doc-chunk-detail-' + docId);
+  if (detailEl) detailEl.innerHTML = renderChunkDetail(docId);
 }
 async function loadDocGlossary(docId) {
   try {
@@ -881,7 +1082,9 @@ function init() {
   document.getElementById('chat-input').addEventListener('keydown', e => {
     if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendWorkflowChat(); }
   });
-  document.getElementById('file-filter-input').addEventListener('input', filterFileList);
+  document.getElementById('file-filter-input').addEventListener('keydown', function(e) {
+    if (e.key === 'Enter') filterFileList();
+  });
 }
 
 // ── 模块场景分析（Phase A 入库预处理） ──
@@ -1028,5 +1231,251 @@ function editAnalysis() {
       };
     });
 }
+
+// ── API 文档展开详情 + 异常标识（Annotation Tags）──
+var _currentApiDefs = [], _currentAnnotationTypes = [], _annotationModName = null, _currentDocId = null;
+
+async function loadAnnotationTypes(modName) {
+  try {
+    var r = await fetch('/api/modules/' + encodeURIComponent(modName) + '/annotation-types');
+    var d = await r.json();
+    _currentAnnotationTypes = (d.success && d.types) ? d.types : [];
+  } catch (e) { _currentAnnotationTypes = []; }
+}
+
+// ── 在已有文档行上展开/收起 API 列表 ──
+async function toggleApiDocDetail(docId) {
+  var detailEl = document.getElementById('api-doc-detail-' + docId);
+  if (detailEl) {
+    // 已展开 → 收起
+    detailEl.remove();
+    _currentDocId = null;
+    var btn = document.querySelector('.js-doc-detail[data-doc-id="' + docId + '"]');
+    if (btn) btn.textContent = '详情';
+    return;
+  }
+  // 首次展开 → 先关闭其他展开，再加载该文档的 API 定义
+  var others = document.querySelectorAll('.api-doc-detail');
+  for (var o = 0; o < others.length; o++) { others[o].remove(); }
+  document.querySelectorAll('.js-doc-detail').forEach(function(b) { b.textContent = '详情'; });
+  _currentDocId = docId;
+  var btn = document.querySelector('.js-doc-detail[data-doc-id="' + docId + '"]');
+  if (btn) btn.textContent = '⏳';
+  try {
+    var r = await fetch('/api/modules/' + encodeURIComponent(_annotationModName) + '/api-defs?doc_id=' + encodeURIComponent(docId));
+    var d = await r.json();
+    _currentApiDefs = (d.success && d.api_defs) ? d.api_defs : [];
+  } catch (e) {
+    _currentApiDefs = [];
+    toast('❌ 加载接口定义失败');
+    if (btn) btn.textContent = '详情';
+    return;
+  }
+  if (btn) btn.textContent = '收起';
+  // 在文档行后插入展开区
+  var rowEl = document.querySelector('.js-doc-detail[data-doc-id="' + docId + '"]').closest('.doc-assoc-item');
+  if (!rowEl) return;
+  var html = '<div class="api-doc-detail" id="api-doc-detail-' + docId + '">';
+  if (!_currentApiDefs.length) {
+    html += '<div class="empty-hint" style="padding:8px">该文档暂无接口定义</div>';
+  } else {
+    html += '<div style="font-size:11px;color:var(--text-dim);padding:4px 0">' + _currentApiDefs.length + ' 个接口</div>';
+    html += _currentApiDefs.map(function(api, i) {
+      return renderApiRow(api, i);
+    }).join('');
+  }
+  html += '<div style="text-align:right;padding:4px 0"><button class="btn btn-sm btn-outline" onclick="toggleApiDocDetail(\'' + docId + '\')">▲ 收起</button></div>';
+  html += '</div>';
+  rowEl.insertAdjacentHTML('afterend', html);
+}
+
+function renderApiRow(api, i) {
+  var methodColors = {GET: '#34a853', POST: '#1a73e8', PUT: '#e37400', DELETE: '#c5221f', PATCH: '#933'};
+  var m = (api.method || '?').toUpperCase();
+  var color = methodColors[m] || '#666';
+  var anns = api.annotations || {};
+  var chipsHtml = renderAnnotationChips(anns, i);
+  // 直接展示完整数据：header 行 + JSON 详情 + 编辑按钮
+  return '<div class="api-def-row" id="api-row-' + i + '">'
+    + '<div class="api-def-header">'
+    + '<span class="api-method" style="color:' + color + '">' + esc(m) + '</span>'
+    + '<span class="api-url" title="' + esc(api.url || '') + '">' + esc(api.url || '') + '</span>'
+    + '<span class="api-name">' + esc(api.description || api.name || '') + '</span>'
+    + '<span class="api-chips">' + chipsHtml + '</span>'
+    + '<span class="ann-add-btn" onclick="event.stopPropagation();showAnnotationDropdown(' + i + ',this)" title="添加异常标识">+</span>'
+    + '</div>'  // end api-def-header
+    + renderApiDetail(i)
+    + '</div>';
+}
+
+function renderApiDetail(i) {
+  var api = _currentApiDefs[i];
+  if (!api) return '';
+  var display = {};
+  for (var k in api) {
+    if (api.hasOwnProperty(k) && k !== 'annotations' && k !== '_doc_id' && k !== '_parse_error' && k !== '_raw') {
+      display[k] = api[k];
+    }
+  }
+  return '<div class="api-detail-section">接口定义</div>'
+    + '<pre class="api-json" id="api-json-' + i + '">' + escText(JSON.stringify(display, null, 2)) + '</pre>'
+    + '<div class="api-detail-section">异常标识</div>'
+    + '<pre class="api-json">' + escText(JSON.stringify(api.annotations || {}, null, 2)) + '</pre>'
+    + '<div class="api-detail-actions">'
+    + '<button class="btn btn-sm btn-outline" onclick="event.stopPropagation();editApiDetail(' + i + ')">✏️ 编辑</button>'
+    + '</div>';
+}
+
+function editApiDetail(i) {
+  var api = _currentApiDefs[i];
+  if (!api) return;
+  var display = {};
+  for (var k in api) {
+    if (api.hasOwnProperty(k) && k !== '_doc_id') { display[k] = api[k]; }
+  }
+  var json = JSON.stringify(display, null, 2);
+  showModal('<h3>✏️ 编辑接口 — ' + esc(api.name || api.url || '') + '</h3>'
+    + '<textarea id="edit-api-json" style="width:100%;min-height:360px;padding:8px;border:1px solid var(--border);border-radius:4px;font-family:Consolas,monospace;font-size:12px">' + escText(json) + '</textarea>'
+    + '<div class="btn-row" style="margin-top:12px"><button class="btn btn-outline js-close-modal">取消</button><button class="btn btn-success" id="save-api-json-btn">💾 保存</button></div>');
+  document.getElementById('save-api-json-btn').onclick = async function() {
+    var newJson = document.getElementById('edit-api-json').value;
+    var parsed;
+    try { parsed = JSON.parse(newJson); } catch (e) { toast('❌ JSON 格式错误: ' + e.message); return; }
+    closeModal();
+    var anns = parsed.annotations;
+    delete parsed.annotations;
+    // 先更新本地数据
+    _currentApiDefs[i].annotations = anns || {};
+    for (var k in parsed) { if (parsed.hasOwnProperty(k)) _currentApiDefs[i][k] = parsed[k]; }
+    // 保存到后端：anns + 完整字段
+    await saveAnnotations(i, anns || {}, parsed);
+    refreshApiDetailDOM(i);
+    toast('✅ 已保存');
+  };
+}
+
+function renderAnnotationChips(anns, apiIdx) {
+  if (!anns || !Object.keys(anns).length) return '';
+  var chips = [];
+  for (var key in anns) {
+    if (!anns.hasOwnProperty(key)) continue;
+    var a = anns[key];
+    var src = a.source || 'auto';
+    var active = a.active !== false;
+    var label = key;
+    for (var t = 0; t < _currentAnnotationTypes.length; t++) {
+      if (_currentAnnotationTypes[t].key === key) { label = _currentAnnotationTypes[t].label; break; }
+    }
+    var cls = 'ann-chip ' + (src === 'manual' ? 'manual' : 'auto') + (active ? '' : ' inactive');
+    var removeBtn = (src === 'manual') ? '<span class="ann-remove" onclick="event.stopPropagation();removeManualAnnotation(' + apiIdx + ',\'' + esc(key) + '\')">×</span>' : '';
+    chips.push('<span class="' + cls + '" title="' + esc(label) + ' (' + (active ? '启用' : '禁用') + ' | ' + (src === 'manual' ? '手动' : '自动') + ')" onclick="event.stopPropagation();toggleAnnotation(' + apiIdx + ',\'' + esc(key) + '\',' + active + ')">'
+      + esc(label) + removeBtn + '</span>');
+  }
+  return chips.join('');
+}
+
+async function toggleAnnotation(apiIdx, key, currentActive) {
+  if (!_annotationModName) return;
+  var api = _currentApiDefs[apiIdx];
+  if (!api) return;
+  var anns = JSON.parse(JSON.stringify(api.annotations || {}));
+  if (!anns[key]) return;
+  anns[key].active = !currentActive;
+  if (anns[key].source === 'auto') anns[key].source = 'manual';
+  await saveAnnotations(apiIdx, anns);
+}
+
+async function removeManualAnnotation(apiIdx, key) {
+  if (!_annotationModName) return;
+  var api = _currentApiDefs[apiIdx];
+  if (!api) return;
+  var anns = JSON.parse(JSON.stringify(api.annotations || {}));
+  if (anns[key] && anns[key].source === 'manual') {
+    delete anns[key];
+    await saveAnnotations(apiIdx, anns);
+  } else {
+    toast('自动检测的标识不可删除，仅可禁用');
+  }
+}
+
+async function saveAnnotations(apiIdx, anns, fullUpdate) {
+  var modName = _annotationModName;
+  try {
+    var body = { annotations: anns || {} };
+    if (_currentDocId) body.doc_id = _currentDocId;
+    if (fullUpdate) body.full_update = fullUpdate;
+    var r = await fetch('/api/modules/' + encodeURIComponent(modName) + '/api-defs/' + apiIdx + '/annotations', {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    var d = await r.json();
+    if (d.success) {
+      _currentApiDefs[apiIdx].annotations = anns;
+      // 刷新所有行的 chips 和详情
+      for (var idx = 0; idx < _currentApiDefs.length; idx++) {
+        var rowEl = document.getElementById('api-row-' + idx);
+        if (rowEl) {
+          var chipsEl = rowEl.querySelector('.api-chips');
+          if (chipsEl) chipsEl.outerHTML = '<span class="api-chips">' + renderAnnotationChips(_currentApiDefs[idx].annotations || {}, idx) + '</span>';
+          var dEl = rowEl.querySelector('.api-def-detail');
+          if (dEl) dEl.outerHTML = '<div class="api-def-detail">' + renderApiDetail(idx) + '</div>';
+        }
+      }
+      toast('✅ 已更新');
+    } else {
+      toast('❌ ' + (d.message || '更新失败'));
+    }
+  } catch (e) { toast('❌ 保存失败: ' + e.message); }
+}
+
+function showAnnotationDropdown(apiIdx, btnEl) {
+  var dd = document.getElementById('ann-dropdown');
+  var api = _currentApiDefs[apiIdx];
+  if (!api) { dd.classList.add('hidden'); return; }
+  var existingKeys = Object.keys(api.annotations || {});
+  var rect = btnEl.getBoundingClientRect();
+  dd.style.top = (rect.bottom + 4) + 'px';
+  dd.style.left = Math.min(rect.left, window.innerWidth - 210) + 'px';
+  dd.innerHTML = '<div style="font-size:11px;font-weight:600;padding:6px 10px;border-bottom:1px solid var(--border)">添加异常标识</div>'
+    + _currentAnnotationTypes.map(function(t) {
+        var already = existingKeys.indexOf(t.key) >= 0;
+        return '<div class="ann-opt' + (already ? ' existing' : '') + '" onclick="' + (already ? '' : 'addManualAnnotation(' + apiIdx + ',\'' + esc(t.key) + '\')') + '">'
+          + '<div class="ann-opt-label">' + esc(t.label) + (already ? ' (已添加)' : '') + '</div>'
+          + '<div class="ann-opt-desc">' + esc(t.description || '') + '</div>'
+          + '</div>';
+      }).join('');
+  dd.classList.remove('hidden');
+  setTimeout(function() {
+    document.addEventListener('click', closeAnnotationDropdown, { once: true });
+  }, 0);
+}
+
+function closeAnnotationDropdown() {
+  var dd = document.getElementById('ann-dropdown');
+  if (dd) dd.classList.add('hidden');
+}
+
+async function addManualAnnotation(apiIdx, key) {
+  closeAnnotationDropdown();
+  if (!_annotationModName) return;
+  var api = _currentApiDefs[apiIdx];
+  if (!api) return;
+  var anns = JSON.parse(JSON.stringify(api.annotations || {}));
+  anns[key] = { active: true, source: 'manual' };
+  await saveAnnotations(apiIdx, anns);
+}
+
+function refreshApiDetailDOM(i) {
+  /* outerHTML 替换，避免刷新时 div.api-def-detail 嵌套 */
+  var rowEl = document.getElementById('api-row-' + i);
+  if (!rowEl) return;
+  var dEl = rowEl.querySelector('.api-def-detail');
+  if (dEl) dEl.outerHTML = '<div class="api-def-detail">' + renderApiDetail(i) + '</div>';
+}
+
+document.addEventListener('click', function(e) {
+  if (e.target.closest('#ann-dropdown') || e.target.closest('.ann-add-btn')) return;
+  closeAnnotationDropdown();
+});
 
 document.addEventListener('DOMContentLoaded', init);

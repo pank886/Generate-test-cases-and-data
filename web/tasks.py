@@ -69,49 +69,17 @@ async def _process_file_bg(task_id: str, file_path: str, ext: str,
             count = result.get("chunks", 0)
             source = "Axure 原型"
         elif ext == ".md":
-            from ingest_v2 import process_api_doc_extract
-            _progress(10, "读取 Markdown，提取接口定义...")
-            result = await asyncio.to_thread(
-                process_api_doc_extract,
-                file_path,
-                progress_cb=lambda p, m: _progress(10 + int(p * 0.8), m),
-            )
-            apis = result.get("apis", [])
-            count = len(apis)
-            source = "API 文档"
-            module_name = result.get("module_name")
-
-            if count == 0:
-                try:
-                    os.remove(file_path)
-                except Exception:
-                    logger.warning("删除空结果文件失败: %s", file_path, exc_info=True)
-                await _update_task(task_id, status="failed",
-                                   error="未提取到接口定义，请检查文档格式。")
-                return
-
-            # 将 MD 文件加入内存文件列表（即使未确认入库，也可在页面展示）
-            try:
-                await _add_imported_file({
-                    "name": filename,
-                    "size": f"{file_size / 1024:.1f} KB",
-                    "chunks": count,
-                    "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                    "type": "api",
-                    "status": "pending",
-                })
-            except Exception:
-                logger.warning("MD 文件列表更新失败（数据已提取，不影响后续确认）", exc_info=True)
-
+            _progress(20, "MD 文件已接收，等待选择提取方式...")
+            # 不在这里跑 LLM——前端弹窗让用户选 代码提取 / LLM 提取
             resp = {
                 "success": True,
-                "message": f"已提取 {count} 个接口定义，请确认后入库",
-                "apis": apis,
+                "message": "请选择接口提取方式",
                 "file_path": file_path,
-                "module_name": module_name or "Unknown",
+                "file_name": filename,
+                "needs_extract_choice": True,  # 前端检测此标记 → 弹选择窗
             }
             await _update_task(task_id, status="completed", progress=100,
-                               message="提取完成，等待确认", result=resp)
+                               message="等待选择提取方式", result=resp)
             return
 
         else:
@@ -707,4 +675,46 @@ async def _analyze_module_scenarios_bg(task_id: str, module_name: str):
 
     except Exception as e:
         logger.error("❌ 模块场景分析失败: %s", e)
+        await _update_task(task_id, status="failed", error=str(e))
+
+
+async def _commit_apis_bg(task_id: str, file_path: str, module_name: str,
+                           apis: list, delete_original: bool):
+    """后台任务：逐条向量化入库，前端轮询进度。"""
+    from web.state import _add_imported_file, _update_task
+    from ingest_v2 import commit_api_docs
+
+    set_trace_id(task_id)
+    loop = asyncio.get_running_loop()
+    total = len(apis)
+
+    def _progress(pct: int, msg: str):
+        asyncio.run_coroutine_threadsafe(
+            _update_task(task_id, progress=pct, message=msg),
+            loop,
+        )
+
+    try:
+        await _update_task(task_id, status="running", progress=0,
+                           message=f"开始入库 {total} 个接口...")
+        result = await asyncio.to_thread(
+            commit_api_docs, file_path, module_name, apis,
+            delete_original=delete_original,
+            progress_cb=lambda p, m: _progress(p, m),
+        )
+        # 更新内存文件列表
+        from datetime import datetime
+        now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        for api in apis:
+            try:
+                await _add_imported_file({
+                    "name": f"{api.get('method', '?')} {api.get('url', '')}",
+                    "size": "—", "chunks": 1, "time": now_str, "type": "api",
+                })
+            except Exception:
+                pass
+        await _update_task(task_id, status="completed", progress=100,
+                           message=f"✅ {total} 个接口入库完成", result=result)
+    except Exception as e:
+        logger.error("❌ 接口入库失败: %s", e)
         await _update_task(task_id, status="failed", error=str(e))

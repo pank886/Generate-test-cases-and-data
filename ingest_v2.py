@@ -37,19 +37,31 @@ def _merge_api_defs(existing: dict, incoming: dict) -> dict:
       - name/method/url: 保留 incoming（新版本为准）
     """
     merged = dict(incoming)  # 以新版本为基底
-    # parameters 做字段级合并
-    existing_params = existing.get("parameters", {}) or {}
-    incoming_params = incoming.get("parameters", {}) or {}
-    merged_params = dict(existing_params)
-    merged_params.update(incoming_params)  # incoming 的字段覆盖
-    merged["parameters"] = merged_params
+    # parameters: 新版为 list，旧版为 dict；list 直接覆盖，dict 做字段级合并
+    incoming_params = incoming.get("parameters", []) or []
+    if isinstance(incoming_params, list):
+        merged["parameters"] = incoming_params
+    else:
+        existing_params = existing.get("parameters", {}) or {}
+        if isinstance(existing_params, dict):
+            merged_params = dict(existing_params)
+            merged_params.update(incoming_params or {})
+            merged["parameters"] = merged_params
+        else:
+            merged["parameters"] = incoming_params
 
     # returns 同理
-    existing_returns = existing.get("returns", {}) or {}
-    incoming_returns = incoming.get("returns", {}) or {}
-    merged_returns = dict(existing_returns)
-    merged_returns.update(incoming_returns)
-    merged["returns"] = merged_returns
+    incoming_returns = incoming.get("returns", []) or []
+    if isinstance(incoming_returns, list):
+        merged["returns"] = incoming_returns
+    else:
+        existing_returns = existing.get("returns", {}) or {}
+        if isinstance(existing_returns, dict):
+            merged_returns = dict(existing_returns)
+            merged_returns.update(incoming_returns or {})
+            merged["returns"] = merged_returns
+        else:
+            merged["returns"] = incoming_returns
 
     # description 保留更详细的那个
     desc_existing = (existing.get("description") or "").strip()
@@ -386,31 +398,216 @@ def process_product_doc(file_path: str, progress_cb=None) -> dict:
             logger.debug("已清理临时图片目录: %s", _img_dir)
 
 
-def _split_text_by_headers(text: str, max_chars: int) -> list:
-    """按 # 标题切分文本，每段不超过 max_chars 字符。"""
-    import re
-    parts = re.split(r'(?=\n#+ )', text)
-    batches = []
-    current = ""
+def extract_apis_from_yapi_md(text: str) -> list[dict]:
+    """纯代码提取：解析 YApi 导出的 MD 文档，返回接口定义列表。
+
+    适用于格式规整的 YApi MD，不需要 LLM。
+    提取字段：name, url, method, description, headers, parameters, returns
+    """
+    import re as _re
+    from bs4 import BeautifulSoup
+
+    # ── 提取模块名（从 h1 标签取纯文本）──
+    module_name = ""
+    h1_match = _re.search(r'<h1[^>]*>(.+?)</h1>', text)
+    if h1_match:
+        module_name = _re.sub(r'<[^>]+>', '', h1_match.group(1)).strip()
+
+    # ── 切分 API 段（跳过 h1/# 前言，不要混入第一个 API）──
+    parts = _re.split(r'(?=\n## )', text)
+    parts = [p for p in parts if p.strip() and p.strip().startswith('## ')]
+
+    apis = []
     for part in parts:
         part = part.strip()
         if not part:
             continue
-        # 单个 part 超限时直接截断
-        if len(part) > max_chars:
-            if current:
-                batches.append(current)
-                current = ""
-            for i in range(0, len(part), max_chars):
-                batches.append(part[i:i + max_chars])
-            continue
-        if len(current) + len(part) > max_chars and current:
-            batches.append(current)
-            current = part
+
+        # ── 基本信息 ──
+        first_line = part.split('\n')[0].strip()
+        name = _re.sub(r'^##\s+', '', first_line).strip()
+
+        url_match = _re.search(r'\*\*Path：\*\*\s*(.+)', part)
+        url = url_match.group(1).strip() if url_match else ""
+
+        method_match = _re.search(r'\*\*Method：\*\*\s*(.+)', part)
+        method = method_match.group(1).strip().upper() if method_match else "?"
+
+        desc_match = _re.search(r'\*\*接口描述：\*\*\s*\n?\s*(?:<p>)?(.+?)(?:</p>)?\s*\n', part)
+        description = desc_match.group(1).strip() if desc_match else ""
+
+        # ── 辅助：解析 HTML 表格为参数数组 ──
+        def _parse_html_table(html_str: str) -> list[dict]:
+            """解析 HTML <table> 为 [{name, type, required, description, default, children}]"""
+            soup = BeautifulSoup(html_str, 'html.parser')
+            table = soup.find('table')
+            if not table:
+                return []
+            # 找表头确定列映射
+            headers = []
+            for th in table.find_all('th'):
+                key = th.get('key', th.get_text(strip=True))
+                headers.append(key)
+            if not headers:
+                return []
+            # 列名映射（YApi 格式：名称/类型/是否必须/默认值/备注）
+            col_map = {'name': -1, 'type': -1, 'required': -1, 'default': -1, 'desc': -1}
+            for idx, h in enumerate(headers):
+                hl = h.lower()
+                if '名称' in h or 'name' in hl or '字段' in h or '参数' in h:
+                    col_map['name'] = idx
+                elif '类型' in h or 'type' in hl:
+                    col_map['type'] = idx
+                elif '必须' in h or 'required' in hl:
+                    col_map['required'] = idx
+                elif '默认' in h or 'default' in hl:
+                    col_map['default'] = idx
+                elif '备注' in h or 'desc' in hl or '说明' in h:
+                    col_map['desc'] = idx
+
+            # 解析行，通过缩进判断层级
+            rows = table.find_all('tr')
+            result = []
+            stack = [(result, -1)]  # (parent_list, indent_level)
+
+            for tr in rows:
+                cells = tr.find_all('td')
+                if len(cells) < 2:
+                    continue
+                # 计算缩进层级
+                first_cell = cells[0]
+                spans = first_cell.find_all('span')
+                indent = 0
+                for sp in spans:
+                    style = sp.get('style', '')
+                    if 'padding-left' in style:
+                        try:
+                            px = int(_re.search(r'padding-left:\s*(\d+)px', style).group(1))
+                            indent = max(indent, px // 20)  # 每 20px 一级
+                        except (ValueError, AttributeError):
+                            pass
+
+                # 提取字段值
+                def _cell_text(idx):
+                    if idx < 0 or idx >= len(cells):
+                        return ''
+                    # 去掉嵌套的 span 样式文本，只取直接文本或 API 名称
+                    t = cells[idx].get_text(separator=' ', strip=True)
+                    # 清理树形连接符
+                    t = _re.sub(r'^\s*[├└]─?\s*', '', t)
+                    return t.strip()
+
+                name_val = _cell_text(col_map['name'])
+                type_val = _cell_text(col_map['type'])
+                required_str = _cell_text(col_map['required'])
+                default_val = _cell_text(col_map['default'])
+                desc_val = _cell_text(col_map['desc'])
+
+                if not name_val:
+                    continue
+
+                required = '必须' in required_str or required_str.lower() == '是' or required_str.lower() == 'true'
+
+                item = {
+                    'name': name_val,
+                    'type': type_val or 'string',
+                    'required': required,
+                    'description': desc_val,
+                    'default': default_val or None,
+                }
+
+                # 处理层级：弹出比当前缩进更深的栈
+                while len(stack) > 1 and stack[-1][1] >= indent:
+                    stack.pop()
+                parent_list = stack[-1][0]
+                parent_list.append(item)
+                # 如果有嵌套类型，准备 children
+                if type_val and ('object' in type_val.lower() or '[]' in type_val or 'array' in type_val.lower()):
+                    item['children'] = []
+                    stack.append((item['children'], indent))
+
+            return result
+
+        # ── 解析请求参数 ──
+        headers_list = []
+        params_list = []
+
+        # 查找 Headers 表
+        hdr_match = _re.search(r'\*\*Headers\*\*\s*\n(\|.+\|(?:\n\|.+\|)*)', part)
+        if hdr_match:
+            md_table = hdr_match.group(1)
+            # 转换 Markdown 表格为 HTML
+            rows = [r.strip('|').split('|') for r in md_table.strip().split('\n')]
+            if len(rows) >= 2:
+                # 表头行 + 分隔行 + 数据行
+                data_rows = rows[2:] if len(rows) > 2 and set(rows[1][0].strip()) <= {'-', ':', ' '} else rows[1:]
+                for row in data_rows:
+                    row = [c.strip() for c in row]
+                    if len(row) >= 2:
+                        headers_list.append({
+                            'name': row[0] if len(row) > 0 else '',
+                            'type': 'string',
+                            'required': '是' in (row[2] if len(row) > 2 else '') if len(row) > 2 else False,
+                            'description': row[4] if len(row) > 4 else '',
+                            'default': row[3] if len(row) > 3 and row[3] else None,
+                        })
+
+        # 查找 Body 参数表（HTML 格式）
+        body_start = part.find('**Body**')
+        if body_start >= 0:
+            body_section = part[body_start:]
+            # 找到下一个 ### 或 ## 作为结束标记
+            body_end = _re.search(r'\n###\s|\n##\s', body_section)
+            body_html = body_section[:body_end.start()] if body_end else body_section
+            params_list = _parse_html_table(body_html)
         else:
-            current = (current + "\n\n" + part).strip()
-    if current:
-        batches.append(current)
+            # 没有 Body 标题，尝试直接找 <table>
+            params_list = _parse_html_table(part)
+
+        # ── 解析返回数据 ──
+        returns_list = []
+        ret_match = _re.search(r'### 返回数据\s*\n(.*?)(?=\n##|\Z)', part, _re.DOTALL)
+        if ret_match:
+            returns_html = ret_match.group(1)
+            returns_list = _parse_html_table(returns_html)
+
+        api = {
+            'name': name,
+            'url': url,
+            'method': method,
+            'description': description or name,
+            'headers': headers_list,
+            'parameters': params_list,
+            'returns': returns_list,
+            'annotations': {},
+        }
+        apis.append(api)
+
+    return {"apis": apis, "module_name": module_name}
+
+
+def _split_text_by_headers(text: str, max_chars: int) -> list:
+    """按 ## 标题切分文本，每个 API 独立成段。
+
+    只按 ## (h2) 切——保证每个 API 完整不被截断。
+    不拼批次：每个 API 就是一段，不再按字符数合并。
+    max_chars 仅用于单个 API 超出限制时的截断保护。
+    """
+    import re
+    parts = re.split(r'(?=\n## )', text)
+    # 第一段可能是 # 标题行，不含 API；合并到第一个 ## 段
+    if len(parts) >= 2:
+        pre = parts[0].strip()
+        if pre and not pre.startswith('## '):
+            parts[1] = pre + "\n\n" + parts[1].lstrip()
+        parts = parts[1:] if not parts[0].strip().startswith('## ') else parts
+
+    batches = []
+    for part in parts:
+        part = part.strip()
+        if not part:
+            continue
+        batches.append(part)
     return batches
 
 
@@ -462,19 +659,35 @@ def process_api_doc_extract(file_path: str, default_module: str = None,
 
     all_apis = []
     module = default_module
+    total = len(batches)
+    done = [0]  # 列表包装，实现跨线程计数
 
-    for bi, batch_text in enumerate(batches, 1):
-        pct = int(10 + (bi / len(batches)) * 70)
-        cb(pct, f"AI 提取接口定义 ({bi}/{len(batches)})...")
+    import concurrent.futures
+    from threading import Lock
+    _lock = Lock()
+
+    def _extract_one(batch_text: str) -> tuple:
+        """单个 API 提取（在线程池中并发执行）。"""
         prompt = api_def_extract_prompt()
         result = graph._invoke_structured(
             prompt, ApiDefExtract, method="json_mode", doc_text=batch_text,
         )
-        if not module:
-            module = result.module_name
+        mod = result.module_name
         apis_raw = result.apis if hasattr(result, "apis") else []
         apis = [a.model_dump() if hasattr(a, "model_dump") else a for a in apis_raw]
-        all_apis.extend(apis)
+        with _lock:
+            done[0] += 1
+            pct = int(10 + (done[0] / total) * 70)
+            cb(pct, f"AI 提取接口定义 ({done[0]}/{total})...")
+        return mod, apis
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+        futures = [executor.submit(_extract_one, b) for b in batches]
+        for f in concurrent.futures.as_completed(futures):
+            mod, apis = f.result()
+            if not module:
+                module = mod
+            all_apis.extend(apis)
 
     # ---- 白名单校验：过滤 LLM 幻觉的接口 ----
     # 扫描原始文档，提取所有 **Path：** + **Method：** 对作为白名单。
@@ -571,11 +784,12 @@ def commit_api_docs(file_path: str, module_name: str, apis: list[dict],
     logger.info(f"   [SQLite] 批量入库完成: {len(doc_ids)} 条")
 
     # ---- Phase 2: 逐条写入 ChromaDB（失败时补偿回滚 SQLite）----
-    cb(50, "向量化入库中...")
     try:
         for i, api in enumerate(apis):
             api_name = api.get("name", f"api_{i}")
             url = api.get("url", "")
+            pct = int(50 + (i / len(apis)) * 48)
+            cb(pct, f"向量化入库 {i+1}/{len(apis)}...")
             method = api.get("method", "?")
             doc_id = doc_ids[i]
             cb(int(50 + (i / len(apis)) * 40), f"入库 {method} {url}")

@@ -86,26 +86,43 @@ def generate_data_plan_prompt() -> ChatPromptTemplate:
 
 
 def api_def_extract_prompt() -> ChatPromptTemplate:
-    """接口文档提取 prompt"""
+    """接口文档提取 prompt — 全量存储，不丢弃任何参数细节。"""
     return ChatPromptTemplate.from_messages([
         ("system",
-         "你是 API 分析师。阅读以下接口文档内容，提取所有接口定义。\n\n"
+         "你是 API 分析师。阅读以下文本，提取其中包含的那一个接口的定义。\n\n"
          "### 提取规则\n"
-         "1. 提取文档中出现的每一个接口，不要遗漏。\n"
+         "1. 文本中只包含一个接口，提取它。\n"
          "2. 每个接口必须包含以下字段：\n"
-         '   - name: 接口名称（从文档中的"接口名称"字段提取，如"新增创建"、"分页查询"）\n'
-         '   - description: 接口功能描述（从文档中概括，如"新增健身房设施"）\n'
+         '   - name: 接口名称（从文档中的"接口描述"或接口标题提取）\n'
+         '   - description: 接口功能描述（一句话概括）\n'
          "   - method: 大写的 GET/POST/PUT/DELETE/PATCH\n"
-         "   - url: 只提取路径部分，不含域名，如 /gymFacility/add\n"
-         "   - parameters: 请求参数结构（字段名→类型），无参数填 {{}}\n"
-         "   - returns: 响应字段结构（字段名→类型）\n"
-         "3. module_name 根据接口的用途判断所属模块。\n\n"
+         "   - url: 只提取路径部分，不含域名\n"
+         "   - headers: 请求头参数列表，格式为数组\n"
+         "   - parameters: 请求参数列表（Body + Query），格式为数组\n"
+         "   - returns: 响应字段列表，格式为数组\n\n"
+         "### 参数/返回值的数组元素格式\n"
+         "每个参数/返回值元素为 JSON 对象，包含以下字段：\n"
+         '   - name: 字段名（必填）\n'
+         '   - type: 数据类型（必填），如 string/integer/number/boolean/object/array\n'
+         '   - required: 是否必填（boolean，必填）\n'
+         '   - description: 字段说明/备注（string，无则填空字符串""）\n'
+         '   - default: 默认值（string 或 null，无则填 null）\n'
+         "   - children: 嵌套子字段，仅在 type=object 或 type=array 时有值，格式同本数组。无嵌套则省略该字段。\n\n"
          "### 输出格式\n"
-         '输出 JSON 对象：{{"apis": [{{"name": "...", "description": "...", "method": "...", "url": "...", "parameters": {{...}}, "returns": {{...}}}}], "module_name": "..."}}\n'
-         "每个接口必须包含 name、description、method、url、parameters、returns 六个字段。\n"
-         "⚠️ returns 必须是 JSON 对象（dict），即使响应是数组也要用 {{\"data\": [...]}} 包装，绝对不能直接输出数组。\n"
-         "不包含 Markdown。"),
-        ("human", "### 接口文档内容\n{doc_text}\n\n请提取所有接口定义：")
+         "输出一个 JSON 对象，包含 apis 数组和 module_name 字符串。\n"
+         "apis 数组中每个元素是一个接口对象，包含以下字段：\n"
+         "  name(string), description(string), method(string), url(string),\n"
+         "  headers(array), parameters(array), returns(array)\n"
+         "每个数组元素的字段：name(string), type(string), required(boolean),\n"
+         "  description(string), default(string|null), children(array,可选)\n\n"
+         "⚠️ 重要约束：\n"
+         '  - headers/parameters/returns 三个字段**必须是数组**，无数据时填空数组 []，绝对不能填 {{}}\n'
+         "  - 文档中的 HTML 表格列（名称/类型/是否必须/默认值/备注）逐列提取，一一对应填入 name/type/required/default/description\n"
+         "  - 文档中标注\"必须\"→required:true，\"非必须\"→required:false\n"
+         "  - 嵌套的子字段用 children 数组表示，保持层级结构\n"
+         "  - 不遗漏任何参数，不合并不同层级的参数\n"
+         "  - 不包含 Markdown。"),
+        ("human", "### 接口文档内容\n{doc_text}\n\n请提取所有接口定义，参数列表必须完整（包含嵌套子字段）：")
     ])
 
 

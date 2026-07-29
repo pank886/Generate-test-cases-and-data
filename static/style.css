@@ -74,12 +74,18 @@ nav a:hover,nav a.active{color:#fff;border-bottom-color:#fff}
 .assoc-group-header:hover{background:var(--primary-bg)}
 .assoc-group-header .arrow{font-size:10px;color:var(--text-dim);transition:.2s;margin-left:auto}
 .assoc-group-header .arrow.open{transform:rotate(90deg)}
-.assoc-group-body{padding:0}
+.assoc-group-body{padding:0;max-height:420px;overflow-y:auto}
 .assoc-group-body.collapsed{display:none}
+.unassoc-group{max-height:420px;overflow-y:auto}
 .doc-assoc-item{display:flex;align-items:center;justify-content:space-between;padding:6px 10px;border-bottom:1px solid #f0f0f0;font-size:12px}
 .doc-assoc-item:last-child{border-bottom:none}
 .doc-assoc-item .name{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .doc-assoc-item .actions{display:flex;gap:4px;flex-shrink:0}
+
+/* 文档行展开的 API 列表 */
+.api-doc-detail{margin:0 0 6px 16px;padding:6px 8px;background:#fafbfc;border:1px solid var(--border);border-radius:4px;font-size:12px}
+.api-doc-detail .api-def-row{margin-left:0;border-bottom:1px solid #eee;padding:4px 0}
+.api-doc-detail .api-def-row:last-child{border-bottom:none}
 
 /* 弹窗 */
 .progress-wrap{margin-top:12px}.progress-bar{width:100%;height:6px;background:#eee;border-radius:3px;overflow:hidden}.progress-fill{height:100%;background:var(--primary);border-radius:3px;transition:width .3s}
@@ -115,8 +121,47 @@ nav a:hover,nav a.active{color:#fff;border-bottom-color:#fff}
 .file-section-header .count{font-size:11px;color:var(--text-dim);font-weight:400}
 .file-section-header .arrow{transition:.2s;font-size:10px;color:var(--text-dim)}
 .file-section-header .arrow.open{transform:rotate(90deg)}
-.file-section-body{padding:0}
+.file-section-body{padding:0;max-height:420px;overflow-y:auto}
 .file-section-body .file-table{width:100%}
 .file-section-body .file-table th:first-child,.file-section-body .file-table td:first-child{padding-left:20px}
 .file-table .name-row{display:flex;align-items:center;gap:6px}
 .file-table .no-file{color:var(--text-dim);font-size:12px;padding:10px 20px;display:block}
+
+/* API 定义列表 */
+.api-def-row{display:flex;flex-direction:column;padding:6px 10px;border-bottom:1px solid #f0f0f0;font-size:12px;position:relative}
+.api-def-row:last-child{border-bottom:none}
+.api-def-row:hover{background:#fafbfd}
+.api-def-header{display:flex;align-items:center;gap:6px;width:100%;user-select:none;padding:2px 0}
+.api-def-header .api-method{font-weight:600;min-width:40px;font-size:11px;text-transform:uppercase;flex-shrink:0}
+.api-def-header .api-url{font-family:Consolas,'Courier New',monospace;font-size:11px;color:var(--primary);word-break:break-all;flex-shrink:0;max-width:260px;overflow:hidden;text-overflow:ellipsis}
+.api-def-header .api-name{color:var(--text-dim);font-size:10px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:120px}
+.api-def-header .api-chips{display:flex;align-items:center;gap:3px;flex-wrap:wrap;margin-left:auto}
+.api-def-header .api-row-actions{display:flex;align-items:center;gap:3px;flex-shrink:0;margin-left:4px}
+
+/* 展开的详情区 */
+.api-def-detail{width:100%;margin-top:4px;margin-left:20px;padding:8px;background:#fafbfc;border:1px solid var(--border);border-radius:4px}
+.api-def-detail .api-json{font-family:Consolas,'Courier New',monospace;font-size:11px;line-height:1.5;white-space:pre-wrap;word-break:break-all;max-height:300px;overflow-y:auto;margin:0;padding:8px;background:#fff;border:1px solid #eee;border-radius:3px;color:#333}
+.api-def-detail .api-detail-section{font-size:11px;color:var(--text-dim);margin:8px 0 4px}
+.api-def-detail .api-detail-section:first-child{margin-top:0}
+.api-def-detail .api-detail-actions{display:flex;gap:6px;margin-top:8px}
+
+.ann-chip{display:inline-flex;align-items:center;gap:2px;padding:1px 7px;border-radius:10px;font-size:10px;cursor:pointer;user-select:none;white-space:nowrap;transition:.15s;line-height:1.6}
+.ann-chip.auto{background:#e8f0fe;color:#1a73e8;border:1px solid #d2e3fc}
+.ann-chip.manual{background:#fef3e0;color:#e37400;border:1px solid #fde2c0}
+.ann-chip.inactive{opacity:.4;text-decoration:line-through}
+.ann-chip:hover{filter:brightness(.95)}
+.ann-chip .ann-remove{font-weight:700;margin-left:1px;opacity:.5;font-size:11px;line-height:1}
+.ann-chip .ann-remove:hover{opacity:1;color:var(--danger)}
+.ann-chip .ann-src{font-size:8px;opacity:.6;text-transform:uppercase}
+
+.ann-add-btn{display:inline-flex;align-items:center;justify-content:center;width:18px;height:18px;border-radius:50%;border:1px dashed var(--border);background:#fff;cursor:pointer;font-size:13px;color:var(--text-dim);position:relative;transition:.15s;line-height:1}
+.ann-add-btn:hover{border-color:var(--primary);color:var(--primary);background:var(--primary-bg)}
+
+.ann-dropdown{position:fixed;background:#fff;border:1px solid var(--border);border-radius:6px;box-shadow:0 4px 16px rgba(0,0,0,.14);z-index:200;min-width:200px;padding:4px}
+.ann-dropdown .ann-opt{padding:7px 10px;font-size:11px;cursor:pointer;border-radius:3px;border-bottom:1px solid #f8f8f8}
+.ann-dropdown .ann-opt:last-child{border-bottom:none}
+.ann-dropdown .ann-opt:hover{background:var(--primary-bg)}
+.ann-dropdown .ann-opt .ann-opt-label{font-weight:600;color:var(--text)}
+.ann-dropdown .ann-opt .ann-opt-desc{font-size:10px;color:var(--text-dim);margin-top:1px}
+.ann-dropdown .ann-opt.existing{opacity:.4;cursor:default}
+.ann-dropdown .ann-opt.existing:hover{background:#fff}

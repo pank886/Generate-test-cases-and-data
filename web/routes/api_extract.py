@@ -6,7 +6,7 @@ import uuid
 from datetime import datetime
 
 import config
-from fastapi import APIRouter, UploadFile, File, Form
+from fastapi import APIRouter, UploadFile, File, Form, BackgroundTasks
 from fastapi.responses import JSONResponse
 
 from observability import get_logger
@@ -18,39 +18,52 @@ router = APIRouter(prefix="/api/upload", tags=["api-extract"])
 
 
 @router.post("/extract-api")
-async def extract_api_doc(file: UploadFile = File(...),
+async def extract_api_doc(file: UploadFile = File(None),
+                           file_path: str = Form(""),
                            module: str = Form("")):
-    """上传接口 MD → LLM 提取接口列表 → 返回（不入库）。"""
-    # Windows 路径上限 260 字符，截断原始文件名防止超长
-    raw_name = os.path.basename(file.filename)
-    if len(raw_name) > 100:
-        name_part, ext = os.path.splitext(raw_name)
-        raw_name = name_part[:100] + ext
-    safe_filename = f"{uuid.uuid4().hex[:8]}_{raw_name}"
-    file_path = os.path.join(config.BASE_DIR, "uploads", "md", safe_filename)
-    os.makedirs(os.path.dirname(file_path), exist_ok=True)
-    with open(file_path, "wb") as f:
-        f.write(await file.read())
+    """LLM 提取接口列表 → 返回（不入库）。
+
+    两种传参方式：
+      - 直接上传文件：file + module
+      - 指定已上传文件：file_path
+    """
+    # 处理直接上传的文件
+    if file is not None and file.filename:
+        raw_name = os.path.basename(file.filename)
+        if len(raw_name) > 100:
+            name_part, ext = os.path.splitext(raw_name)
+            raw_name = name_part[:100] + ext
+        safe_filename = f"{uuid.uuid4().hex[:8]}_{raw_name}"
+        file_path = os.path.join(config.BASE_DIR, "uploads", "md", safe_filename)
+        os.makedirs(os.path.dirname(file_path), exist_ok=True)
+        with open(file_path, "wb") as f:
+            f.write(await file.read())
+        own_file = True
+    else:
+        own_file = False
+
+    if not file_path or not os.path.exists(file_path):
+        return JSONResponse(status_code=400,
+                            content={"success": False, "message": "文件不存在"})
     try:
         result = await asyncio.to_thread(
             process_api_doc_extract, file_path,
             default_module=module or None,
         )
         result["file_path"] = file_path
+        result["file_name"] = os.path.basename(file_path)
         return {"success": True, **result}
     except Exception as e:
-        # MD 是中间文件，提取失败后删除避免残留
-        try:
-            os.remove(file_path)
-        except Exception:
-            logger.warning("清理临时文件失败: %s", file_path, exc_info=True)
+        if own_file:
+            try: os.remove(file_path)
+            except Exception: pass
         return JSONResponse(status_code=500,
                             content={"success": False, "message": str(e)})
 
 
 @router.post("/commit-api")
-async def commit_api_endpoint(data: dict):
-    """用户确认后，每个接口独立入库。仅当全部接口选中时才废弃原文件。"""
+async def commit_api_endpoint(data: dict, background_tasks: BackgroundTasks = None):
+    """用户确认后，后台逐条入库（含向量化），前端轮询进度。"""
     file_path = data.get("file_path", "")
     module_name = data.get("module_name", "")
     apis = data.get("apis", [])
@@ -63,24 +76,14 @@ async def commit_api_endpoint(data: dict):
     if not abs_path.startswith(uploads_root):
         return JSONResponse(status_code=403,
                             content={"success": False, "message": "非法路径"})
-    try:
-        result = _commit(file_path, module_name, apis,
-                          delete_original=all_selected)
-        # 更新内存状态
-        from web.state import _add_imported_file  # 避免循环导入
-        now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        for api in apis:
-            await _add_imported_file({
-                "name": f"{api.get('method', '?')} {api.get('url', '')}",
-                "size": "—",
-                "chunks": 1,
-                "time": now_str,
-                "type": "api",
-            })
-        return {"success": True, **result}
-    except Exception as e:
-        return JSONResponse(status_code=500,
-                            content={"success": False, "message": str(e)})
+    from web.state import _create_task
+    task_id = await _create_task()
+    from web.tasks import _commit_apis_bg
+    background_tasks.add_task(
+        _commit_apis_bg, task_id, file_path, module_name, apis, all_selected,
+    )
+    return {"success": True, "task_id": task_id,
+            "message": f"开始入库 {len(apis)} 个接口..."}
 
 
 @router.post("/retry-api")
@@ -98,6 +101,39 @@ async def retry_api_extract(data: dict):
         )
         result["file_path"] = file_path
         return {"success": True, **result}
+    except Exception as e:
+        return JSONResponse(status_code=500,
+                            content={"success": False, "message": str(e)})
+
+
+@router.post("/extract-api-code")
+async def extract_api_code(file_path: str = Form(""), module_name: str = Form("")):
+    """纯代码提取接口（YApi MD 格式），不走 LLM。"""
+    from ingest_v2 import extract_apis_from_yapi_md, _extract_text
+    if not file_path or not os.path.exists(file_path):
+        return JSONResponse(status_code=400,
+                            content={"success": False, "message": "文件不存在"})
+    try:
+        from agent_components.api_annotations import ApiAnnotationRegistry
+        full_text = _extract_text(file_path).strip()
+        if not full_text:
+            return JSONResponse(status_code=400,
+                                content={"success": False, "message": "文档内容为空"})
+        extracted = extract_apis_from_yapi_md(full_text)
+        apis = extracted["apis"]
+        if not module_name:
+            module_name = extracted["module_name"] or (apis[0]["name"] if apis else "Unknown")
+        # 自动标注
+        for api in apis:
+            ApiAnnotationRegistry.apply_all(api)
+        return {
+            "success": True,
+            "module_name": module_name,
+            "apis": apis,
+            "file_path": file_path,
+            "file_name": os.path.basename(file_path),
+            "extract_method": "code",
+        }
     except Exception as e:
         return JSONResponse(status_code=500,
                             content={"success": False, "message": str(e)})

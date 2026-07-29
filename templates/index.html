@@ -34,18 +34,20 @@
       <input type="file" accept=".zip" onchange="uploadFile(this,'axure')">
     </label>
   </div></div>
+  <div id="pending-api-banner" class="card" style="display:none;background:#fff3cd;border:1px solid #ffc107;cursor:pointer;margin-bottom:12px" onclick="if(_pendingApiConfirm)showApiConfirmModal(_pendingApiConfirm.result,_pendingApiConfirm.fileName)"></div>
   <div id="upload-progress-container"></div>
   <div class="card" id="files-card">
     <div class="files-header">
       <h3>📋 已入库文档</h3>
       <button class="btn btn-sm btn-outline" onclick="refreshFileList()">🔄 刷新</button>
+      <button class="btn btn-sm btn-danger-outline" onclick="batchDeleteFiles()">🗑 批量删除</button>
     </div>
     <div class="filter-bar">
       <button class="filter-btn active" data-filter="all" onclick="setFileFilter('all',this)">全部</button>
       <button class="filter-btn" data-filter="product" onclick="setFileFilter('product',this)">📄 产品文档</button>
       <button class="filter-btn" data-filter="api" onclick="setFileFilter('api',this)">📡 接口文档</button>
       <button class="filter-btn" data-filter="axure" onclick="setFileFilter('axure',this)">🎨 Axure 原型</button>
-      <input type="text" class="filter-search" placeholder="🔍 搜索文件名..." oninput="filterFileList()" id="file-filter-input">
+      <input type="text" class="filter-search" placeholder="🔍 搜索文件名（回车确认）..." onkeydown="if(event.key==='Enter')filterFileList()" id="file-filter-input">
     </div>
     <div id="file-sections"></div>
   </div>
@@ -136,11 +138,12 @@
   <div class="modal" id="modal-content"></div>
 </div>
 <div class="toast" id="toast"></div>
+<div class="ann-dropdown hidden" id="ann-dropdown"></div>
 
 <script>
   var VECTOR_READY = {{ vector_ready | tojson | safe }};
   var INITIAL_FILES = {{ imported_files | tojson | safe }};
 </script>
-<script src="/static/app.js?v=20260711"></script>
+<script src="/static/app.js?v=20260729m"></script>
 </body>
 </html>

@@ -64,7 +64,7 @@ async def change_doc_module(data: dict):
 @router.get("/{doc_id}/chunks")
 async def get_doc_chunks(doc_id: str):
     """获取文档的文本块内容。"""
-    from web.app import _chroma_db  # 避免循环导入
+    from web.state import _chroma_db  # 避免循环导入，从 state 取避免 None 引用
     try:
         db = _chroma_db
         chunks = db.get_doc_chunks(doc_id)
@@ -77,7 +77,7 @@ async def get_doc_chunks(doc_id: str):
 @router.get("/{doc_id}/apis")
 async def get_doc_apis(doc_id: str):
     """获取文档下的所有接口定义。"""
-    from web.app import _chroma_db  # 避免循环导入
+    from web.state import _chroma_db  # 避免循环导入，从 state 取避免 None 引用
     try:
         db = _chroma_db
         apis = db.get_doc_apis(doc_id)

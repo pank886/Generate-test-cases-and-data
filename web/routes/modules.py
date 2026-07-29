@@ -23,7 +23,7 @@ async def get_modules():
 @router.get("/{module_name}/docs")
 async def get_module_docs(module_name: str):
     """获取模块关联的所有文档和接口。"""
-    from web.app import _chroma_db  # 避免循环导入
+    from web.state import _chroma_db  # 避免循环导入，从 state 取避免 None 引用
 
     try:
         with get_session_ctx() as session:
@@ -263,9 +263,14 @@ async def delete_module_analysis(module_name: str):
 
 
 @router.get("/{module_name}/api-defs")
-async def get_module_api_defs(module_name: str):
-    """读取模块的接口定义（含 annotations 字段）。"""
-    from web.app import _chroma_db
+async def get_module_api_defs(module_name: str, doc_id: str = ""):
+    """读取模块的接口定义（含 annotations 字段）。
+
+    可传 doc_id 过滤只返回该文档的接口；不传则返回全部。
+    ChromaDB 存储格式为 {api_name, content: "JSON字符串"}，此处解析 content 为扁平 dict。
+    """
+    import json as _json
+    from web.state import _chroma_db  # 从 state 取值避免 None 引用问题
     with get_session_ctx() as session:
         docs = BindingOps.get_bound_docs(session, module_name)
         chroma = _chroma_db
@@ -273,37 +278,75 @@ async def get_module_api_defs(module_name: str):
             return {"success": True, "api_defs": []}
         result = []
         for d in docs:
-            if d.doc_type == "api":
-                apis = chroma.get_doc_apis(d.id)
-                for api in apis:
-                    result.append(api)
+            if d.doc_type != "api":
+                continue
+            if doc_id and d.id != doc_id:
+                continue
+            apis = chroma.get_doc_apis(d.id)
+            for raw in apis:
+                api = {}
+                content_str = raw.get("content", "")
+                if content_str:
+                    try:
+                        api = _json.loads(content_str)
+                    except (_json.JSONDecodeError, TypeError):
+                        api = {"_parse_error": True, "_raw": str(raw)}
+                if not api.get("name") and raw.get("api_name"):
+                    api["name"] = raw["api_name"]
+                if "annotations" not in api:
+                    api["annotations"] = {}
+                result.append(api)
         return {"success": True, "api_defs": result}
 
 
 @router.put("/{module_name}/api-defs/{index}/annotations")
 async def update_api_annotations(module_name: str, index: int, data: dict):
-    """更新单个接口的 annotations 字段。"""
+    """更新单个接口的 annotations 字段，或完整替换 API 定义（传 full_update）。
+
+    两种模式：
+      - annotations 更新：body = {annotations: {...}, doc_id: "..."}
+      - 完整更新：body = {annotations: {...}, doc_id: "...", full_update: {...}}
+    """
+    import json as _json
     annotations = data.get("annotations")
+    doc_id = data.get("doc_id", "")
+    full_update = data.get("full_update")
     with get_session_ctx() as session:
-        docs = BindingOps.get_bound_docs(session, module_name)
-        from web.app import _chroma_db
+        from web.state import _chroma_db  # 从 state 取值避免 None 引用问题
         chroma = _chroma_db
         if not chroma:
             return JSONResponse(status_code=500,
                                 content={"success": False, "message": "ChromaDB 未初始化"})
+        # 收集目标文档的 API（支持 doc_id 过滤）
+        docs = BindingOps.get_bound_docs(session, module_name)
         api_defs = []
         for d in docs:
-            if d.doc_type == "api":
-                api_defs.extend(chroma.get_doc_apis(d.id))
+            if d.doc_type != "api":
+                continue
+            if doc_id and d.id != doc_id:
+                continue
+            api_defs.extend(chroma.get_doc_apis(d.id))
         if index < 0 or index >= len(api_defs):
             return JSONResponse(status_code=400,
                                 content={"success": False, "message": "索引超出范围"})
-        api_defs[index]["annotations"] = annotations
-        # 重新写入 ChromaDB（覆盖该 API 的向量记录）
+        raw = dict(api_defs[index])
+        if raw.get("content"):
+            try:
+                content_obj = _json.loads(raw["content"])
+                if full_update:
+                    # 完整更新：用 full_update 替换 content 的所有字段
+                    for k, v in full_update.items():
+                        content_obj[k] = v
+                content_obj["annotations"] = annotations
+                raw["content"] = _json.dumps(content_obj, ensure_ascii=False)
+            except (_json.JSONDecodeError, TypeError):
+                pass
+        # 重新写入 ChromaDB
         from agent_components.dual_chroma import get_chroma_db
         db = get_chroma_db()
-        db.delete_by_doc_id(api_defs[index].get("_doc_id", ""))
-        db.add_api_defs(api_defs[index].get("_doc_id", ""), [api_defs[index]])
+        parent_doc_id = raw.get("_doc_id", "")
+        db.delete_by_doc_id(parent_doc_id)
+        db.add_api_defs(parent_doc_id, [raw])
         return {"success": True, "message": "已更新"}
 
 
