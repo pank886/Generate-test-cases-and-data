@@ -168,3 +168,30 @@ class GlossaryTerm(Base):
 
     def __repr__(self):
         return f"<GlossaryTerm {self.term}>"
+
+
+# ========================================================================
+# 模块场景分析（Phase A 入库预处理产物）
+# ========================================================================
+
+class ModuleAnalysis(Base):
+    """模块的场景+接口映射分析结果。
+
+    Phase A 按钮触发 LLM 生成，Phase B 消费时跳过重复场景识别。
+    通过 module_id (UUID) 关联 modules 表，模块删除时级联删除。
+    """
+    __tablename__ = "module_analysis"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    module_id = Column(String(36), ForeignKey("modules.id", ondelete="CASCADE"),
+                       nullable=False, unique=True, index=True)
+    module_name = Column(String(200), nullable=False)  # 冗余，便于前端展示
+    analysis_json = Column(Text, nullable=False)         # 完整 JSON（方案 §2.2 结构）
+    status = Column(String(20), default="draft")          # draft | reviewed | approved
+    extracted_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    modified_at = Column(DateTime, onupdate=lambda: datetime.now(timezone.utc))
+    modified_by = Column(String(100), default="")
+    version = Column(Integer, default=1)
+
+    def __repr__(self):
+        return f"<ModuleAnalysis {self.module_name}>"

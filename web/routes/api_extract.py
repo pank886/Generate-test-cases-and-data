@@ -1,5 +1,6 @@
 """接口提取相关路由：上传 MD → LLM 提取 → 确认入库。"""
 
+import asyncio
 import os
 import uuid
 from datetime import datetime
@@ -9,6 +10,7 @@ from fastapi import APIRouter, UploadFile, File, Form
 from fastapi.responses import JSONResponse
 
 from observability import get_logger
+from ingest_v2 import process_api_doc_extract, commit_api_docs as _commit
 
 logger = get_logger(__name__)
 
@@ -19,8 +21,6 @@ router = APIRouter(prefix="/api/upload", tags=["api-extract"])
 async def extract_api_doc(file: UploadFile = File(...),
                            module: str = Form("")):
     """上传接口 MD → LLM 提取接口列表 → 返回（不入库）。"""
-    import asyncio
-    from ingest_v2 import process_api_doc_extract
     # Windows 路径上限 260 字符，截断原始文件名防止超长
     raw_name = os.path.basename(file.filename)
     if len(raw_name) > 100:
@@ -51,8 +51,6 @@ async def extract_api_doc(file: UploadFile = File(...),
 @router.post("/commit-api")
 async def commit_api_endpoint(data: dict):
     """用户确认后，每个接口独立入库。仅当全部接口选中时才废弃原文件。"""
-    from ingest_v2 import commit_api_docs as _commit
-
     file_path = data.get("file_path", "")
     module_name = data.get("module_name", "")
     apis = data.get("apis", [])
@@ -69,7 +67,7 @@ async def commit_api_endpoint(data: dict):
         result = _commit(file_path, module_name, apis,
                           delete_original=all_selected)
         # 更新内存状态
-        from web.app import _add_imported_file
+        from web.state import _add_imported_file  # 避免循环导入
         now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         for api in apis:
             await _add_imported_file({
@@ -88,8 +86,6 @@ async def commit_api_endpoint(data: dict):
 @router.post("/retry-api")
 async def retry_api_extract(data: dict):
     """用户拒绝拆分结果 → 重新 LLM 提取。"""
-    import asyncio
-    from ingest_v2 import process_api_doc_extract
     file_path = data.get("file_path", "")
     module = data.get("module_name", "")
     if not file_path:

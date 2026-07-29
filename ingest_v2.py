@@ -546,6 +546,9 @@ def commit_api_docs(file_path: str, module_name: str, apis: list[dict],
         url = api.get("url", "")
         method = api.get("method", "?")
         doc_id = _safe_doc_id("api", file_name, module_name, method, url, api_name)
+        # ★ 自动标注 API 异常标识（is_export / has_path_params 等）
+        from agent_components.api_annotations import ApiAnnotationRegistry
+        ApiAnnotationRegistry.apply_all(api)
         doc_ids.append(doc_id)
         docs_to_insert.append(Document(
             id=doc_id,

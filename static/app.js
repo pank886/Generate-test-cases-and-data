@@ -311,12 +311,19 @@ function renderTreeNode(node, depth) {
 function selectModule(id, name) {
   selectedModuleId = id; selectedModuleName = name; selectedDocId = null; selectedDocType = null;
   document.getElementById('chunk-viewer').classList.add('hidden');
+  document.getElementById('analysis-result').innerHTML = '';
   renderModuleTree(allModules);
   document.getElementById('center-title').textContent = name;
   showUnassociatedPanel();
   loadBoundDocs(name);
   loadUnassociatedDocs();
   loadRelatedModules(name);
+  // 显示分析区域
+  var sec = document.getElementById('analysis-section');
+  sec.style.display = 'block';
+  document.getElementById('analyze-scenarios-btn').style.display = '';
+  document.getElementById('analysis-status').textContent = '';
+  loadModuleAnalysis(name);
 }
 function flattenTree(tree) {
   let out = [];
@@ -451,19 +458,65 @@ function renderCurrentChunk() {
     + '</div>';
   document.getElementById('chunk-viewer').innerHTML = nav + '<div style="white-space:pre-wrap;line-height:1.7;margin-top:8px">' + esc(c.content) + '</div>';
 }
+// ── 绑定变更前检查：模块已有 analysis 时弹窗确认 ──
+async function checkAnalysisAndConfirm(modName) {
+  try {
+    const r = await fetch('/api/modules/' + encodeURIComponent(modName) + '/analysis');
+    const d = await r.json();
+    if (d.success && d.analysis && d.analysis.analysis_json) {
+      // 已有分析 → 弹窗确认
+      return new Promise(resolve => {
+        document.getElementById('modal-content').innerHTML =
+          '<h3>⚠️ 确认修改绑定关系</h3>'
+          + '<p style="margin:12px 0">修改绑定关系后，已有的场景分析将失效，需要<b>重新生成</b>。</p>'
+          + '<p style="margin:12px 0;color:var(--text-dim)">确认修改？</p>'
+          + '<div class="btn-row" style="margin-top:16px">'
+          + '<button class="btn btn-outline" id="bind-cancel-btn">取消</button>'
+          + '<button class="btn btn-danger" id="bind-confirm-btn">确认修改</button>'
+          + '</div>';
+        document.getElementById('modal-overlay').classList.remove('hidden');
+        document.getElementById('bind-cancel-btn').onclick = () => { closeModal(); resolve(false); };
+        document.getElementById('bind-confirm-btn').onclick = () => { closeModal(); resolve(true); };
+      });
+    }
+    return true;  // 无 analysis → 直接允许
+  } catch (e) { return true; }  // 网络错误 → 不阻断操作
+}
+
+async function invalidateAnalysis(modName) {
+  /* 删除过期分析 + 重置 UI（绑定变更后由调用方在操作成功后调用）。*/
+  try {
+    await fetch('/api/modules/' + encodeURIComponent(modName) + '/analysis', { method: 'DELETE' });
+  } catch (e) { /* 静默——删除失败不阻塞主操作 */ }
+  document.getElementById('analyze-scenarios-btn').style.display = '';
+  document.getElementById('edit-analysis-btn').style.display = 'none';
+  document.getElementById('analysis-status').textContent = '（绑定已变更，需重新分析）';
+  document.getElementById('analysis-result').innerHTML = '';
+}
+
 async function bindDocToModule(docId, docType) {
   if (!selectedModuleName) { toast('请先选择模块'); return; }
+  if (!(await checkAnalysisAndConfirm(selectedModuleName))) return;
   try {
     const r = await fetch('/api/bindings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ source_type: docType, source_id: docId, target_type: 'module', target_id: selectedModuleName }) });
-    const d = await r.json(); toast(d.success ? '✅ 已关联' : '❌ ' + d.message);
+    const d = await r.json();
+    if (d.success) {
+      toast('✅ 已关联');
+      await invalidateAnalysis(selectedModuleName);
+    } else toast('❌ ' + d.message);
     loadBoundDocs(selectedModuleName); loadUnassociatedDocs(); loadRelatedModules(selectedModuleName);
   } catch (e) { console.error(e); toast('❌ 关联失败'); }
 }
 async function unbindDocFromModule(docId, docType) {
   if (!selectedModuleName) return;
+  if (!(await checkAnalysisAndConfirm(selectedModuleName))) return;
   try {
     const r = await fetch('/api/bindings', { method: 'DELETE', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ a_type: docType, a_id: docId, b_type: 'module', b_id: selectedModuleName }) });
-    const d = await r.json(); toast(d.success ? '✅ 已解绑' : '❌ ' + d.message);
+    const d = await r.json();
+    if (d.success) {
+      toast('✅ 已解绑');
+      await invalidateAnalysis(selectedModuleName);
+    } else toast('❌ ' + d.message);
     loadBoundDocs(selectedModuleName); loadUnassociatedDocs(); loadRelatedModules(selectedModuleName);
   } catch (e) { console.error(e); toast('❌ 解绑失败'); }
 }
@@ -505,24 +558,32 @@ async function loadRelatedModules(modName) {
 
 async function linkModuleToModule() {
   if (!selectedModuleName) return;
+  if (!(await checkAnalysisAndConfirm(selectedModuleName))) return;
   const sel = document.getElementById('link-module-select');
   const targetName = sel.value;
   if (!targetName) return;
   try {
     const r = await fetch('/api/bindings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ source_type: 'module', source_id: selectedModuleName, target_type: 'module', target_id: targetName }) });
     const d = await r.json();
-    if (d.success) { toast('✅ 已关联模块: ' + targetName); loadRelatedModules(selectedModuleName); }
-    else toast('❌ ' + d.message);
+    if (d.success) {
+      toast('✅ 已关联模块: ' + targetName);
+      await invalidateAnalysis(selectedModuleName);
+      loadRelatedModules(selectedModuleName);
+    } else toast('❌ ' + d.message);
   } catch (e) { console.error(e); toast('❌ 关联失败'); }
 }
 
 async function unlinkModuleFromModule(targetName) {
   if (!selectedModuleName) return;
+  if (!(await checkAnalysisAndConfirm(selectedModuleName))) return;
   try {
     const r = await fetch('/api/bindings', { method: 'DELETE', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ a_type: 'module', a_id: selectedModuleName, b_type: 'module', b_id: targetName }) });
     const d = await r.json();
-    if (d.success) { toast('✅ 已解除关联: ' + targetName); loadRelatedModules(selectedModuleName); }
-    else toast('❌ ' + d.message);
+    if (d.success) {
+      toast('✅ 已解除关联: ' + targetName);
+      await invalidateAnalysis(selectedModuleName);
+      loadRelatedModules(selectedModuleName);
+    } else toast('❌ ' + d.message);
   } catch (e) { console.error(e); toast('❌ 解除失败'); }
 }
 
@@ -821,6 +882,151 @@ function init() {
     if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendWorkflowChat(); }
   });
   document.getElementById('file-filter-input').addEventListener('input', filterFileList);
+}
+
+// ── 模块场景分析（Phase A 入库预处理） ──
+
+async function loadModuleAnalysis(modName) {
+  /* 加载已有分析结果并渲染 */
+  try {
+    const r = await fetch('/api/modules/' + encodeURIComponent(modName) + '/analysis');
+    const d = await r.json();
+    if (d.success && d.analysis && d.analysis.analysis_json) {
+      document.getElementById('analyze-scenarios-btn').style.display = 'none';
+      document.getElementById('edit-analysis-btn').style.display = '';
+      document.getElementById('analysis-status').textContent =
+        '✅ 已分析 (v' + (d.analysis.version || 1) + ')';
+      renderAnalysisResult(d.analysis.analysis_json);
+    } else {
+      document.getElementById('analyze-scenarios-btn').style.display = '';
+      document.getElementById('edit-analysis-btn').style.display = 'none';
+      document.getElementById('analysis-status').textContent = '（尚未分析）';
+    }
+  } catch (e) {
+    document.getElementById('analysis-status').textContent = '⚠️ 加载失败';
+  }
+}
+
+async function analyzeScenarios() {
+  /* 触发后台场景分析 */
+  if (!selectedModuleName) return;
+  const btn = document.getElementById('analyze-scenarios-btn');
+  const st = document.getElementById('analysis-status');
+  btn.disabled = true; btn.textContent = '⏳ 分析中...'; st.textContent = '';
+  try {
+    const r = await fetch('/api/module/' + encodeURIComponent(selectedModuleName) + '/analyze-scenarios', { method: 'POST' });
+    const d = await r.json();
+    if (!d.task_id) { st.textContent = '❌ 提交失败'; btn.disabled = false; btn.textContent = '🔍 分析测试场景'; return; }
+    await pollTask(d.task_id,
+      (p, m) => { st.textContent = m + ' (' + p + '%)'; },
+      result => {
+        btn.disabled = false; btn.textContent = '🔄 重新分析';
+        if (result && !result.error) {
+          st.textContent = '✅ 分析完成';
+          loadModuleAnalysis(selectedModuleName);
+        } else {
+          st.textContent = '❌ ' + (result ? result.error : '分析失败');
+        }
+      });
+  } catch (e) { st.textContent = '❌ ' + e.message; btn.disabled = false; btn.textContent = '🔍 分析测试场景'; }
+}
+
+function renderAnalysisResult(analysisJson) {
+  /* 渲染场景-接口映射图 */
+  var parsed, html = '';
+  try { parsed = JSON.parse(analysisJson); } catch (e) { parsed = null; }
+  if (!parsed) {
+    document.getElementById('analysis-result').innerHTML =
+      '<div class="empty-hint">分析结果解析失败，请点击编辑检查 JSON 格式</div>';
+    return;
+  }
+  var apiAnalysis = parsed.api_analysis || [];
+  var scenarioAnalysis = parsed.scenario_analysis || [];
+  if (!apiAnalysis.length && !scenarioAnalysis.length) {
+    document.getElementById('analysis-result').innerHTML =
+      '<div class="empty-hint">分析结果为空（无场景和接口）</div>';
+    return;
+  }
+
+  // 场景列表
+  html += '<div style="font-size:13px;font-weight:600;margin-bottom:6px">📋 ' + scenarioAnalysis.length + ' 个场景 · '
+    + apiAnalysis.length + ' 个接口</div>';
+
+  // 场景卡片
+  scenarioAnalysis.forEach(function(s, si) {
+    html += '<div class="card" style="margin-bottom:8px;padding:10px"><b>' + esc(s.scenario_name || ('场景' + (si+1))) + '</b>';
+    html += '<div style="font-size:11px;color:var(--text-dim);margin:4px 0">' + esc(s.description || '') + '</div>';
+    var steps = s.steps || [];
+    if (steps.length) {
+      html += '<div style="font-size:11px;margin-top:6px">';
+      steps.forEach(function(st) {
+        var color = st.failure_condition ? 'color:var(--danger)' : '';
+        var icon = st.failure_condition ? '⚠️' : '→';
+        html += '<div style="' + color + ';padding:2px 0">' + icon + ' <b>' + esc(st.api || '') + '</b>: '
+          + esc(st.role || '') + '</div>';
+        if (st.data_depends_on && st.data_depends_on.length) {
+          html += '<div style="font-size:10px;color:var(--text-dim);padding-left:16px">依赖: '
+            + st.data_depends_on.map(esc).join(', ') + '</div>';
+        }
+      });
+      html += '</div>';
+    }
+    var deps = s.cross_module_deps || [];
+    if (deps.length) {
+      html += '<div style="font-size:10px;margin-top:4px">🔗 跨模块: ' + deps.map(function(d) {
+        return esc(d.module || '') + (d.constraint ? ' (' + esc(d.constraint) + ')' : '');
+      }).join('; ') + '</div>';
+    }
+    html += '</div>';
+  });
+
+  // 接口列表（折叠）
+  if (apiAnalysis.length) {
+    html += '<details style="font-size:12px;margin-top:8px"><summary>📡 接口维度分析（' + apiAnalysis.length + ' 个）</summary>';
+    apiAnalysis.forEach(function(a) {
+      var scope = a.scope || {};
+      var tags = [];
+      if ((scope['正向'] || []).length) tags.push('<span style="color:var(--primary)">正向×' + scope['正向'].length + '</span>');
+      if ((scope['边界值'] || []).length) tags.push('<span style="color:#e37400">边界×' + scope['边界值'].length + '</span>');
+      if ((scope['逆向'] || []).length) tags.push('<span style="color:var(--danger)">逆向×' + scope['逆向'].length + '</span>');
+      if ((scope['安全'] || []).length) tags.push('<span style="color:#933">安全×' + scope['安全'].length + '</span>');
+      html += '<div style="padding:3px 0;border-bottom:1px solid var(--border)">'
+        + '<b>' + esc(a.api_method || '?') + '</b> ' + esc(a.api_path || '?')
+        + ' — ' + esc(a.api_name || '') + ' <span style="font-size:10px">' + tags.join(' ') + '</span>'
+        + '</div>';
+    });
+    html += '</details>';
+  }
+
+  document.getElementById('analysis-result').innerHTML = html;
+}
+
+function editAnalysis() {
+  /* 弹窗编辑分析结果 JSON */
+  if (!selectedModuleName) return;
+  fetch('/api/modules/' + encodeURIComponent(selectedModuleName) + '/analysis')
+    .then(r => r.json()).then(d => {
+      var json = '';
+      if (d.success && d.analysis && d.analysis.analysis_json) {
+        try { json = JSON.stringify(JSON.parse(d.analysis.analysis_json), null, 2); }
+        catch (e) { json = d.analysis.analysis_json; }
+      }
+      showModal('<h3>✏️ 编辑场景分析</h3><p style="font-size:12px;color:var(--text-dim);margin-bottom:8px">模块: <b>' + esc(selectedModuleName) + '</b></p>'
+        + '<textarea id="edit-analysis-json" style="width:100%;min-height:320px;padding:8px;border:1px solid var(--border);border-radius:4px;font-family:monospace;font-size:12px">' + escText(json) + '</textarea>'
+        + '<div class="btn-row" style="margin-top:12px"><button class="btn btn-outline js-close-modal">取消</button><button class="btn btn-success" id="save-analysis-btn">💾 保存</button></div>');
+      document.getElementById('save-analysis-btn').onclick = async () => {
+        var newJson = document.getElementById('edit-analysis-json').value;
+        try { JSON.parse(newJson); } catch (e) { toast('❌ JSON 格式错误: ' + e.message); return; }
+        closeModal();
+        var r = await fetch('/api/modules/' + encodeURIComponent(selectedModuleName) + '/analysis', {
+          method: 'PUT', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ analysis_json: newJson }),
+        });
+        var rd = await r.json();
+        toast(rd.success ? '✅ 已保存' : '❌ ' + (rd.message || '保存失败'));
+        if (rd.success) loadModuleAnalysis(selectedModuleName);
+      };
+    });
 }
 
 document.addEventListener('DOMContentLoaded', init);

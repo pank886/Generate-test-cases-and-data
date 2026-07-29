@@ -15,7 +15,7 @@ async def confirm_plan(excel_path: str = Form(None),
                        background_tasks: BackgroundTasks = None):
     """确认测试计划 → 立即返回 task_id，后台异步生成 .py + .yaml。"""
     import config
-    from web.app import _phase_b_components, _create_task
+    from web.state import _phase_b_components, _create_task
     from observability import get_logger
 
     logger = get_logger(__name__)
@@ -52,7 +52,7 @@ async def confirm_plan(excel_path: str = Form(None),
 @router.get("/task/{task_id}")
 async def get_task_status(task_id: str):
     """轮询查询后台任务进度。"""
-    from web.app import _task_store, _task_store_lock
+    from web.state import _task_store, _task_store_lock
 
     async with _task_store_lock:
         task = _task_store.get(task_id)
@@ -77,7 +77,7 @@ async def workflow_start(user_input: str = Form(...),
     import time
     import uuid
     from agent_components.graph_builder import _make_initial_state
-    from web.app import (
+    from web.state import (
         _get_imported_files, _phase_b_graph, _phase_b_components,
         _vector_ready,
         _workflow_sessions, _workflow_sessions_lock, _cleanup_expired_sessions,
@@ -161,7 +161,7 @@ async def workflow_confirm(session_id: str = Form(...),
       3. 都失败 → 当作新描述，重新走 /workflow/start
     """
     import time
-    from web.app import (
+    from web.state import (
         _phase_b_graph, _workflow_sessions, _workflow_sessions_lock,
         _cleanup_expired_sessions, _create_task,
     )

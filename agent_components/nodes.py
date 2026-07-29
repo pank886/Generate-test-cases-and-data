@@ -5,7 +5,7 @@ import re
 import threading
 from collections import defaultdict
 from datetime import datetime
-from typing import Optional, Type
+from typing import Callable, Optional, Type
 
 import openai
 from pydantic import BaseModel, ValidationError
@@ -35,8 +35,6 @@ from prompts.response_model import (
     ExcelPlanV2,
     SharedPrecondition,
     TestCaseRow,
-    PyFile,
-    ClassCode,
     IntentConfirmation,
 )
 from prompts.definitions import PromptFactory
@@ -122,11 +120,15 @@ class ChatTestAgentGraph(RetrievalMixin, GenerationMixin):
             for d in (state.get("api_definitions") or [])
         ]
         all_apis_dict = [api.model_dump() for api in api_list]
+        # 接口异常标识自动检测（is_export / has_path_params / ...）
+        from agent_components.api_annotations import ApiAnnotationRegistry
+        for api in all_apis_dict:
+            ApiAnnotationRegistry.apply_all(api)
         all_apis_json = json.dumps(all_apis_dict, indent=2, ensure_ascii=False)
-        import agent_components.module_tree as mt
         from database import get_session_ctx
+        from database.operations import ModuleOps
         with get_session_ctx() as session:
-            tree = mt.get_tree(session)
+            tree = ModuleOps.get_tree(session)
         module_tree_json = json.dumps(tree, indent=2, ensure_ascii=False)
         test_analysis = state.get("test_point_analysis") or "（无）"
         # 三段落拆分：分析报告 / 共享前置 / 测试用例，各自独立注入 prompt
@@ -843,6 +845,7 @@ class ChatTestAgentGraph(RetrievalMixin, GenerationMixin):
                            thinking: bool = False,
                            temperature: float | None = None,
                            log_label: str = "",
+                           pre_validate: Callable[[dict], dict] | None = None,
                            **kwargs) -> BaseModel:
         """调用 LLM 并校验结构化输出，失败时自动重试。
 
@@ -854,6 +857,7 @@ class ChatTestAgentGraph(RetrievalMixin, GenerationMixin):
             thinking: 是否使用深度思考模式（由 METHOD_FEATURES 判定兼容性）
             temperature: 温度参数，None 使用全局默认值
             log_label: 不为空时将原始输出写入 thinking_trace.log
+            pre_validate: json_mode 下在 Pydantic 构造前对 dict 执行的回调（用于注入 _annotations 等元数据）
             **kwargs: prompt 模板变量
         """
         # 根据 method 特性配置 thinking 开关
@@ -886,6 +890,9 @@ class ChatTestAgentGraph(RetrievalMixin, GenerationMixin):
                 result = chain.invoke(kwargs)
                 if result is None:
                     raise ValueError("LLM 返回了空结果（None）")
+                # ── pre_validate 钩子：json_mode 下在 Pydantic 构造前修改 dict ──
+                if pre_validate and isinstance(result, dict):
+                    result = pre_validate(result)
                 if log_label:
                     from observability import log_thinking
                     _raw = result.model_dump() if hasattr(result, "model_dump") else str(result)

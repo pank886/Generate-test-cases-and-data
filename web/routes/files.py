@@ -32,7 +32,7 @@ router = APIRouter(prefix="/api/files", tags=["files"])
 async def upload_file(file: UploadFile = File(...),
                        background_tasks: BackgroundTasks = None):
     """上传文件 → 立即返回 task_id，后台异步处理。"""
-    from web.app import _chroma_db, _create_task
+    from web.state import _chroma_db, _create_task
 
     raw_filename = file.filename
     if not raw_filename:
@@ -109,7 +109,7 @@ async def delete_file(filename: str = Form(...)):
 
     文件不存在于磁盘时仍会清理数据库和内存记录。
     """
-    from web.app import _get_imported_files, _remove_imported_file, _chroma_db
+    from web.state import _get_imported_files, _remove_imported_file, _chroma_db
 
     # 防路径遍历：只取纯文件名
     safe_filename = _os.path.basename(filename)
@@ -222,7 +222,7 @@ async def uploaded_files():
     """获取已导入文件列表（以 SQLite 为准，合并内存中的文件大小）。"""
     from database import get_session_ctx
     from database.operations import DocOps
-    from web.app import _get_imported_files
+    from web.state import _get_imported_files
     from observability import get_logger
 
     db_files = []

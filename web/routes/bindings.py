@@ -3,16 +3,16 @@
 from fastapi import APIRouter
 from fastapi.responses import JSONResponse
 
+from database import get_session_ctx
+from database.operations import BindingOps
+from ingest_v2 import _cascade_bind_to_module_docs
+
 router = APIRouter(prefix="/api/bindings", tags=["bindings"])
 
 
 @router.post("")
 async def create_binding(data: dict):
     """创建绑定（含级联：文档绑模块时自动关联同模块异类文档）。"""
-    from database import get_session_ctx
-    from database.operations import BindingOps
-    from ingest_v2 import _cascade_bind_to_module_docs
-
     st, si = data.get("source_type"), data.get("source_id")
     tt, ti = data.get("target_type"), data.get("target_id")
     if not all([st, si, tt, ti]):
@@ -37,9 +37,6 @@ async def create_binding(data: dict):
 @router.delete("")
 async def delete_binding(data: dict):
     """解除绑定。"""
-    from database import get_session_ctx
-    from database.operations import BindingOps
-
     a_type, a_id = data.get("a_type"), data.get("a_id")
     b_type, b_id = data.get("b_type"), data.get("b_id")
     if not all([a_type, a_id, b_type, b_id]):
@@ -57,9 +54,6 @@ async def delete_binding(data: dict):
 @router.get("")
 async def get_bindings(entity_type: str = "", entity_id: str = ""):
     """查询实体的所有关联。"""
-    from database import get_session_ctx
-    from database.operations import BindingOps
-
     with get_session_ctx() as session:
         bindings = BindingOps.get_bindings(
             session,

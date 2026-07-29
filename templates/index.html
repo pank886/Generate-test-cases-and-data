@@ -66,6 +66,12 @@
   <div class="col-center">
     <div class="card"><h3>📋 <span id="center-title">选择一个模块</span></h3>
       <div id="bound-docs"></div>
+      <div id="analysis-section" style="margin-top:12px;display:none">
+        <button class="btn btn-sm btn-success" id="analyze-scenarios-btn" onclick="analyzeScenarios()">🔍 分析测试场景</button>
+        <span id="analysis-status" style="font-size:12px;color:var(--text-dim);margin-left:8px"></span>
+        <button class="btn btn-sm btn-outline" id="edit-analysis-btn" style="display:none;margin-left:4px" onclick="editAnalysis()">✏️ 编辑</button>
+        <div id="analysis-result" style="margin-top:8px"></div>
+      </div>
       <div id="unassociated-docs"></div>
       <div id="related-modules-section" class="hidden">
         <h4 style="font-size:12px;color:var(--text-dim);margin:12px 0 4px">🔗 关联模块（来自文档绑定）</h4>

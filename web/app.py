@@ -8,6 +8,8 @@ from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
 
+from fastapi import BackgroundTasks
+
 import uvicorn
 from fastapi import FastAPI, Form
 from fastapi.responses import HTMLResponse, JSONResponse
@@ -34,30 +36,20 @@ _env = Environment(
     autoescape=select_autoescape(["html", "xml"]),
 )
 
-# ----------------------------------------------------------------
-# 全局状态
-# ----------------------------------------------------------------
-# 只读（lifespan 初始化后不变）
-_phase_b_graph = None
-_phase_b_components = None
-_chroma_db = None
+# 全局状态已迁移至 web/state.py（避免循环导入）
+from web.state import (
+    _phase_b_graph, _phase_b_components, _chroma_db,
+    _vector_ready, _imported_files, _DEFAULT_USER, _state_lock,
+    _task_store, _task_store_lock,
+    _workflow_sessions, _workflow_sessions_lock,
+    _get_imported_files, _add_imported_file, _remove_imported_file,
+    _create_task, _update_task, _cleanup_expired_sessions,
+)
+import web.state as _state
 
-# 读写共享状态（_state_lock 保护）
-_vector_ready = False
-# {user_id: [{name, size, chunks, time, type, doc_id, status}, ...]}
-_imported_files: dict[str, list[dict]] = {}
-_DEFAULT_USER = "default"
-_state_lock = asyncio.Lock()
-
-# 后台任务状态追踪 {task_id: {status, progress, message, result, error}}
-_task_store: dict = {}
-_task_store_lock = asyncio.Lock()
-
-# Phase B 多轮工作流会话存储
-# {session_id: {"state": dict, "created_at": float, "user_id": str}}
-_workflow_sessions: dict = {}
-_workflow_sessions_lock = asyncio.Lock()
 WORKFLOW_SESSION_TTL = config.WORKFLOW_SESSION_TTL
+# 同步 state 模块中的 TTL 值
+_state.WORKFLOW_SESSION_TTL = WORKFLOW_SESSION_TTL
 
 
 # ====== 临时文件定时清理 ======
@@ -132,38 +124,6 @@ def _scan_orphan_files(known_names: set, base_dir: str) -> list[dict]:
     return orphans
 
 
-# ====== 文件列表辅助函数（user-scoped） ======
-
-async def _get_imported_files(user_id: str = None) -> list[dict]:
-    """获取指定用户的已导入文件列表（线程安全读）。"""
-    uid = user_id or _DEFAULT_USER
-    async with _state_lock:
-        return list(_imported_files.get(uid, []))
-
-
-async def _add_imported_file(file_info: dict, user_id: str = None):
-    """添加已导入文件记录（线程安全写）。"""
-    uid = user_id or _DEFAULT_USER
-    async with _state_lock:
-        if uid not in _imported_files:
-            _imported_files[uid] = []
-        _imported_files[uid].insert(0, file_info)
-        global _vector_ready
-        _vector_ready = True
-
-
-async def _remove_imported_file(filename: str, user_id: str = None):
-    """删除已导入文件记录（线程安全写）。"""
-    uid = user_id or _DEFAULT_USER
-    async with _state_lock:
-        _imported_files[uid] = [
-            f for f in _imported_files.get(uid, []) if f["name"] != filename
-        ]
-        if not _imported_files.get(uid):
-            global _vector_ready
-            _vector_ready = bool(any(v for v in _imported_files.values()))
-
-
 # ----------------------------------------------------------------
 # trace_id 中间件
 # ----------------------------------------------------------------
@@ -199,57 +159,7 @@ class TraceMiddleware:
         await self.app(scope, receive, send_with_trace)
 
 
-# ----------------------------------------------------------------
-# 任务状态管理
-# ----------------------------------------------------------------
-async def _create_task() -> str:
-    """创建一个新任务并返回 task_id（顺带清理过期任务）。"""
-    import config as _config
-    now = datetime.now()
-    ttl = _config.TASK_TTL_SECONDS
-    task_id = uuid.uuid4().hex
-    async with _task_store_lock:
-        expired = []
-        for tid, t in _task_store.items():
-            try:
-                created = datetime.fromisoformat(t.get("created_at", ""))
-                if (now - created).total_seconds() > ttl:
-                    expired.append(tid)
-            except (ValueError, TypeError):
-                expired.append(tid)  # 无法解析的时间戳也清理
-        for tid in expired:
-            del _task_store[tid]
-        _task_store[task_id] = {
-            "status": "pending",
-            "progress": 0,
-            "message": "任务已提交",
-            "result": None,
-            "error": None,
-            "created_at": now.isoformat(),
-        }
-    return task_id
-
-
-async def _update_task(task_id: str, **kwargs):
-    """更新任务状态。"""
-    async with _task_store_lock:
-        if task_id in _task_store:
-            _task_store[task_id].update(kwargs)
-
-
-async def _cleanup_expired_sessions():
-    """清理超过 WORKFLOW_SESSION_TTL 的 Phase B 工作流会话。"""
-    import time
-    now = time.time()
-    async with _workflow_sessions_lock:
-        expired = [
-            sid for sid, s in _workflow_sessions.items()
-            if now - s.get("created_at", 0) > WORKFLOW_SESSION_TTL
-        ]
-        for sid in expired:
-            del _workflow_sessions[sid]
-
-
+# 任务管理和会话清理已迁移至 web/state.py
 # _cleanup_doc_to_doc_bindings 已移至 web/services/doc_binding.py，从这里 re-export 保持兼容
 from web.services.doc_binding import _cleanup_doc_to_doc_bindings  # noqa: F401
 
@@ -260,9 +170,6 @@ from web.services.doc_binding import _cleanup_doc_to_doc_bindings  # noqa: F401
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """应用生命周期：启动时一次性初始化所有重资源。"""
-    global _chroma_db, _vector_ready
-    global _phase_b_graph, _phase_b_components
-    # _imported_files 通过辅助函数访问，不再需要 global 声明
     # 0. 前置校验：必填配置项
     if not config.EMBEDDING_MODEL:
         print("=" * 60)
@@ -326,7 +233,7 @@ async def lifespan(app: FastAPI):
     for attempt in (1, 2, 3):
         try:
             from agent_components.dual_chroma import get_chroma_db
-            _chroma_db = get_chroma_db()
+            _state._chroma_db = get_chroma_db()
             print("[startup] DualChromaDB + Ollama 连接已就绪")
             break
         except Exception as e:
@@ -346,7 +253,7 @@ async def lifespan(app: FastAPI):
     # 3. Agent 初始化（Phase B 工作流 + Phase C 生成组件）
     logger.info(">>> 启动智能测试助手 Web 服务 ...")
     from agent_components.graph_builder import build_workflow
-    _phase_b_graph, _phase_b_components = build_workflow()
+    _state._phase_b_graph, _state._phase_b_components = build_workflow()
 
     # 4. 恢复已导入文件列表（以 SQLite 为唯一数据源）
     from database import get_session, get_session_ctx
@@ -375,7 +282,7 @@ async def lifespan(app: FastAPI):
     except Exception:
         logger.warning("SQLite 查询失败，无法恢复文件列表", exc_info=True)
 
-    _imported_files[_DEFAULT_USER] = list(db_files.values())
+    _state._imported_files[_state._DEFAULT_USER] = list(db_files.values())
     logger.info("已恢复 %d 个文件（全部来自 SQLite）", len(db_files))
 
     # 4.5 启动诊断：扫描磁盘孤儿文件
@@ -393,9 +300,9 @@ async def lifespan(app: FastAPI):
 
     # 5. 判断向量库是否已就绪
     chroma_path = Path(config.CHROMA_DB_DIR)
-    default_files = _imported_files.get(_DEFAULT_USER, [])
+    default_files = _state._imported_files.get(_state._DEFAULT_USER, [])
     if chroma_path.exists() and any(chroma_path.iterdir()):
-        _vector_ready = True
+        _state._vector_ready = True
         logger.info("   ✅ 向量库已就绪 (%d 个文件)", len(default_files))
     else:
         logger.info("   ℹ️ 向量库为空，请上传 API 文档")
@@ -426,7 +333,7 @@ async def index():
     files = await _get_imported_files()
     template = _env.get_template("index.html")
     return HTMLResponse(template.render(
-        vector_ready=_vector_ready,
+        vector_ready=_state._vector_ready,
         imported_files=files,
     ))
 
@@ -475,6 +382,21 @@ async def audit_module(data: dict):
         logger.error("update-module 失败: %s", e, exc_info=True)
         return JSONResponse(status_code=500,
                             content={"success": False, "message": str(e)})
+
+
+# ── 模块场景分析（Phase A 入库预处理） ──
+
+@app.post("/api/module/{module_name}/analyze-scenarios")
+async def analyze_module_scenarios(module_name: str,
+                                    background_tasks: BackgroundTasks):
+    """触发模块场景分析（前端按钮调用）。"""
+    from web.state import _create_task
+    from web.tasks import _analyze_module_scenarios_bg
+
+    task_id = await _create_task()
+    background_tasks.add_task(_analyze_module_scenarios_bg, task_id, module_name)
+    return {"success": True, "task_id": task_id,
+            "message": f"模块「{module_name}」场景分析已提交"}
 
 
 # ----------------------------------------------------------------

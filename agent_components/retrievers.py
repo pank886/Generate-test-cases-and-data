@@ -14,10 +14,10 @@ logger = get_logger(__name__)
 
 def _mod_exists_in_tree(module_name: str, session) -> bool:
     """检查模块名是否在模块树中真实存在。"""
-    import agent_components.module_tree as mt
+    from database.operations import ModuleOps
     try:
-        all_modules = mt.get_all(session)
-        return any(m.get("name") == module_name for m in all_modules)
+        all_modules = ModuleOps.get_all(session)
+        return any(m.name == module_name for m in all_modules)
     except Exception:
         logger.debug("查询模块树失败，假定模块 [%s] 不存在", module_name, exc_info=True)
         return False
@@ -99,11 +99,11 @@ class RetrievalMixin:
         logger.info("\n🎯 [节点1] 意图识别与模块推荐 ---")
 
         # 获取所有模块名
-        import agent_components.module_tree as mt
         from database import get_session_ctx
+        from database.operations import ModuleOps
         with get_session_ctx() as session:
-            all_modules = mt.get_all(session)
-        module_names = [m["name"] for m in all_modules if m.get("name")]
+            all_modules = ModuleOps.get_all(session)
+            module_names = [m.name for m in all_modules if m.name]
 
         if not module_names:
             logger.warning("   ⚠️ 模块树为空，跳过意图识别")
@@ -350,23 +350,50 @@ class RetrievalMixin:
     # ---- 节点 5：测试点分析 ----
 
     def _analyze_test_points_raw(self, state: State):
-        """Phase B — 测试点原始分析（thinking 节点）：输出自由文本分析报告。"""
+        """Phase B — 测试点原始分析（thinking 节点）：输出自由文本分析报告。
+
+        优先路径：module_analysis 存在 → 注入预分析结果，跳过 product_docs。
+        降级路径：module_analysis 不存在 → 全量 product_docs（旧逻辑）。
+        """
         from observability import log_phase_header
         log_phase_header("Phase B — 测试点分析")
         logger.info("\n🧠 分析测试场景（深度思考）...")
         prompt = self.prompt_factory.analyze_test_points_raw()
 
-        docs_text = "\n\n".join(
-            f"[{d.get('module', d.get('source', '?'))}] {d.get('content', '')}"
-            for d in state.get("product_docs", [])
-        )
+        # ── 优先/降级：查询 module_analysis ──
+        confirmed_module = state.get("confirmed_module", "")
+        analysis_text = ""
+        try:
+            from database import get_session_ctx
+            from database.operations import ModuleOps
+            from database.operations.analysis import AnalysisOps
+            with get_session_ctx() as session:
+                mod = ModuleOps.get_by_name(session, confirmed_module)
+                if mod:
+                    record = AnalysisOps.get_by_module_id(session, mod.id)
+                    if record:
+                        analysis_text = record.analysis_json
+                        logger.info(f"   📋 命中 module_analysis（{len(analysis_text)} 字符），走优先路径")
+        except Exception:
+            logger.warning("   ⚠️ module_analysis 查询失败，走降级路径", exc_info=True)
+
+        # ── 优先路径：跳过 product_docs ──
+        if analysis_text:
+            docs_text = ""  # 不注入全量产品文档
+        else:
+            logger.info("   📄 无 module_analysis，走降级路径（全量原文）")
+            docs_text = "\n\n".join(
+                f"[{d.get('module', d.get('source', '?'))}] {d.get('content', '')}"
+                for d in state.get("product_docs", [])
+            )
+
         related_text = ", ".join(state.get("related_modules", [])) or "无"
         apis_text = "\n".join(
             f"  - {a.get('name', '?')} ({a.get('method', 'GET')} {a.get('url', '')})"
             for a in state.get("api_definitions", [])
         )
 
-        # 显式控制 thinking 开关（bind 方式，invoke 的 **kwargs 会被 LangChain 路由到 RunnableConfig）
+        # 显式控制 thinking 开关
         llm_kwargs = {}
         if config.ENABLE_THINKING:
             llm_kwargs["extra_body"] = {"thinking": {"type": "enabled"}}
@@ -376,6 +403,7 @@ class RetrievalMixin:
         result = bound_llm.invoke(
             prompt.format_messages(
                 user_context=state["original_input"],
+                module_analysis=analysis_text or "无",
                 product_docs=docs_text,
                 related_docs=related_text,
                 api_definitions=apis_text,

@@ -208,10 +208,11 @@ class TestIntentConfirmationFallback:
         def fake_ctx():
             yield mock_session
 
-        import agent_components.module_tree as mt
-        with patch.object(mt, "get_all", return_value=[
-            {"name": "健身房"}, {"name": "会员管理"}
-        ]):
+        import database.operations as _ops
+        # ModuleOps.get_all returns ORM objects; mock with name attribute
+        _mock1 = MagicMock(); _mock1.name = "健身房"
+        _mock2 = MagicMock(); _mock2.name = "会员管理"
+        with patch.object(_ops.ModuleOps, "get_all", return_value=[_mock1, _mock2]):
             with patch("database.get_session_ctx", fake_ctx):
                 result = mixin._confirm_user_intent(state)
 

@@ -218,16 +218,6 @@ class ExcelPlan(BaseModel):
     file_name: str = Field(default="test_plan.xlsx", description="输出的 Excel 文件名")
 
 
-class PyFile(BaseModel):
-    """生成的 Python 测试文件"""
-    file_name: str = Field(description="Python 文件名，如 test_Vehicle_access.py")
-    py_content: str = Field(description="完整的 Python 测试文件代码")
-
-
-class ClassCode(BaseModel):
-    """单个 Python 测试类的代码片段（不含 import 和 epic 装饰器）"""
-    class_code: str = Field(description="单个测试类的完整 Python 代码")
-
 
 # ============================================================
 # 测试数据（YAML 生成，Phase B 确认计划后执行 → Phase C）
@@ -286,6 +276,30 @@ class TestCase(BaseModel):
                     logger.error(log_msg)
                 else:
                     logger.warning(log_msg)
+        return data
+
+    @model_validator(mode="before")
+    @classmethod
+    def auto_fix_validation_list(cls, data: Any) -> Any:
+        """自动修复 validation 为 dict 而非 list 的常见 LLM 错误。
+
+        LLM 常见错误:
+        - "validation": {"eq": {"code": 0}} → "validation": [{"eq": {"code": 0}}]
+        - "validation": {"eq": {"code": 0}, "contains": {"msg": "成功"}}
+          → "validation": [{"eq": {"code": 0}}, {"contains": {"msg": "成功"}}]
+        """
+        if not isinstance(data, dict):
+            return data
+        validation = data.get("validation")
+        if isinstance(validation, dict) and validation:
+            # 如果 dict 的 key 都是断言类型（eq/contains/ne/db），拆分为列表
+            _assert_types = {"eq", "contains", "ne", "db"}
+            if all(k in _assert_types for k in validation.keys()):
+                data["validation"] = [{k: v} for k, v in validation.items()]
+            else:
+                # 整个 dict 作为一个断言条目
+                data["validation"] = [validation]
+            logger.info("TestCase 自动修正: validation dict → list")
         return data
 
     @model_validator(mode="after")
@@ -427,7 +441,11 @@ class TestCase(BaseModel):
 
     @model_validator(mode="after")
     def validate_validation_not_empty(self) -> "TestCase":
-        """validation 数组不能为空——至少应有一条断言。"""
+        """validation 数组不能为空——至少应有一条断言。
+
+        注意：导出/导入类接口（is_export）的放行由 StepData 层处理（可访问 baseInfo._annotations）。
+        此处仅做通用检查，不对 is_export 做特殊处理。
+        """
         if len(self.validation) == 0:
             rule = "validation为空"
             msg = (
@@ -452,6 +470,65 @@ class StepData(BaseModel):
         min_length=1,
         description="测试用例列表（每个元素含 case_name, request_body, validation 等），至少 1 条",
     )
+
+    @model_validator(mode="before")
+    @classmethod
+    def auto_fix_step_structure(cls, data: Any) -> Any:
+        """自动修复 StepData 层常见结构错误。
+
+        LLM 常见错误:
+        1. testCase 是 dict 不是 list → 包装为列表
+        2. case_name/json/validation 放在 StepData 层级而非 testCase 内 → 迁移
+        3. "data" 字段内嵌套了 testCase 条目 → 提取到 testCase
+        """
+        if not isinstance(data, dict):
+            return data
+
+        # --- 情况 0（最高优先级）: "data" 字段包含 testCase 条目列表 ---
+        # LLM 经常混淆 StepData 级别和 TestData 级别，把 testCase 条目放在
+        # 名为 "data" 的数组中。此修复必须在其他情况之前执行，否则 data 会被
+        # 当作泄漏字段错误迁移到 testCase[0].
+        if "data" in data and isinstance(data["data"], list) and "testCase" not in data:
+            inner = data.pop("data")
+            if inner and isinstance(inner[0], dict) and "case_name" in inner[0]:
+                data["testCase"] = inner
+                logger.info("StepData 自动修正: data 字段内容迁移到 testCase")
+            else:
+                # data 列表内容不是 testCase 条目，放回去
+                data["data"] = inner
+
+        # --- 情况 1: testCase 是 dict 不是 list ---
+        if isinstance(data.get("testCase"), dict):
+            data["testCase"] = [data["testCase"]]
+            logger.info("StepData 自动修正: testCase dict → [dict]")
+
+        # --- 情况 2: case_name/json/params/extract 放在 StepData 顶层 ---
+        # LLM 有时把 testCase 条目的字段直接放在步骤层级
+        # 注意: "data" 不在此列表中——它已在情况 0 中专门处理
+        _tc_fields = {"case_name", "json", "params", "validation",
+                      "extract", "extract_list", "input_extract", "request_body"}
+        _leaked = _tc_fields & set(data.keys())
+        if _leaked and isinstance(data.get("testCase"), list):
+            # 如果 testCase 列表存在但为空，填充第一条
+            if not data["testCase"]:
+                tc_entry = {}
+                for f in sorted(_leaked):
+                    tc_entry[f] = data.pop(f)
+                data["testCase"] = [tc_entry]
+            # 如果 testCase 非空，检查第一条是否缺这些字段
+            elif data["testCase"] and isinstance(data["testCase"][0], dict):
+                for f in sorted(_leaked):
+                    if f not in data["testCase"][0]:
+                        data["testCase"][0][f] = data.pop(f)
+        elif _leaked and "testCase" not in data:
+            # testCase 完全缺失，用泄漏字段构造
+            tc_entry = {}
+            for f in sorted(_leaked):
+                tc_entry[f] = data.pop(f)
+            data["testCase"] = [tc_entry]
+            logger.info("StepData 自动修正: 顶层 case_name/json 迁移到 testCase[0]")
+
+        return data
 
     @model_validator(mode="before")
     @classmethod
@@ -523,17 +600,23 @@ class StepData(BaseModel):
         GET 请求的动态参数应通过 testCase 内的 params 传递。
         """
         url = str(self.baseInfo.get("url", ""))
+        annotations = self.baseInfo.get("_annotations", None)
+
         # 检测 {xxx} 字面量路径参数（如 /delete/{code}）
         _literal = re.search(r'\{(\w+)\}', url)
         if _literal:
-            rule = "url含字面量路径参数"
-            msg = (
-                f"url 字段含路径参数模板 '{{{_literal.group(1)}}}'，当前 url='{url}'。"
-                "框架不对 {{xxx}} 做变量替换，{code} 会被原样发送到服务端。"
-                "请将 {{{_literal.group(1)}}} 替换为具体值或 ${{get_extract_data(...)}} 表达式"
-            )
-            ValidationInterceptor.record(rule, msg)
-            raise ValueError(msg)
+            # has_path_params 激活 → 放行 {xxx} 字面量（由代码层替换为 ${get_extract_data}）
+            from agent_components.api_annotations import ApiAnnotationRegistry
+            if not ApiAnnotationRegistry.is_active(annotations, "has_path_params"):
+                rule = "url含字面量路径参数"
+                msg = (
+                    f"url 字段含路径参数模板 '{{{_literal.group(1)}}}'，当前 url='{url}'。"
+                    "框架不对 {{xxx}} 做变量替换，{code} 会被原样发送到服务端。"
+                    "请将 {{{_literal.group(1)}}} 替换为具体值或 ${{get_extract_data(...)}} 表达式"
+                )
+                ValidationInterceptor.record(rule, msg)
+                raise ValueError(msg)
+            # 已标注 → 静默放行（其他校验如 ${} 占位符检查照常执行）
         if "${" in url:
             rule = "url含动态占位符"
             msg = (
@@ -639,6 +722,80 @@ class TestData(BaseModel):
         description="接口调用列表，每个元素为一个接口调用（含 baseInfo + testCase），至少 1 个",
     )
     file_name: str = Field(default="test_data.yaml", description="输出的 YAML 文件名")
+
+    @model_validator(mode="before")
+    @classmethod
+    def auto_fix_top_level_structure(cls, raw: Any) -> Any:
+        """自动修复 LLM 常见顶层结构错误（67% 失败率的根源）。
+
+        正确结构: {"data": [{"baseInfo": {...}, "testCase": [{...}]}]}
+
+        LLM 常见错误及自动修正：
+        1. {"testCase": [...]}  → 重命名为 data
+        2. {"baseInfo": {...}, "testCase": [...]}  → 缺少 data 包装器
+        3. {"testCase": {"baseInfo": {...}, ...}}  → testCase 是 dict 不是 list
+        4. {"data": {"baseInfo": {...}, ...}}  → data 是 dict 不是 list
+        5. {"data": {"testCase": {...}}}  → data 嵌套了 testCase 而非步骤列表
+        6. {"baseInfo": {...}, "data": [...]}  → data 字段内是 testCase 列表，需重组
+        """
+        if not isinstance(raw, dict):
+            return raw
+
+        _fixed = False
+
+        # --- 情况 0（最高优先级）: 顶层缺少 data，但同时有 baseInfo + testCase ---
+        # 必须先于情况 1 处理，否则 testCase 被移走后 baseInfo 落入情况 2
+        # 但情况 2 要求 "data" not in raw（此时已因情况 1 的存在不满足）。
+        if "data" not in raw and "baseInfo" in raw:
+            step = {}
+            for key in list(raw.keys()):
+                if key in ("baseInfo", "testCase"):
+                    step[key] = raw.pop(key)
+            raw["data"] = [step]
+            _fixed = True
+
+        # --- 情况 1: 顶层缺少 data，但有 testCase（无 baseInfo）---
+        if "data" not in raw and "testCase" in raw:
+            inner = raw.pop("testCase")
+            if isinstance(inner, list):
+                # 检查列表元素是否是完整步骤（含 baseInfo）还是 testCase 条目
+                if inner and isinstance(inner[0], dict) and "baseInfo" in inner[0]:
+                    raw["data"] = inner  # 已经是步骤列表
+                else:
+                    # testCase 条目列表，需要包装成步骤
+                    raw["data"] = [{"testCase": inner}]
+            elif isinstance(inner, dict):
+                if "baseInfo" in inner:
+                    raw["data"] = [inner]  # 单个步骤
+                else:
+                    raw["data"] = [{"testCase": [inner]}]  # 单个 testCase 条目
+            _fixed = True
+
+        # --- 情况 2: data 是 dict 不是 list ---
+        if isinstance(raw.get("data"), dict):
+            inner = raw["data"]
+            # {"data": {"baseInfo": {...}, "testCase": [...]}} → 单步骤
+            if "baseInfo" in inner:
+                raw["data"] = [inner]
+            # {"data": {"testCase": [...]}} → testCase 嵌套
+            elif "testCase" in inner:
+                tc_val = inner["testCase"]
+                if isinstance(tc_val, list):
+                    # 检查是否已经是步骤列表
+                    if tc_val and isinstance(tc_val[0], dict) and "baseInfo" in tc_val[0]:
+                        raw["data"] = tc_val
+                    else:
+                        raw["data"] = [{"testCase": tc_val}]
+                elif isinstance(tc_val, dict):
+                    raw["data"] = [{"testCase": [tc_val]}]
+            else:
+                raw["data"] = [inner]
+            _fixed = True
+
+        if _fixed:
+            logger.info("TestData 结构自动修正: %s",
+                        str(raw.get("data", ""))[:120] if isinstance(raw.get("data"), list) else "ok")
+        return raw
 
     @model_validator(mode="after")
     def validate_placeholders(self) -> "TestData":

@@ -42,7 +42,7 @@ _executor = _BoundedThreadPoolExecutor(max_workers=_MAX_WORKERS, max_queue=_conf
 async def _process_file_bg(task_id: str, file_path: str, ext: str,
                             file_size: int, filename: str, file_type: str):
     """后台处理上传文件 -> 向量库入库。"""
-    from web.app import _add_imported_file, _update_task
+    from web.state import _add_imported_file, _update_task
 
     set_trace_id(task_id)
     loop = asyncio.get_running_loop()
@@ -224,7 +224,7 @@ async def _confirm_plan_bg(task_id: str, excel_path: str | None,
     import glob
     import config
 
-    from web.app import _phase_b_components, _update_task, _chroma_db
+    from web.state import _phase_b_components, _update_task, _chroma_db
 
     set_trace_id(task_id)
 
@@ -278,9 +278,8 @@ async def _confirm_plan_bg(task_id: str, excel_path: str | None,
                         k=config.RETRIEVAL_K,
                     )
                     if docs:
-                        # ChromaDB 返回 LangChain Document 对象，需转为 dict 才能 json.dumps
                         product_docs_json = _json.dumps(
-                            [{"content": d.page_content, "metadata": d.metadata}
+                            [{"page_content": d.page_content, "metadata": d.metadata}
                              for d in docs],
                             ensure_ascii=False,
                         )
@@ -288,10 +287,10 @@ async def _confirm_plan_bg(task_id: str, excel_path: str | None,
                 logger.warning("ChromaDB product_docs 检索失败，使用空文档继续", exc_info=True)
 
             # 模块树
-            import agent_components.module_tree as mt
             from database import get_session_ctx
+            from database.operations import ModuleOps
             with get_session_ctx() as session:
-                tree = mt.get_tree(session)
+                tree = ModuleOps.get_tree(session)
             module_tree_json = _json.dumps(tree, indent=2, ensure_ascii=False)
 
             # 异步生成 dep_map（LLM thinking 调用走线程池）
@@ -302,78 +301,30 @@ async def _confirm_plan_bg(task_id: str, excel_path: str | None,
                 "（Phase C Step 0 生成）", user_ctx,
             )
         except Exception as e:
-            await _update_task(task_id, status="failed",
-                               error=f"dependency_map.json 生成失败: {e}")
-            return
-        logger.info("   📄 dependency_map.json 已生成: %s", dep_map_path)
+            logger.warning("   ⚠️ dependency_map.json 生成失败（非致命，继续后续步骤）: %s", e)
+            dep_map_path = None
+        if dep_map_path:
+            logger.info("   📄 dependency_map.json 已生成: %s", dep_map_path)
 
-        # ---- Phase C Step 1: 加载 + 预校验 dep_map ----
+        # ---- Phase C Step 1: 加载 + 预校验 dep_map（失败不阻断） ----
         try:
-            with open(dep_map_path, "r", encoding="utf-8") as f:
-                dep_map = _json.load(f)
-        except _json.JSONDecodeError as e:
-            await _update_task(task_id, status="failed",
-                               error=f"dependency_map.json 解析失败: {e}")
-            return
-        if not dep_map.get("stories"):
-            await _update_task(task_id, status="failed",
-                               error="dependency_map.json 无有效 story")
-            return
-        logger.info("   📄 dependency_map.json 已加载: %d 个 story",
-                     len(dep_map.get("stories", [])))
-
-        # ---- Phase C Step 2: URL 预校验 ----
-        # 遍历所有 story 的 api_sequence，逐一在 api_defs 中查找（URL 归一化匹配）
-        # 注意：cross_module_dependency 中的 URL 属于外部模块，跳过校验（预期不匹配）
-        from agent_components.generators import (
-            normalize_url, build_api_index, _collect_story_urls,
-        )
-        api_defs_list = _json.loads(api_defs_json)
-        api_index = build_api_index(api_defs_list)
-        unmatched_urls: list[str] = []
-        cross_module_urls: set[str] = set()
-        total_urls = 0
-        for story in dep_map.get("stories", []):
-            # 收集 cross_module_dependency 的 URL（预期不在本模块 api_defs 中）
-            for cdep in story.get("cross_module_dependency", {}).values():
-                api = cdep.get("获取接口", cdep.get("api", ""))
-                if api:
-                    parts = api.strip().split()
-                    if len(parts) >= 2:
-                        cross_module_urls.add(f"{parts[0].upper()} {parts[1]}")
-            story_urls = _collect_story_urls(story)
-            total_urls += len(story_urls)
-            for method, url in story_urls:
-                key = (method.upper(), normalize_url(url))
-                if key not in api_index:
-                    # 区分：跨模块 URL（预期行为）vs 同模块 URL（真正的错误）
-                    unmatched_urls.append(f"{method} {url}")
-        # 过滤掉 cross_module_dependency 中的 URL（预期不匹配，不告警）
-        same_module_unmatched = [u for u in unmatched_urls if u not in cross_module_urls]
-        cross_module_unmatched = [u for u in unmatched_urls if u in cross_module_urls]
-        if cross_module_unmatched:
-            logger.info("   🔗 跨模块 URL（不在本模块 api_defs，正常）: %s",
-                        list(set(cross_module_unmatched))[:10])
-        if same_module_unmatched:
-            logger.warning("   ⚠️ %d/%d 个同模块 URL 在 api_defs 中未找到: %s",
-                           len(same_module_unmatched), total_urls, same_module_unmatched[:10])
-        if total_urls > 0 and len(same_module_unmatched) == total_urls:
-            await _update_task(task_id, status="failed",
-                               error=f"dep_map 中所有 {total_urls} 个 URL 在 api_defs 中均未找到")
-            return
-        logger.info("   🔗 URL 预校验: %d/%d 匹配（同模块），%d 跨模块",
-                     total_urls - len(unmatched_urls), total_urls, len(cross_module_unmatched))
-
-        # ---- Phase C Step 3: 完整 api_sequence 拼接 ----
-        # 代码层拼接：每条用例的 full_sequence = story_pre_api_sequence + case_api_sequences[cid]
-        # （实际拼接在 generators.py 的 _build_story_yaml_tasks 中完成）
+            if dep_map_path:
+                with open(dep_map_path, "r", encoding="utf-8") as f:
+                    dep_map = _json.load(f)
+                if dep_map.get("stories"):
+                    logger.info("   📄 dependency_map.json 已加载: %d 个 story",
+                                len(dep_map.get("stories", [])))
+                else:
+                    logger.warning("   ⚠️ dependency_map.json 无有效 story，跳过")
+        except Exception as e:
+            logger.warning("   ⚠️ dependency_map.json 解析失败（非致命）: %s", e)
 
         await _update_task(task_id, status="running", progress=20,
                            message="正在生成 .py 测试文件...")
 
-        # LLM 调用 → 线程池（传入 dep_map 判断 teardown 是否需要生成）
+        # LLM 调用 → 线程池
         py_result = await asyncio.to_thread(
-            _phase_b_components._generate_py_file, excel_path, None, dep_map,
+            _phase_b_components._generate_py_file, excel_path,
         )
 
         await _update_task(task_id, progress=50,
@@ -402,7 +353,7 @@ async def _confirm_plan_bg(task_id: str, excel_path: str | None,
         try:
             yaml_result = await asyncio.to_thread(
                 _phase_b_components._generate_all_yamls,
-                excel_path, api_defs_json, user_ctx, dep_map,
+                excel_path, api_defs_json, user_ctx,
             )
         finally:
             _heartbeat_stop = True
@@ -420,12 +371,6 @@ async def _confirm_plan_bg(task_id: str, excel_path: str | None,
             if yaml_result.get("failed"):
                 msg += (f"，仍失败 {yaml_result['failed']} 个"
                         f"（详见 _generation_errors.json 与 logs/thinking_trace.log）")
-        # 变量读写审计警告
-        audit_warnings = yaml_result.get("warnings", [])
-        if audit_warnings:
-            p1_count = sum(1 for w in audit_warnings if w.get("severity") == "P1")
-            msg += (f" | ⚠️ 变量审计: {len(audit_warnings)} 个警告"
-                    f"（P1={p1_count}），详见前端 warnings 字段")
 
         result = {
             "success": True,
@@ -438,7 +383,6 @@ async def _confirm_plan_bg(task_id: str, excel_path: str | None,
             "yaml_failed": yaml_result.get("failed", 0),
             "yaml_rounds": yaml_result.get("rounds", 0),
             "errors_file": yaml_result.get("errors_file"),
-            "warnings": audit_warnings,
             "excel_path": excel_path,
             "output_dir": os.path.dirname(excel_path),
         }
@@ -462,7 +406,7 @@ async def _resume_workflow_bg(task_id: str, session_id: str, state: dict):
     """
     import os as _os
     import config
-    from web.app import _phase_b_graph, _update_task
+    from web.state import _phase_b_graph, _update_task
 
     set_trace_id(task_id)
 
@@ -568,6 +512,199 @@ async def _resume_workflow_bg(task_id: str, session_id: str, state: dict):
         logger.error("❌ Phase B 工作流执行失败: %s", e)
         await _update_task(task_id, status="failed", error=str(e))
     finally:
-        from web.app import _workflow_sessions, _workflow_sessions_lock
+        from web.state import _workflow_sessions, _workflow_sessions_lock
         async with _workflow_sessions_lock:
             _workflow_sessions.pop(session_id, None)
+
+
+# ========================================================================
+# Phase A: 模块场景分析（入库预处理）
+# ========================================================================
+
+async def _analyze_module_scenarios_bg(task_id: str, module_name: str):
+    """后台任务：分析模块场景 → 生成 module_analysis JSON → 写入 SQLite。
+
+    前端按钮触发。加载该模块下全部产品文档和接口定义，调用 LLM 做场景分析
+    和接口映射（不生成用例），结果存入 module_analysis 表。
+    """
+    from web.state import _update_task
+    from agent_components.nodes import reload_llm
+
+    set_trace_id(task_id)
+    reload_llm()
+
+    try:
+        await _update_task(task_id, status="running", progress=5,
+                           message=f"开始分析模块「{module_name}」...")
+
+        # 1. 查 module_id
+        from database import get_session_ctx
+        from database.operations import ModuleOps
+        with get_session_ctx() as session:
+            mod = ModuleOps.get_by_name(session, module_name)
+            if not mod:
+                await _update_task(task_id, status="failed",
+                                   error=f"模块「{module_name}」不存在")
+                return
+            module_id = mod.id
+
+        await _update_task(task_id, progress=10,
+                           message="正在加载模块文档...")
+
+        # 2. 加载该模块的全部文档 chunks（精确 metadata 查询，非向量检索）
+        from database.operations import BindingOps
+        from agent_components.dual_chroma import get_chroma_db
+
+        chroma = get_chroma_db()
+        with get_session_ctx() as session:
+            bound_docs = BindingOps.get_bound_docs(session, module_name)
+            # 跨模块关系
+            partners = BindingOps.get_partners(session, "module", module_name, "module")
+
+        # 拼接全部产品文档 chunks
+        all_product_chunks: list[str] = []
+        all_api_defs: list[dict] = []
+        for doc in bound_docs:
+            chunks = chroma.get_doc_chunks(doc.id)
+            if chunks:
+                if doc.doc_type == "api":
+                    apis = chroma.get_doc_apis(doc.id)
+                    all_api_defs.extend(apis)
+                else:
+                    all_product_chunks.extend(c.get("content", "") for c in chunks)
+
+        product_docs_text = "\n\n---\n\n".join(all_product_chunks) or "（无产品文档）"
+        api_defs_json = _json.dumps(all_api_defs, indent=2, ensure_ascii=False)
+
+        # 模块树
+        with get_session_ctx() as session:
+            tree = ModuleOps.get_tree(session)
+        module_tree_json = _json.dumps(tree, indent=2, ensure_ascii=False)
+
+        # 跨模块关系文本
+        cross_text = ", ".join(p[1] for p in partners) if partners else "无"
+
+        await _update_task(task_id, progress=30,
+                           message=f"已加载 {len(all_product_chunks)} 个文档块 + {len(all_api_defs)} 个接口，开始 LLM 分析...")
+
+        # 3. LLM 两段式：thinking 分析 → json_mode 格式化
+        from agent_components.nodes import _get_llm
+        from prompts.definitions import PromptFactory
+
+        llm = _get_llm()
+        prompt_factory = PromptFactory()
+
+        # ── 心跳辅助 ──
+        _heartbeat_stop = False
+
+        async def _heartbeat(msg="LLM 正在分析场景...", base_progress=40):
+            import time as _time
+            _t0 = _time.time()
+            while not _heartbeat_stop:
+                await asyncio.sleep(10)
+                if _heartbeat_stop:
+                    break
+                elapsed = int(_time.time() - _t0)
+                await _update_task(
+                    task_id, progress=base_progress,
+                    message=f"{msg}（{elapsed}s）",
+                )
+
+        # ── 阶段 1：thinking 自由文本分析 ──
+        think_prompt = prompt_factory.analyze_module_scenarios()
+        think_kwargs = {}
+        if _config.ENABLE_THINKING:
+            think_kwargs["extra_body"] = {"thinking": {"type": "enabled"}}
+
+        hb_task = asyncio.create_task(_heartbeat("LLM 正在分析场景...", 35))
+        try:
+            bound_llm = llm.bind(temperature=0.6, **think_kwargs)
+            result = await asyncio.to_thread(
+                bound_llm.invoke,
+                think_prompt.format_messages(
+                    product_docs=product_docs_text,
+                    api_definitions=api_defs_json,
+                    module_tree=module_tree_json,
+                    cross_module_relations=cross_text,
+                    user_context=f"分析模块「{module_name}」的测试场景",
+                ),
+            )
+            analysis_text = result.content if hasattr(result, "content") else str(result)
+        finally:
+            _heartbeat_stop = True
+            hb_task.cancel()
+            try:
+                await hb_task
+            except asyncio.CancelledError:
+                pass
+
+        await _update_task(task_id, progress=70,
+                           message="分析完成，正在格式化 JSON...")
+
+        # ── 阶段 2：json_mode 结构化输出（thinking off） ──
+        format_prompt = prompt_factory.format_module_scenarios()
+        # json_mode 不支持 thinking，强制禁用
+        format_kwargs = {"extra_body": {"thinking": {"type": "disabled"}}}
+
+        _heartbeat_stop = False
+        hb_task = asyncio.create_task(_heartbeat("LLM 正在格式化...", 75))
+        try:
+            bound_llm = llm.bind(temperature=0.2, **format_kwargs)
+            format_result = await asyncio.to_thread(
+                bound_llm.invoke,
+                format_prompt.format_messages(
+                    scenario_analysis=analysis_text,
+                    api_definitions=api_defs_json,
+                ),
+            )
+            json_text = format_result.content if hasattr(format_result, "content") else str(format_result)
+        finally:
+            _heartbeat_stop = True
+            hb_task.cancel()
+            try:
+                await hb_task
+            except asyncio.CancelledError:
+                pass
+
+        await _update_task(task_id, progress=80,
+                           message="格式化完成，正在保存...")
+
+        # 4. 清理 Markdown 包裹并写入数据库
+        json_text = json_text.strip()
+        if json_text.startswith("```"):
+            lines = json_text.split("\n")
+            if lines[0].startswith("```"):
+                lines = lines[1:]
+            if lines and lines[-1].strip() == "```":
+                lines = lines[:-1]
+            json_text = "\n".join(lines).strip()
+
+        # 写入 module_analysis 表
+        with get_session_ctx() as session:
+            from database.operations.analysis import AnalysisOps
+            AnalysisOps.upsert(session, module_id, module_name, json_text)
+            session.commit()
+
+        # 简单统计
+        try:
+            parsed = _json.loads(json_text)
+            api_count = len(parsed.get("api_analysis", []))
+            scenario_count = len(parsed.get("scenario_analysis", []))
+        except Exception:
+            api_count = scenario_count = "?"
+
+        resp = {
+            "success": True,
+            "module_name": module_name,
+            "analysis": {
+                "api_count": api_count,
+                "scenario_count": scenario_count,
+                "summary": f"{scenario_count}个场景 · {api_count}个接口",
+            },
+        }
+        await _update_task(task_id, status="completed", progress=100,
+                           message="场景分析完成", result=resp)
+
+    except Exception as e:
+        logger.error("❌ 模块场景分析失败: %s", e)
+        await _update_task(task_id, status="failed", error=str(e))
