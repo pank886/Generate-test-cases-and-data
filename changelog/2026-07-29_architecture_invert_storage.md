@@ -146,7 +146,9 @@ ChromaDB 检索文本来源（优先级从高到低）：
 
 ---
 
-## 三、ChromaDB 检索文本构造
+## 三、ChromaDB 检索文本构造（单一 Collection）
+
+合并为一个 collection（如 `doc_search`），靠 `metadata.doc_type` 区分 `api` / `product` / `axure`。
 
 ### 3.1 API 文档检索文本
 
@@ -300,7 +302,60 @@ ChromaDB 检索文本来源（优先级从高到低）：
 
 ---
 
-## 七、决策记录
+## 七、ChromaDB Collection 结构变更（2026-07-30 讨论确认）
+
+### 7.1 合并为单一 Collection
+
+`product_docs` 和 `api_defs` 合并为一个 collection（如 `doc_search`），靠 metadata 区分类型：
+
+```python
+# ChromaDB metadata 结构
+{
+    "doc_id": "xxx",
+    "doc_type": "api" | "product" | "axure",
+    "chunk_index": 0,           # 仅 product/axure
+    "page_name": "",            # 仅 axure
+}
+```
+
+**理由**：跨类型的语义检索更自然，管理和重建更简单。
+
+### 7.2 ChromaDB 损坏补偿机制
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│ 触发条件：检索 ChromaDB 返回空 / 连接失败 / collection 不存在  │
+│                                                             │
+│ 即时补偿（保证当前请求不卡死）：                               │
+│   1. 从 SQLite document_chunks 提取原文或 analyzed_summary   │
+│   2. analyzed_summary 优先（分析后文件），其次 content 原文   │
+│   3. 用提取文本直接返回结果，请求继续                          │
+│                                                             │
+│ 后台补偿（异步任务）：                                        │
+│   1. 创建 ChromaDB 重建任务入队                               │
+│   2. 从 SQLite 全量重建 collection                           │
+│   3. 检索文本优先级：analyzed_summary > simple_summary       │
+│      > content 前 500 字                                     │
+└─────────────────────────────────────────────────────────────┘
+```
+
+**补偿数据源优先级**：分析后文件 > 原文件 > SQLite `document_chunks.content`
+
+### 7.3 API Annotations 编辑一致性策略
+
+```
+以 SQLite 为准：
+  编辑请求 → 更新 SQLite api_annotations 列 → 返回成功
+                                         ↘ 异步：重建 ChromaDB 检索文本
+                                            ├─ 成功 → 完成
+                                            └─ 失败 → 创建重试任务（10 分钟后重试一次）
+                                                     ├─ 成功 → 完成
+                                                     └─ 失败 → 报异常升级，走损坏补偿逻辑
+```
+
+---
+
+## 八、决策记录
 
 | # | 决策点 | 结论 | 理由 |
 |:---|--------|------|------|
@@ -315,3 +370,11 @@ ChromaDB 检索文本来源（优先级从高到低）：
 | 9 | 分析时机 | 文档绑定到模块后，用户手动触发 | 用户可控，批量分析更准 |
 | 10 | 检索优先级 | 分析结果 > 精细总结 > 简单摘要 > 原文 | 有分析用分析，没分析也能用 |
 | 11 | 分析后 ChromaDB | 重建检索文本，覆盖阶段1简单摘要 | 语义检索始终用最佳文本 |
+| 12 | ChromaDB 损坏 | 即时补偿（SQLite 取文本）+ 后台异步重建 | 当前请求不卡死，静默修复 |
+| 13 | Annotations 编辑一致性 | SQLite 为准，ChromaDB 异步重建，失败重试 | 避免双写事务问题 |
+| 14 | 检索优先级 | SQLite 关联关系 > ChromaDB 语义检索 | 有结构的用结构，没结构的用语义 |
+| 15 | 检索结果验证 | ChromaDB 返回 doc_id 后必须从 SQLite 拿正文 | 正文以 SQLite 为唯一真相源 |
+| 16 | Collection 结构 | 合并 product_docs + api_defs 为单一 collection | 跨类型语义检索，管理简化 |
+| 17 | 文档 chunk 原文 | 单独建表 `document_chunks`，doc_id 不做外键 | 1:N 关系，合并为单 collection 后无孤儿问题 |
+| 18 | 模块分析触发 | 单模块已绑定文档；hash 版本控制防重复 | 零成本重复点击；内容变更自动感知 |
+| 19 | 模块解绑 | 解绑后清空 module_analysis，重新绑定后重新分析 | 不覆盖旧分析，直接重建 |
