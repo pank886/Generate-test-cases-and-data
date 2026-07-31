@@ -560,16 +560,21 @@ class AxureParser:
 
     # ---- 转产品文档块 ----
 
-    def to_product_doc_chunks(self, parsed: dict = None) -> list:
-        """将解析结果转为产品文档文本块（用于存入 product_docs 集合）。"""
+    def to_product_doc_chunks(self, parsed: dict = None) -> list[dict]:
+        """将解析结果转为产品文档文本块（返回 list[dict]，含 content + page_name）。
+
+        返回格式: [{"content": str, "page_name": str}, ...]
+        用于填充 document_chunks.content 和 document_chunks.page_name。
+        """
         if parsed is None:
             parsed = self.parse()
 
         chunks = []
         page_details = parsed.get("page_details", {})
         for url, detail in page_details.items():
+            page_name = detail.get("page_name", "")
             lines = [
-                f"## 页面: {detail['page_name']}",
+                f"## 页面: {page_name}",
                 f"路径: {url}",
             ]
             if detail["ui_text"]:
@@ -579,7 +584,10 @@ class AxureParser:
                 for ia in detail["interactions"]:
                     lines.append(f"  - {ia}")
 
-            chunks.append("\n".join(lines))
+            chunks.append({
+                "content": "\n".join(lines),
+                "page_name": page_name,
+            })
 
         if len(chunks) > 50:
             logger.warning("页面总数 %d > 50，已截断至 50 页", len(chunks))

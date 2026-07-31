@@ -63,12 +63,26 @@ async def change_doc_module(data: dict):
 
 @router.get("/{doc_id}/chunks")
 async def get_doc_chunks(doc_id: str):
-    """获取文档的文本块内容。"""
-    from web.state import _chroma_db  # 避免循环导入，从 state 取避免 None 引用
+    """获取文档的文本块内容（从 SQLite document_chunks 表读取）。"""
+    from database import get_session_ctx
+    from database.models import DocumentChunk
     try:
-        db = _chroma_db
-        chunks = db.get_doc_chunks(doc_id)
-        return {"success": True, "chunks": chunks}
+        with get_session_ctx() as session:
+            chunks = session.query(DocumentChunk).filter(
+                DocumentChunk.doc_id == doc_id
+            ).order_by(DocumentChunk.chunk_index).all()
+            result = [
+                {
+                    "chunk_id": str(c.id),
+                    "chunk_index": c.chunk_index,
+                    "content": c.content,
+                    "type": c.chunk_type,
+                    "page_name": c.page_name or "",
+                    "summary": c.analyzed_summary or c.simple_summary or "",
+                }
+                for c in chunks
+            ]
+        return {"success": True, "chunks": result}
     except Exception as e:
         return JSONResponse(status_code=500,
                             content={"success": False, "message": str(e)})
@@ -76,12 +90,29 @@ async def get_doc_chunks(doc_id: str):
 
 @router.get("/{doc_id}/apis")
 async def get_doc_apis(doc_id: str):
-    """获取文档下的所有接口定义。"""
-    from web.state import _chroma_db  # 避免循环导入，从 state 取避免 None 引用
+    """获取文档下的所有接口定义（从 SQLite documents.api_* 列读取）。"""
+    import json as _json
+    from database import get_session_ctx
+    from database.models import Document as DocModel
     try:
-        db = _chroma_db
-        apis = db.get_doc_apis(doc_id)
-        return {"success": True, "apis": apis}
+        with get_session_ctx() as session:
+            doc = session.query(DocModel).filter_by(id=doc_id).first()
+            if not doc or doc.doc_type != "api":
+                return {"success": True, "apis": []}
+            api = {
+                "api_name": doc.api_name or "",
+                "content": _json.dumps({
+                    "name": doc.api_name or "",
+                    "url": doc.api_url or "",
+                    "method": doc.api_method or "",
+                    "description": doc.api_description or "",
+                    "headers": _json.loads(doc.api_headers) if doc.api_headers else [],
+                    "parameters": _json.loads(doc.api_parameters) if doc.api_parameters else [],
+                    "returns": _json.loads(doc.api_returns) if doc.api_returns else [],
+                    "annotations": _json.loads(doc.api_annotations) if doc.api_annotations else {},
+                }, ensure_ascii=False),
+            }
+        return {"success": True, "apis": [api]}
     except Exception as e:
         return JSONResponse(status_code=500,
                             content={"success": False, "message": str(e)})
