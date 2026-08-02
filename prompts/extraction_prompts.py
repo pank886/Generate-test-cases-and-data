@@ -156,15 +156,11 @@ def repair_excel_plan_prompt() -> ChatPromptTemplate:
          "### 测试场景分析（参考上下文）\n{analysis_section}\n\n"
          "### 完整用例描述（参考原始设计）\n{cases_section}\n\n"
          "### 失败的行及错误\n{failed_test_cases}\n\n"
-         "### 修复指南\n"
-         "1. 逐条对照失败行的错误信息，只修复报错的字段，保持正确字段不变\n"
-         "2. 步骤与预期条数不一致：参照上方「完整用例描述」中该用例的原始设计，\n"
-         "   补全缺失的步骤（如原始设计包含多个操作），或按步骤条数对齐预期。\n"
-         "   使 steps \\n 分隔后的条数 = expected \\n 分隔后的条数\n"
-         "3. 字段为空：从用例标题和上下文中推断补全\n"
-         "4. 前置引用不存在：修正为正确的 PRE 编号\n"
-         "5. shared_preconditions 留空数组 []\n"
-         "6. 禁止 Markdown，只输出 JSON"),
+         "### 拦截方法提示（以下为被拦截的用例与原因提示，修正时需消除对应问题）\n{block_reasons}\n\n"
+         "### 修正要求\n"
+         "1. 依据上方「失败的行及错误」与「拦截方法提示」修正失败用例，保持正确字段不变\n"
+         "2. 修正后必须满足上方「字段硬约束」：五字段齐全、步骤/预期条数一致、前置引用有效\n"
+         "3. 禁止 Markdown，只输出 JSON"),
         ("human", "请输出修正后的测试用例 JSON：")
     ])
 
@@ -405,7 +401,102 @@ def generate_dependency_map_prompt() -> ChatPromptTemplate:
 
 
 # ====================================================================
-# Phase A: 模块场景分析（入库预处理）
+# Phase A: 批量 chunk 摘要（入库时生成 simple_summary）
+# ====================================================================
+
+def batch_chunk_summary_prompt() -> ChatPromptTemplate:
+    """批量 chunk 摘要：5 chunks/批，LLM 输出 ===CHUNK_SUMMARY=== 分隔词，正则解析。"""
+    return ChatPromptTemplate.from_messages([
+        ("system",
+         "你是文档总结专家。为以下文本块分别生成一句话摘要（50字以内），概括核心内容。\n\n"
+         "### 输出格式\n"
+         "每个摘要以 ===CHUNK_SUMMARY=== 开头，独占一行，紧接着是摘要内容。\n"
+         "不要输出 JSON，不要编号，不要 Markdown。\n\n"
+         "===CHUNK_SUMMARY===\n"
+         "摘要1的内容\n"
+         "===CHUNK_SUMMARY===\n"
+         "摘要2的内容\n"
+         "..."),
+        ("human",
+         "以下是文档《{file_name}》的连续文本块，第 {start_idx}-{end_idx} 块 / 共 {total} 块。\n"
+         "每块位于页面「{page_name}」。\n\n"
+         "{chunks}\n\n"
+         "请为每个文本块生成一句摘要（50字以内），以 ===CHUNK_SUMMARY=== 分隔：")
+    ])
+
+
+# ====================================================================
+# Phase A: 三步分析管线（2026-07-31 讨论确认）
+# ====================================================================
+
+def analyze_product_scenarios_prompt() -> ChatPromptTemplate:
+    """Step 1: 产品文档 → 测试场景总结（thinking 模式，自由文本输出）。"""
+    return ChatPromptTemplate.from_messages([
+        ("system",
+         "你是测试分析师。阅读以下产品需求文档，提取所有测试场景。\n\n"
+         "### 分析要求\n"
+         "1. 识别文档中描述的所有业务场景（如增删改查、导入导出、审批流程等）\n"
+         "2. 每个场景下列出所有功能点（测试点）\n"
+         "3. 每个测试点标注覆盖维度（正向/边界/反向-业务/反向-字段/安全）\n"
+         "4. 注意跨模块依赖和数据约束\n\n"
+         "### 输出\n"
+         "自由文本分析报告，不需要 JSON 格式。\n"
+         "结构建议：场景名 → 描述 → 功能点列表（含 scope）→ 关键数据约束。"),
+        ("human",
+         "### 模块名\n{module_name}\n\n"
+         "### 产品文档\n{product_docs}\n\n"
+         "### 跨模块关系\n{cross_module_relations}\n\n"
+         "请分析以上产品文档的测试场景：")
+    ])
+
+
+def analyze_axure_ui_flow_prompt() -> ChatPromptTemplate:
+    """Step 2: 场景总结 + Axure → 页面交互逻辑总结（thinking 模式，自由文本输出）。"""
+    return ChatPromptTemplate.from_messages([
+        ("system",
+         "你是 UI/UX 分析师。根据已知的测试场景，分析 Axure 原型页面中的交互逻辑。\n\n"
+         "### 分析要求\n"
+         "1. 识别每个场景涉及的页面（列表页、表单页、详情页等）\n"
+         "2. 分析页面间的跳转关系（触发动作 → 跳转目标）\n"
+         "3. 提取页面中的数据表单结构（字段名、类型、必填等）\n"
+         "4. 标注 UI 层面的约束（按钮状态、表单联动、权限控制）\n\n"
+         "### 输出\n"
+         "自由文本分析报告，不需要 JSON 格式。\n"
+         "结构建议：场景 → 关联页面 → 页面跳转关系 → 表单字段 → UI 约束。"),
+        ("human",
+         "### 模块名\n{module_name}\n\n"
+         "### 测试场景总结（Step 1 输出）\n{scenario_analysis}\n\n"
+         "### Axure 原型页面内容\n{axure_pages}\n\n"
+         "请根据场景分析 Axure 页面交互逻辑：")
+    ])
+
+
+def analyze_api_mapping_prompt() -> ChatPromptTemplate:
+    """Step 3: 场景 + 逻辑关系 + API → 接口映射总结（thinking 模式，自由文本输出）。"""
+    return ChatPromptTemplate.from_messages([
+        ("system",
+         "你是接口分析师。根据已知的测试场景和页面交互逻辑，分析接口定义与业务场景的映射关系。\n\n"
+         "### 分析要求\n"
+         "1. 将每个 API 接口映射到对应的业务场景和功能点\n"
+         "2. 分析接口间的数据依赖关系（produces → consumes）\n"
+         "3. 识别跨模块接口调用链\n"
+         "4. 标注数据流向（哪个接口产出什么数据 → 哪个接口消费）\n\n"
+         "### 输出\n"
+         "自由文本分析报告，不需要 JSON 格式。\n"
+         "结构建议：接口→场景映射 → 数据依赖链 → 跨模块调用链 → 关键约束。"),
+        ("human",
+         "### 模块名\n{module_name}\n\n"
+         "### 测试场景总结（Step 1 输出）\n{scenario_analysis}\n\n"
+         "### 页面交互逻辑（Step 2 输出）\n{ui_flow_analysis}\n\n"
+         "### 接口定义\n{api_definitions}\n\n"
+         "### 模块树\n{module_tree}\n\n"
+         "### 跨模块关系\n{cross_module_relations}\n\n"
+         "请分析接口与场景的映射关系：")
+    ])
+
+
+# ====================================================================
+# Phase A: 模块场景分析（入库预处理）— 旧版（已废弃，保留兼容）
 # ====================================================================
 
 def analyze_module_scenarios_prompt() -> ChatPromptTemplate:

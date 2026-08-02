@@ -92,10 +92,12 @@ async def get_doc_glossary(doc_id: str):
     """获取文档的术语表。"""
     with get_session_ctx() as session:
         terms = GlossaryOps.get_terms(session, doc_id)
-    return {"success": True, "terms": [
-        {"term": t.term, "definition": t.definition, "notes": t.notes or ""}
-        for t in terms
-    ]}
+        # 在 session 关闭前取出所有属性，避免惰性加载
+        result = [
+            {"term": t.term, "definition": t.definition, "notes": t.notes or ""}
+            for t in terms
+        ]
+    return {"success": True, "terms": result}
 
 
 @router.post("/{doc_id}/glossary")

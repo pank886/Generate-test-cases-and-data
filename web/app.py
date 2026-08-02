@@ -310,11 +310,16 @@ async def lifespan(app: FastAPI):
     # 6. 启动定时清理临时文件后台任务
     _cleanup_task = asyncio.create_task(_cleanup_temp_files_loop())
 
+    # 7. 启动补偿 worker（独立线程，轮询 compensation_tasks 表）
+    from web.tasks import _start_compensation_worker
+    _start_compensation_worker()
+
     yield
 
     # --- shutdown ---
     _cleanup_task.cancel()
-    from web.tasks import _executor
+    from web.tasks import _executor, _stop_compensation_worker
+    _stop_compensation_worker()
     _executor.shutdown(wait=True)
 
 

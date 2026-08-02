@@ -10,11 +10,6 @@ from typing import Callable, Optional, Type
 import openai
 from pydantic import BaseModel, ValidationError
 
-# Phase B 断言格式校验正则（P0-2）
-_ASSERT_OK = re.compile(r'^\d+\.\s*\[(eq|contains|ne|db)\]', re.IGNORECASE)
-_ASSERT_BAD_SPACE = re.compile(r'\[\s+(eq|contains|ne|db)\s*\]|\[\s*(eq|contains|ne|db)\s+\]')
-_ASSERT_DOUBLE = re.compile(r'\[\[|\]\]')
-
 import yaml
 from openpyxl import Workbook
 from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
@@ -75,7 +70,7 @@ def _get_llm() -> DeepSeekChatOpenAI:
                     base_url=config.LLM_BASE_URL,
                     api_key=config.LLM_API_KEY(),
                     temperature=config.LLM_TEMPERATURE,
-                    max_tokens=65536,
+                    max_tokens=config.LLM_MAX_TOKENS,
                 )
     return _llm_instance
 
@@ -96,11 +91,168 @@ class ChatTestAgentGraph(RetrievalMixin, GenerationMixin):
         self.dual_chroma = get_chroma_db()
 
         # 工作流日志累积器（同一次运行的所有节点共用一份文件）
+        # 原初始化误放在 _finalize_excel_plan 的 return 之后（死代码），导致 _log_node_output 访问时报
+        # AttributeError: _run_timestamp；2026-08-03 移入 __init__ 修复。
         self._run_data: dict = {}
         self._run_timestamp: Optional[str] = None
 
+    # ── 共享：写 Excel + api_defs.json 快照 ──
+
+    def _finalize_excel_plan(self, state: State, plan,
+                             api_full_for_snapshot: list, module_tree: str) -> dict:
+        """将 ExcelPlanV2 写入 xlsx + api_defs.json，返回 state 更新 dict。"""
+        confirmed_module = state.get("confirmed_module", "")
+        output_dir = os.path.join(config.TESTCASE_BASE, confirmed_module)
+        os.makedirs(output_dir, exist_ok=True)
+        excel_path = os.path.join(output_dir, "test_plan.xlsx")
+
+        # 写入 Excel（双 Sheet）
+        hf = Font(bold=True, color="FFFFFF", size=11)
+        hfill = PatternFill(start_color="1A73E8", end_color="1A73E8", fill_type="solid")
+        tb = Border(left=Side(style="thin"), right=Side(style="thin"),
+                    top=Side(style="thin"), bottom=Side(style="thin"))
+        wa = Alignment(wrap_text=True, vertical="center")
+        wb = Workbook()
+        # Sheet 1: 测试计划
+        ws1 = wb.active
+        ws1.title = "测试计划"
+        for col, h in enumerate(["@allure.story", "@allure.title", "用例编号", "前置步骤", "执行步骤", "预期结果"], 1):
+            c = ws1.cell(row=1, column=col, value=h)
+            c.font, c.fill, c.border, c.alignment = hf, hfill, tb, Alignment(horizontal="center", vertical="center")
+        for i, tc in enumerate(plan.test_cases, 2):
+            for col, val in enumerate([tc.story, tc.title, tc.id,
+                                        ", ".join(tc.preconditions) if tc.preconditions else "无",
+                                        tc.steps, tc.expected], 1):
+                c = ws1.cell(row=i, column=col, value=val)
+                c.border, c.alignment = tb, wa
+        # Sheet 2: 共享前置
+        ws2 = wb.create_sheet("共享前置")
+        for col, h in enumerate(["前置编号", "前置名称", "详细步骤", "预期结果"], 1):
+            c = ws2.cell(row=1, column=col, value=h)
+            c.font, c.fill, c.border, c.alignment = hf, hfill, tb, Alignment(horizontal="center", vertical="center")
+        for i, pre in enumerate(plan.shared_preconditions, 2):
+            for col, val in enumerate([pre.id, pre.name, pre.steps, pre.expected], 1):
+                c = ws2.cell(row=i, column=col, value=val)
+                c.border, c.alignment = tb, wa
+        wb.save(excel_path)
+
+        # api_defs.json 快照
+        api_snapshot_path = os.path.join(output_dir, "api_defs.json")
+        with open(api_snapshot_path, "w", encoding="utf-8") as f:
+            json.dump(api_full_for_snapshot, f, ensure_ascii=False, indent=2)
+        logger.info(f"   📄 api_defs.json → {api_snapshot_path} ({len(api_full_for_snapshot)} 个接口)")
+
+        n_cases = len(plan.test_cases)
+        n_pres = len(plan.shared_preconditions)
+        n_modules = len(set(tc.story for tc in plan.test_cases))
+        logger.info(f"   📄 Excel: {excel_path} ({n_cases}条/{n_modules}模块, {n_pres}共享前置)")
+
+        return {
+            "excel_plan": plan,
+            "excel_path": excel_path,
+            "output_dir": output_dir,
+            "thinking": [f"生成 {n_cases} 条用例, {n_pres} 共享前置, {n_modules} 模块"],
+        }
 
     # ==================== 图内节点方法 ====================
+
+    def _generate_excel_plan_thinking(self, state: State):
+        """【新】thinking+json_mode 一步生成 Excel 计划。
+
+        合并原 analyze_test_points_raw + generate_excel_plan 两步：
+        thinking 分析 → json_object 直接输出 ExcelPlanV2。
+        失败时由 graph builder 降级到旧两步流程。
+        """
+        from observability import log_phase_header
+        from prompts.response_model import ExcelPlanV2, ApiDefinition
+        from agent_components.retrievers import _build_full_api_defs_text
+        from database import get_session_ctx
+        from database.operations import ModuleOps, BindingOps
+        from database.operations.analysis import AnalysisOps
+        from agent_components.api_annotations import ApiAnnotationRegistry
+
+        log_phase_header("Phase B — thinking+json 一步生成 Excel 计划")
+        logger.info("\n🧠 一步生成 Excel 测试计划（thinking + json_object）...")
+
+        # ── 1. 准备数据（同 _analyze_test_points_raw）──
+        confirmed_module = state.get("confirmed_module", "")
+        analysis_text = ""
+        with get_session_ctx() as session:
+            mod = ModuleOps.get_by_name(session, confirmed_module)
+            if mod:
+                record = AnalysisOps.get_by_module_id(session, mod.id)
+                if record:
+                    parts = []
+                    for key, label in [("scenario_analysis", "### 测试场景分析\n"),
+                                       ("ui_flow_analysis", "### 页面交互逻辑\n"),
+                                       ("api_analysis", "### 接口映射分析\n")]:
+                        val = getattr(record, key, None)
+                        if val:
+                            parts.append(label + val)
+                    if parts:
+                        analysis_text = "\n\n".join(parts)
+                    elif record.analysis_json:
+                        analysis_text = record.analysis_json
+
+            # 模块树
+            tree = ModuleOps.get_tree(session)
+            module_tree = json.dumps(tree, indent=2, ensure_ascii=False) if tree else "[]"
+
+        # API 定义（供 LLM 分析：只给概要 name/method/url/description，
+        # 避免全量参数/返回值撑爆 context 导致 thinking+json_object 返回空 content；
+        # 详细参数分析由 module_analysis 预分析提供，与旧两步流程 _generate_excel_plan_node 一致）
+        apis_text = json.dumps(
+            [{"name": d.get("name", "?"), "method": d.get("method", "GET"),
+              "url": d.get("url", ""), "description": d.get("description", "")}
+             for d in (state.get("api_definitions") or [])],
+            indent=2, ensure_ascii=False)
+
+        # Phase C 快照用完整 API
+        api_full_for_snapshot = [
+            ApiDefinition(
+                name=d.get("name", "?"), url=d.get("url", ""),
+                method=d.get("method", "GET"), description=d.get("description", ""),
+                parameters=d.get("parameters", {}), returns=d.get("returns", {}),
+            ).model_dump()
+            for d in (state.get("api_definitions") or [])
+        ]
+        for api in api_full_for_snapshot:
+            ApiAnnotationRegistry.apply_all(api)
+
+        # 关联模块
+        related_text = ", ".join(state.get("related_modules", [])) or "无"
+        user_ctx = state.get("original_input", "")
+
+        # ── 2. 构造 prompt ──
+        prompt = self.prompt_factory.generate_excel_plan_thinking()
+
+        # ── 3. thinking + json_object 调用 ──
+        _think_llm = self.llm.bind(
+            temperature=0.4,
+            response_format={"type": "json_object"},
+            extra_body={"thinking": {"type": "enabled"}},
+        )
+        _raw = _think_llm.invoke(prompt.format_messages(
+            json_schema=json.dumps(
+                ExcelPlanV2.model_json_schema(), ensure_ascii=False, indent=2),
+            module_analysis=analysis_text or "（无预分析，请根据接口定义自行分析）",
+            api_definitions=apis_text,
+            related_docs=related_text,
+            user_context=user_ctx,
+        ))
+        _text = _raw.content if hasattr(_raw, "content") else str(_raw)
+
+        # ── 4. 解析 ──
+        plan = ExcelPlanV2.model_validate(json.loads(_text))
+        logger.info(f"   => 一步生成完成: {len(plan.shared_preconditions)} 前置, {len(plan.test_cases)} 用例")
+
+        # ── 5. 只生成不落盘：标注数据源，交由 generate_excel_plan 处理节点 校验/修复/落盘 ──
+        return {
+            "excel_plan": plan,
+            "plan_source": "thinking",
+            "api_full_for_snapshot": api_full_for_snapshot,
+            "module_tree_json": module_tree,
+        }
 
     def _generate_excel_plan_node(self, state: State):
         """生成 Excel 测试计划 V2（双 Sheet：测试计划 + 共享前置）。"""
@@ -109,29 +261,35 @@ class ChatTestAgentGraph(RetrievalMixin, GenerationMixin):
         from prompts.extraction_prompts import repair_excel_plan_prompt
         from agent_components.validator import validate_excel_file
         from prompts.response_model import ApiDefinition
+        from agent_components.plan_validator import ExcelPlanValidator
 
         prompt = self.prompt_factory.generate_excel_plan_node()
-        api_list = [
+        # Phase B prompt：只传接口概要（name/method/url/description），避免全量 JSON 撑爆 context
+        api_summaries = [
+            {"name": d.get("name", "?"), "method": d.get("method", "GET"),
+             "url": d.get("url", ""), "description": d.get("description", "")}
+            for d in (state.get("api_definitions") or [])
+        ]
+        all_apis_json = json.dumps(api_summaries, indent=2, ensure_ascii=False)
+        # Phase C 快照：保留完整定义（parameters/returns 等），存为 api_defs.json
+        api_full_for_snapshot = [
             ApiDefinition(
                 name=d.get("name", "?"), url=d.get("url", ""),
                 method=d.get("method", "GET"), description=d.get("description", ""),
                 parameters=d.get("parameters", {}), returns=d.get("returns", {}),
-            )
+            ).model_dump()
             for d in (state.get("api_definitions") or [])
         ]
-        all_apis_dict = [api.model_dump() for api in api_list]
-        # 接口异常标识自动检测（is_export / has_path_params / ...）
+        # 接口异常标识自动检测
         from agent_components.api_annotations import ApiAnnotationRegistry
-        for api in all_apis_dict:
+        for api in api_full_for_snapshot:
             ApiAnnotationRegistry.apply_all(api)
-        all_apis_json = json.dumps(all_apis_dict, indent=2, ensure_ascii=False)
         from database import get_session_ctx
         from database.operations import ModuleOps
         with get_session_ctx() as session:
             tree = ModuleOps.get_tree(session)
         module_tree_json = json.dumps(tree, indent=2, ensure_ascii=False)
         test_analysis = state.get("test_point_analysis") or "（无）"
-        # 三段落拆分：分析报告 / 共享前置 / 测试用例，各自独立注入 prompt
         _sections = self._split_thinking_sections(test_analysis)
         prompt_vars = {
             "module_tree": module_tree_json,
@@ -141,6 +299,25 @@ class ChatTestAgentGraph(RetrievalMixin, GenerationMixin):
             "all_apis_info": all_apis_json,
             "user_context": state["original_input"],
         }
+
+        # ── 数据源检测（2026-08 生成/处理解耦，方案3）：
+        #    generate_excel_plan 为纯处理节点，只消费上游生成的 plan（thinking / 未来旧链路）。
+        #    无外部 plan（thinking 失败）→ requires_review，不降级自生成。
+        #    旧节点自生成兜底方案见 changelog/2026-08-02_old_generation_fallback.md，暂未启用。
+        incoming_plan = state.get("excel_plan")
+        if incoming_plan is None:
+            return {
+                "excel_plan": None, "excel_path": "", "output_dir": None,
+                "requires_review": True,
+                "error_info": ["生成环节未产出 plan（thinking 失败），且旧节点自生成兜底未启用"],
+                "response_obj": ProperResponse(
+                    proper_thinking=[], worth_to_remember=False,
+                    final_response="测试计划生成失败：生成环节未产出计划，请重试",
+                ),
+            }
+        # thinking 已构造的快照/模块树优先，避免重复查询与不一致
+        api_full_for_snapshot = state.get("api_full_for_snapshot") or api_full_for_snapshot
+        module_tree_json = state.get("module_tree_json") or module_tree_json
 
         output_dir = None
         plan = None
@@ -153,62 +330,28 @@ class ChatTestAgentGraph(RetrievalMixin, GenerationMixin):
 
         for attempt in range(config.EXCEL_REPAIR_ATTEMPTS):
             if attempt == 0 or _gen_warning:
-                # === 全量生成（首轮 / 质量不达标重试） ===
-                _vars = dict(prompt_vars)
-                _vars["gen_warning"] = _gen_warning
-                _gen_warning = ""  # 只用一次
-                plan = self._invoke_structured(prompt, ExcelPlanV2,
-                    method="json_mode", temperature=0.4,
-                    log_label="generate_excel_plan_RAW", **_vars)
-                if isinstance(plan, list):
-                    plan = ExcelPlanV2(shared_preconditions=[], test_cases=plan)
+                # === 首轮 / 质量不达标重试 ===
+                if attempt == 0:
+                    # 消费上游 thinking 生成的 plan（纯处理，不生成）
+                    plan = incoming_plan
+                    incoming_plan = None  # 仅首轮消费
+                else:
+                    # 质量不达标需重新生成 plan —— 方案3 无自生成能力，交人工审查
+                    return {
+                        "excel_plan": None, "excel_path": "", "output_dir": output_dir,
+                        "requires_review": True,
+                        "error_info": [f"生成质量未达标（第{_gen_attempt}次），且无自生成兜底，交人工审查"],
+                        "response_obj": ProperResponse(
+                            proper_thinking=[], worth_to_remember=False,
+                            final_response="测试计划生成质量未达标，需人工审查",
+                        ),
+                    }
                 all_shared_pres = plan.shared_preconditions
 
-                # 首轮校验全部用例
-                pre_ids = {p.id for p in plan.shared_preconditions}
-                _missing_pres_in_plan = False
-                if not pre_ids and "## 共享前置" in test_analysis:
-                    _missing_pres_in_plan = True
-                _new_failed: list = []
-                seen_ids: set = set()
-                all_confirmed = []
-                for i, tc in enumerate(plan.test_cases, 1):
-                    errs = []
-                    if tc.id in seen_ids:
-                        continue
-                    for fld, lbl in [("id", "编号"), ("story", "子模块"), ("title", "标题"),
-                                     ("steps", "步骤"), ("expected", "预期")]:
-                        if not getattr(tc, fld, ""):
-                            errs.append(f"{lbl}为空")
-                    for pid in tc.preconditions:
-                        if pid not in pre_ids:
-                            if _missing_pres_in_plan:
-                                errs.append(
-                                    f"引用前置 {pid} 不存在——测试分析报告中已列出 {pid} 的定义，"
-                                    "但 shared_preconditions 为空。请将 {pid} 的步骤和预期添加到 "
-                                    "shared_preconditions 数组中，禁止删除用例的 preconditions 引用")
-                            else:
-                                errs.append(f"引用前置 {pid} 不存在")
-                    if tc.steps and tc.expected:
-                        ns = tc.steps.count("\n") + 1
-                        ne = tc.expected.count("\n") + 1
-                        if ns != ne:
-                            errs.append(f"步骤({ns}条)与预期({ne}条)数量不一致")
-                        for ei, line in enumerate(tc.expected.split("\n"), 1):
-                            line_s = line.strip()
-                            if not line_s:
-                                errs.append(f"预期第{ei}条为空行")
-                            elif _ASSERT_DOUBLE.search(line_s):
-                                errs.append(f"预期第{ei}条含双层括号: {line_s[:40]}")
-                            elif _ASSERT_BAD_SPACE.search(line_s):
-                                errs.append(f"预期第{ei}条断言关键词含空格: {line_s[:40]}")
-                            elif not _ASSERT_OK.search(line_s):
-                                errs.append(f"预期第{ei}条缺少断言关键词: {line_s[:40]}")
-                    if errs:
-                        _new_failed.append((i, tc.model_dump(), errs))
-                    else:
-                        all_confirmed.append(tc)
-                        seen_ids.add(tc.id)
+                # 首轮校验全部用例（校验收敛：ExcelPlanValidator，含 7 类错误聚合）
+                _vr = ExcelPlanValidator.validate(plan, test_analysis)
+                _new_failed = _vr.failed_details
+                all_confirmed = _vr.all_confirmed
 
                 # 质量门禁：首轮通过率 < 50% 时重新全量生成（非修复）
                 n_total = len(plan.test_cases)
@@ -260,15 +403,23 @@ class ChatTestAgentGraph(RetrievalMixin, GenerationMixin):
                         f"  错误: {'; '.join(f_errs)}"
                     )
                 failed_tc_text = "\n---\n".join(failed_tc_list)
+                # 修复节点入参统一（2026-08 D1/D2）：
+                #   ① 共享数据（与生成节点一致，_prepare_plan_prompt_vars）
+                #   ② 错误用例 failed_test_cases
+                #   ③ 拦截原因 block_reasons（validator 聚合，同类一条）
+                _shared_vars = self._prepare_plan_prompt_vars(state)
+                _block_reasons_text = "\n".join(
+                    ExcelPlanValidator.aggregate_block_reasons(failed_details))
                 repair_prompt = repair_excel_plan_prompt()
                 plan = self._invoke_structured(repair_prompt, ExcelPlanV2,
                     method="json_mode",
                     failed_test_cases=failed_tc_text,
-                    shared_pre_section=_sections.get("preconditions", "（无）"),
-                    module_tree=module_tree_json,
-                    all_apis_info=all_apis_json,
-                    analysis_section=_sections["analysis"],
-                    cases_section=_sections["cases"],
+                    block_reasons=_block_reasons_text,
+                    module_tree=_shared_vars["module_tree"],
+                    analysis_section=_shared_vars["analysis_section"],
+                    shared_pre_section=_shared_vars["shared_pre_section"],
+                    cases_section=_shared_vars["cases_section"],
+                    all_apis_info=_shared_vars["all_apis_info"],
                 )
                 if isinstance(plan, list):
                     plan = ExcelPlanV2(shared_preconditions=[], test_cases=plan)
@@ -296,31 +447,8 @@ class ChatTestAgentGraph(RetrievalMixin, GenerationMixin):
                         logger.warning(f"   ⚠️ 重试批次内重复 TC {tc.id}，已丢弃")
                         continue
                     _seen_in_retry.add(tc.id)
-                    errs = []
-                    for fld, lbl in [("id", "编号"), ("story", "子模块"), ("title", "标题"),
-                                     ("steps", "步骤"), ("expected", "预期")]:
-                        if not getattr(tc, fld, ""):
-                            errs.append(f"{lbl}为空")
-                    for pid in tc.preconditions:
-                        if pid not in pre_ids_all:
-                            errs.append(
-                                f"引用前置 {pid} 不存在。请将 {pid} 的定义（步骤和预期结果）"
-                                "添加到 shared_preconditions 数组中，禁止删除用例的 preconditions 引用")
-                    if tc.steps and tc.expected:
-                        ns = tc.steps.count("\n") + 1
-                        ne = tc.expected.count("\n") + 1
-                        if ns != ne:
-                            errs.append(f"步骤({ns}条)与预期({ne}条)数量不一致")
-                        for ei, line in enumerate(tc.expected.split("\n"), 1):
-                            line_s = line.strip()
-                            if not line_s:
-                                errs.append(f"预期第{ei}条为空行")
-                            elif _ASSERT_DOUBLE.search(line_s):
-                                errs.append(f"预期第{ei}条含双层括号: {line_s[:40]}")
-                            elif _ASSERT_BAD_SPACE.search(line_s):
-                                errs.append(f"预期第{ei}条断言关键词含空格: {line_s[:40]}")
-                            elif not _ASSERT_OK.search(line_s):
-                                errs.append(f"预期第{ei}条缺少断言关键词: {line_s[:40]}")
+                    # 单用例校验（校验收敛：ExcelPlanValidator.check_case）
+                    errs = ExcelPlanValidator.check_case(tc, pre_ids_all)
                     if errs:
                         _new_failed.append((0, tc.model_dump(), errs))
                     else:
@@ -528,8 +656,8 @@ class ChatTestAgentGraph(RetrievalMixin, GenerationMixin):
         api_defs_path = os.path.join(output_dir, "api_defs.json")
         try:
             with open(api_defs_path, "w", encoding="utf-8") as f:
-                json.dump(all_apis_dict, f, ensure_ascii=False, indent=2)
-            logger.info(f"   📄 接口定义快照已保存: {api_defs_path} ({len(all_apis_dict)} 个接口)")
+                json.dump(api_full_for_snapshot, f, ensure_ascii=False, indent=2)
+            logger.info(f"   📄 接口定义快照已保存: {api_defs_path} ({len(api_full_for_snapshot)} 个接口)")
         except OSError:
             logger.error("接口定义快照写入失败（Phase C 确认时将按 M8 阻断）: %s",
                          api_defs_path, exc_info=True)
@@ -555,7 +683,7 @@ class ChatTestAgentGraph(RetrievalMixin, GenerationMixin):
         return {
             "excel_plan": plan, "excel_path": excel_path, "output_dir": output_dir,
             "response_obj": ProperResponse(
-                proper_thinking=[f"已提取 {len(all_apis_dict)} 个接口，分析 {n_confirmed} 条用例"],
+                proper_thinking=[f"已提取 {len(api_full_for_snapshot)} 个接口，分析 {n_confirmed} 条用例"],
                 final_response=f"Excel 测试计划已生成：共 {n_confirmed} 条用例{fail_warn}",
                 worth_to_remember=False,
             ),
@@ -702,6 +830,31 @@ class ChatTestAgentGraph(RetrievalMixin, GenerationMixin):
             result[key] = text[pos:next_pos].strip()
 
         return result
+
+    def _prepare_plan_prompt_vars(self, state: State) -> dict:
+        """生成/修复共用的 prompt 变量构造（单一数据源）。2026-08 新增。
+
+        供生成节点与修复节点统一调用，保证 API 信息（概要）、模块树、分析段落
+        来自同一份来源；入参含 plan_source 数据源标注。
+        接线到具体节点待「待删除清单」确认后执行（当前仅新增，不改现有行为）。
+        """
+        module_tree = state.get("module_tree_json") or "[]"
+        test_analysis = state.get("test_point_analysis") or "（无）"
+        _sections = self._split_thinking_sections(test_analysis)
+        api_summaries = [
+            {"name": d.get("name", "?"), "method": d.get("method", "GET"),
+             "url": d.get("url", ""), "description": d.get("description", "")}
+            for d in (state.get("api_definitions") or [])
+        ]
+        return {
+            "module_tree": module_tree,
+            "analysis_section": _sections["analysis"],
+            "shared_pre_section": _sections["preconditions"],
+            "cases_section": _sections["cases"],
+            "all_apis_info": json.dumps(api_summaries, indent=2, ensure_ascii=False),
+            "plan_source": state.get("plan_source"),
+            "user_context": state.get("original_input", ""),
+        }
 
     @staticmethod
     def _serialize_for_log(obj):
@@ -874,12 +1027,11 @@ class ChatTestAgentGraph(RetrievalMixin, GenerationMixin):
             llm_kwargs["extra_body"] = {"thinking": {"type": "enabled"}}
 
         last_error = None
-        # 显式 bind max_tokens + temperature，防止 LangChain 多层 bind() 嵌套
-        # 丢失构造函数中的 max_tokens（回退到 API 默认 8192，导致大 JSON 被截断）
-        _bind_kwargs: dict = {"max_tokens": config.LLM_MAX_TOKENS}
+        # max_tokens 在 model_kwargs 中，仅温度走 bind
+        _bind_kwargs: dict = {}
         if temperature is not None:
             _bind_kwargs["temperature"] = temperature
-        _llm = self.llm.bind(**_bind_kwargs)
+        _llm = self.llm.bind(**_bind_kwargs) if _bind_kwargs else self.llm
         # chain 在重试间不变，只需构建一次
         chain = prompt | _llm.with_structured_output(
             model_class, method=method, **llm_kwargs

@@ -98,11 +98,15 @@ class Settings(BaseSettings):
     )
     collection_product_docs: str = Field(
         default="product_docs",
-        description="产品文档 Collection 名（Phase A 双集合）。同一 Collection 内向量可互检索",
+        description="[已废弃，保留兼容] 产品文档 Collection 名。合并后统一使用 collection_doc_search",
     )
     collection_api_defs: str = Field(
         default="api_defs",
-        description="接口定义 Collection 名（Phase A 双集合）。与产品文档隔离，避免检索混淆",
+        description="[已废弃，保留兼容] 接口定义 Collection 名。合并后统一使用 collection_doc_search",
+    )
+    collection_doc_search: str = Field(
+        default="doc_search",
+        description="统一文档检索 Collection 名（合并 product_docs + api_defs）。跨类型语义检索",
     )
 
     # ================================================================
@@ -216,12 +220,32 @@ class Settings(BaseSettings):
 
     # -- 后台任务线程池 --
     task_max_workers: int = Field(
-        default=10, ge=1, le=50,
-        description="后台任务线程池大小。超过此数的新任务排队等待",
+        default=9, ge=1, le=50,
+        description="后台任务线程池大小（预留1个给补偿worker）。超过此数的新任务排队等待",
     )
     task_max_queue: int = Field(
         default=30, ge=1, le=200,
         description="后台任务队列上限。排队任务数超过此值则拒绝新任务（背压保护）",
+    )
+
+    # -- 批量摘要（讨论6） --
+    llm_global_concurrency: int = Field(
+        default=5, ge=1, le=20,
+        description="LLM 全局并发调用上限。多 API key 可适当增加",
+    )
+    batch_summary_chunk_size: int = Field(
+        default=5, ge=1, le=20,
+        description="每批 chunks 数量（一次 LLM 调用处理的 chunk 数）",
+    )
+
+    # -- 补偿 worker（讨论5） --
+    compensation_poll_interval: int = Field(
+        default=30, ge=5, le=600,
+        description="补偿 worker 轮询间隔（秒）",
+    )
+    compensation_max_retries: int = Field(
+        default=3, ge=1, le=10,
+        description="补偿任务最大重试次数",
     )
 
     # ================================================================

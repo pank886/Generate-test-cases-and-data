@@ -70,6 +70,16 @@ def build_workflow():
     builder.add_node("retrieve_related_data", lambda state: components._retrieve_related_data(state))
     builder.add_node("analyze_test_points_raw", lambda state: components._analyze_test_points_raw(state))
     builder.add_node("generate_excel_plan", lambda state: components._generate_excel_plan_node(state))
+    # 新节点：thinking+json_mode 一步生成（只生成不落盘；失败时无 plan → 处理节点 requires_review）
+    def _generate_plan_thinking_safe(state: dict) -> dict:
+        try:
+            return components._generate_excel_plan_thinking(state)
+        except Exception:
+            import logging
+            logging.getLogger(__name__).warning(
+                "一步生成失败，generate_excel_plan 将因缺少 plan 走 requires_review", exc_info=True)
+            return state  # 保留 state；无 plan 时由处理节点标记人工审查
+    builder.add_node("generate_plan_thinking", _generate_plan_thinking_safe)
 
     def _route_after_intent(state: dict) -> str:
         if state.get("workflow_status") == "WAITING":
@@ -93,9 +103,14 @@ def build_workflow():
         {"no_data": END, "continue": "extract_related_modules"},
     )
     builder.add_edge("extract_related_modules", "retrieve_related_data")
-    builder.add_edge("retrieve_related_data", "analyze_test_points_raw")
-    builder.add_edge("analyze_test_points_raw", "generate_excel_plan")
+    # 生成/处理解耦（2026-08 方案3）：
+    #   generate_plan_thinking 只生成 plan 入 state → generate_excel_plan 纯处理（校验/修复/落盘）→ END
+    #   thinking 失败（无 plan）→ 处理节点直接 requires_review，不降级自生成
+    builder.add_edge("retrieve_related_data", "generate_plan_thinking")
+    builder.add_edge("generate_plan_thinking", "generate_excel_plan")
     builder.add_edge("generate_excel_plan", END)
+    # analyze_test_points_raw 旧链路兜底：见 changelog/2026-08-02_old_generation_fallback.md，暂未启用
+    # （节点保留定义不连边；未来旧链路 = analyze 生成 plan → 处理节点）
 
     graph = builder.compile()
     return graph, components

@@ -61,11 +61,48 @@ def get_session_ctx():
         session.close()
 
 
+def _migrate_db():
+    """自动补齐缺失列（SQLite 不支持 ALTER COLUMN / DROP COLUMN，仅 ADD COLUMN）。
+
+    未来迁移在此函数内追加。
+    """
+    import sqlite3
+    engine = get_engine()
+    # SQLite 引擎 URL 格式: sqlite:///path
+    db_path = str(engine.url).replace("sqlite:///", "")
+    conn = sqlite3.connect(db_path)
+    try:
+        # documents 表新增 api_* 列（2026-07-29 存储翻转）
+        _ensure_columns(conn, "documents", [
+            ("api_name", "TEXT DEFAULT ''"),
+            ("api_url", "TEXT DEFAULT ''"),
+            ("api_method", "TEXT DEFAULT ''"),
+            ("api_description", "TEXT DEFAULT ''"),
+            ("api_headers", "TEXT DEFAULT ''"),
+            ("api_parameters", "TEXT DEFAULT ''"),
+            ("api_returns", "TEXT DEFAULT ''"),
+            ("api_annotations", "TEXT DEFAULT ''"),
+            ("content_hash", "TEXT DEFAULT ''"),
+        ])
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _ensure_columns(conn, table: str, columns: list[tuple[str, str]]):
+    """检查并添加缺失列。columns: [(name, type_spec), ...]"""
+    existing = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+    for col_name, col_type in columns:
+        if col_name not in existing:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {col_name} {col_type}")
+
+
 def init_db():
     """创建所有表（幂等：多次调用安全）。首次运行时从 modules.json 导入种子数据。"""
     # 确保模型类已注册到 Base.metadata
     import database.models  # noqa: F401
     Base.metadata.create_all(get_engine())
+    _migrate_db()
     _seed_from_json_if_empty()
 
 

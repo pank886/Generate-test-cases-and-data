@@ -201,6 +201,9 @@ async def get_module_analysis(module_name: str):
                 "module_id": record.module_id,
                 "module_name": record.module_name,
                 "analysis_json": record.analysis_json,
+                "scenario_analysis": record.scenario_analysis,
+                "ui_flow_analysis": record.ui_flow_analysis,
+                "api_analysis": record.api_analysis,
                 "status": record.status,
                 "version": record.version,
                 "extracted_at": record.extracted_at.isoformat() if record.extracted_at else None,
@@ -211,18 +214,30 @@ async def get_module_analysis(module_name: str):
 
 @router.put("/{module_name}/analysis")
 async def update_module_analysis(module_name: str, data: dict):
-    """手动保存编辑后的场景分析。"""
+    """手动保存编辑后的场景分析（支持新三步格式和旧 JSON 格式）。"""
     analysis_json = data.get("analysis_json", "")
-    if not analysis_json:
+    scenario_analysis = data.get("scenario_analysis", "")
+    ui_flow_analysis = data.get("ui_flow_analysis", "")
+    api_analysis = data.get("api_analysis", "")
+    is_new_format = scenario_analysis or ui_flow_analysis or api_analysis
+    if not is_new_format and not analysis_json:
         return JSONResponse(status_code=400,
-                            content={"success": False, "message": "缺少 analysis_json"})
+                            content={"success": False, "message": "缺少分析内容"})
     with get_session_ctx() as session:
         mod = ModuleOps.get_by_name(session, module_name)
         if not mod:
             return JSONResponse(status_code=404,
                                 content={"success": False, "message": "模块不存在"})
         from database.operations.analysis import AnalysisOps
-        record = AnalysisOps.upsert(session, mod.id, module_name, analysis_json)
+        if is_new_format:
+            record = AnalysisOps.upsert_3step(
+                session, mod.id, module_name,
+                scenario_analysis=scenario_analysis,
+                ui_flow_analysis=ui_flow_analysis,
+                api_analysis=api_analysis,
+            )
+        else:
+            record = AnalysisOps.upsert(session, mod.id, module_name, analysis_json)
         # 手动编辑标记为 reviewed
         record.status = "reviewed"
         record.modified_by = data.get("modified_by", "")
@@ -267,20 +282,39 @@ async def get_module_api_defs(module_name: str, doc_id: str = ""):
     """读取模块的接口定义（含 annotations 字段）。
 
     可传 doc_id 过滤只返回该文档的接口；不传则返回全部。
-    ChromaDB 存储格式为 {api_name, content: "JSON字符串"}，此处解析 content 为扁平 dict。
+    优先从 SQLite documents.api_* 列读取，降级 ChromaDB。
     """
     import json as _json
-    from web.state import _chroma_db  # 从 state 取值避免 None 引用问题
+    from database.models import Document
+
     with get_session_ctx() as session:
         docs = BindingOps.get_bound_docs(session, module_name)
-        chroma = _chroma_db
-        if not chroma:
-            return {"success": True, "api_defs": []}
         result = []
         for d in docs:
             if d.doc_type != "api":
                 continue
             if doc_id and d.id != doc_id:
+                continue
+
+            # ── 优先：SQLite api_* 列 ──
+            if d.api_url:
+                api = {
+                    "name": d.api_name,
+                    "url": d.api_url,
+                    "method": d.api_method,
+                    "description": d.api_description,
+                    "headers": _json.loads(d.api_headers or "[]"),
+                    "parameters": _json.loads(d.api_parameters or "[]"),
+                    "returns": _json.loads(d.api_returns or "[]"),
+                    "annotations": _json.loads(d.api_annotations or "{}"),
+                }
+                result.append(api)
+                continue
+
+            # ── 降级：ChromaDB（存量数据未迁移）──
+            from web.state import _chroma_db
+            chroma = _chroma_db
+            if not chroma:
                 continue
             apis = chroma.get_doc_apis(d.id)
             for raw in apis:
@@ -301,52 +335,85 @@ async def get_module_api_defs(module_name: str, doc_id: str = ""):
 
 @router.put("/{module_name}/api-defs/{index}/annotations")
 async def update_api_annotations(module_name: str, index: int, data: dict):
-    """更新单个接口的 annotations 字段，或完整替换 API 定义（传 full_update）。
+    """更新单个接口的 annotations 字段（SQLite 为准，ChromaDB 异步重建）。
 
-    两种模式：
-      - annotations 更新：body = {annotations: {...}, doc_id: "..."}
-      - 完整更新：body = {annotations: {...}, doc_id: "...", full_update: {...}}
+    body = {annotations: {...}, doc_id: "..."}
+    可选 full_update: {...}  完整替换 API 定义的字段（name/url/method/description/headers/parameters/returns）
     """
     import json as _json
+    from database.models import Document
+    from agent_components.dual_chroma import get_chroma_db
+    from ingest_v2 import _build_api_search_text
+
     annotations = data.get("annotations")
-    doc_id = data.get("doc_id", "")
+    doc_id_filter = data.get("doc_id", "")
     full_update = data.get("full_update")
+
     with get_session_ctx() as session:
-        from web.state import _chroma_db  # 从 state 取值避免 None 引用问题
-        chroma = _chroma_db
-        if not chroma:
-            return JSONResponse(status_code=500,
-                                content={"success": False, "message": "ChromaDB 未初始化"})
-        # 收集目标文档的 API（支持 doc_id 过滤）
         docs = BindingOps.get_bound_docs(session, module_name)
-        api_defs = []
+        # 过滤出 API 文档，按 index 定位
+        api_docs = []
         for d in docs:
             if d.doc_type != "api":
                 continue
-            if doc_id and d.id != doc_id:
+            if doc_id_filter and d.id != doc_id_filter:
                 continue
-            api_defs.extend(chroma.get_doc_apis(d.id))
-        if index < 0 or index >= len(api_defs):
+            api_docs.append(d)
+
+        if index < 0 or index >= len(api_docs):
             return JSONResponse(status_code=400,
                                 content={"success": False, "message": "索引超出范围"})
-        raw = dict(api_defs[index])
-        if raw.get("content"):
+
+        target = api_docs[index]
+
+        # ── 1. 更新 SQLite api_* 列（以 SQLite 为准）──
+        update_vals = {
+            "api_annotations": _json.dumps(annotations, ensure_ascii=False),
+        }
+        if full_update:
+            for key, col in [("name", "api_name"), ("url", "api_url"),
+                             ("method", "api_method"), ("description", "api_description")]:
+                if key in full_update:
+                    update_vals[col] = full_update[key]
+            for key, col in [("headers", "api_headers"), ("parameters", "api_parameters"),
+                             ("returns", "api_returns")]:
+                if key in full_update:
+                    update_vals[col] = _json.dumps(full_update[key], ensure_ascii=False)
+
+        session.query(Document).filter_by(id=target.id).update(update_vals)
+        session.commit()
+
+        # ── 2. 异步重建 ChromaDB 检索文本 ──
+        try:
+            doc = session.query(Document).filter_by(id=target.id).first()
+            api = {
+                "name": doc.api_name, "url": doc.api_url,
+                "method": doc.api_method, "description": doc.api_description,
+                "headers": _json.loads(doc.api_headers or "[]"),
+                "parameters": _json.loads(doc.api_parameters or "[]"),
+                "returns": _json.loads(doc.api_returns or "[]"),
+                "annotations": _json.loads(doc.api_annotations or "{}"),
+            }
+            api["_search_text"] = _build_api_search_text(api)
+            api["_doc_id"] = doc.id
+
+            db = get_chroma_db()
+            db.delete_by_doc_id(doc.id)
+            db.add_api_defs(doc.id, [api])
+        except Exception as e:
+            logger.warning("ChromaDB 检索文本重建失败，创建补偿任务: %s", e)
             try:
-                content_obj = _json.loads(raw["content"])
-                if full_update:
-                    # 完整更新：用 full_update 替换 content 的所有字段
-                    for k, v in full_update.items():
-                        content_obj[k] = v
-                content_obj["annotations"] = annotations
-                raw["content"] = _json.dumps(content_obj, ensure_ascii=False)
-            except (_json.JSONDecodeError, TypeError):
-                pass
-        # 重新写入 ChromaDB
-        from agent_components.dual_chroma import get_chroma_db
-        db = get_chroma_db()
-        parent_doc_id = raw.get("_doc_id", "")
-        db.delete_by_doc_id(parent_doc_id)
-        db.add_api_defs(parent_doc_id, [raw])
+                from database.operations.compensation import CompensationOps
+                import config
+                CompensationOps.create(
+                    session, "api_search_text",
+                    {"doc_id": target.id},
+                    max_retries=config.COMPENSATION_MAX_RETRIES,
+                )
+                session.commit()
+            except Exception as e2:
+                logger.error("补偿任务创建也失败: %s", e2)
+
         return {"success": True, "message": "已更新"}
 
 

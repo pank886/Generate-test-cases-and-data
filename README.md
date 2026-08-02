@@ -39,15 +39,17 @@ Workflow（运行阶段）
   ├── 测试点分析（两阶段：thinking 自由文本 → format json_mode）
   │     输出测试点列表 + 风险区域
   │
-  ├── Excel 测试计划（两阶段：analyze_scenarios → generate_excel_plan）
-  │     ├── 思考阶段（thinking, 自由文本分析场景）
-  │     ├── 格式化阶段（function_calling + Pydantic 模型约束）
-  │     ├── Pydantic 校验 ← 自动修复循环
-  │     ├── 文件层校验 ← 通过 → 继续
-  │     │   └── 失败 → 重试（最多 3 次）
-  │     │       └── 仍失败 → 标记需人工审查
-  │     └── 落盘三件套：test_plan.xlsx + translation_cache.json
-  │         + api_defs.json（接口定义快照，Phase C 数据来源，缺失即阻断确认）
+  ├── Excel 测试计划（生成/处理解耦：thinking 一步生成 → 处理节点）
+  │     ├── 生成：thinking + json_object 一步产出 ExcelPlanV2
+  │     │     （只生成不落盘，plan_source 标注数据来源；只喂接口概要 name/method/url/description）
+  │     ├── 处理：generate_excel_plan 纯处理节点
+  │     │     ├── 数据源检测：有外部 plan → 消费；无 plan（thinking 失败）→ requires_review
+  │     │     ├── 校验（ExcelPlanValidator：字段/前置引用/步骤对齐/断言格式，拦截原因按类型聚合）
+  │     │     ├── 修复轮（LLM 修复失败行，入参=共享数据 + 错误用例 + 拦截方法提示）
+  │     │     ├── 消解器（冲突前置克隆隔离）
+  │     │     └── 落盘三件套：test_plan.xlsx + translation_cache.json
+  │     │         + api_defs.json（接口定义快照，Phase C 数据来源，缺失即阻断确认）
+  │     └── thinking 失败（无 plan）→ requires_review 人工审查（不降级自生成）
   │
   ├── .py 文件生成（纯代码组装：fixture + run_blocks 结构，翻译缓存优先）
   └── YAML 生成（两阶段：analyze_yaml_data thinking → format json_mode，单次输出）
@@ -233,6 +235,7 @@ Generate-test-cases-and-data/
 │   ├── dual_chroma.py              # DualChromaDB 双集合封装
 │   ├── module_tree.py              # 模块目录树管理
 │   ├── validator.py                # 只读校验节点
+│   ├── plan_validator.py           # Excel 计划校验器（ExcelPlanValidator，7 类错误聚合 + 拦截原因）
 │   ├── axure_parser.py             # Axure 原型解析器
 │   ├── generators.py               # PY/YAML 生成节点
 │   └── retrievers.py               # 多跳检索节点
@@ -369,6 +372,14 @@ Pydantic 层校验    ←     自动修复循环
 ---
 
 ## 最新变更
+
+**2026-08-02/03**
+
+- **P0 — 接口提取修复** — `extract_apis_from_yapi_md` 解析 YApi MD 的 4 个缺陷（desc HTML 残留 `/p>`、Query 参数不解析、Body-MD file 丢失、响应信封误塞参数），重新提取入库 72 条
+- **P0 — Excel 生成/处理解耦** — `generate_plan_thinking` 只生成不落盘 → `generate_excel_plan` 纯处理节点（校验/修复/消解/落盘）；thinking 失败 → requires_review，不降级自生成（旧链路方案见 `changelog/2026-08-02_old_generation_fallback.md`）
+- **P0 — 校验收敛** — 新增 `agent_components/plan_validator.py`（ExcelPlanValidator），首轮/重试校验副本收敛，拦截原因按 7 类错误类型聚合（同类一条 + 计数 + 受影响用例）
+- **P1 — thinking 节点入参瘦身** — 喂接口概要（name/method/url/description）而非全量参数，避免超大输入导致 thinking+json_object 空响应
+- **P1 — 修复节点入参统一** — `_prepare_plan_prompt_vars` 共享数据 + `failed_test_cases` + `block_reasons`（「拦截方法提示」段落）
 
 **2026-07-18**
 

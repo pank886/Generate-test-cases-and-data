@@ -60,6 +60,12 @@ nav a:hover,nav a.active{color:#fff;border-bottom-color:#fff}
 .chunk-viewer{margin-top:12px;border:1px solid var(--border);border-radius:4px;padding:12px;background:#fafbfc;font-size:13px;max-height:400px;overflow-y:auto;white-space:pre-wrap;line-height:1.7}
 .chunk-nav{display:flex;gap:8px;align-items:center;margin-bottom:8px;font-size:12px}
 
+/* 文档详情 Tab */
+.doc-detail-tabs{display:flex;gap:0;border-bottom:2px solid var(--border);margin-bottom:8px}
+.doc-detail-tab{padding:6px 16px;border:none;background:none;font-size:12px;cursor:pointer;color:var(--text-dim);border-bottom:2px solid transparent;margin-bottom:-2px;transition:all .2s}
+.doc-detail-tab:hover{color:var(--primary)}
+.doc-detail-tab.active{color:var(--primary);border-bottom-color:var(--primary);font-weight:600}
+
 /* 关联面板 */
 .glossary-item{padding:6px 0;border-bottom:1px solid #f0f0f0;font-size:12px}
 .glossary-item .term-name{font-weight:600;color:var(--primary)}
@@ -95,6 +101,7 @@ nav a:hover,nav a.active{color:#fff;border-bottom-color:#fff}
 .modal-overlay{position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,.4);z-index:1000;display:flex;align-items:center;justify-content:center}
 .modal{background:#fff;border-radius:var(--radius);padding:24px;max-width:700px;width:92%;max-height:80vh;overflow-y:auto;box-shadow:0 8px 32px rgba(0,0,0,.2)}
 .modal h3{margin-bottom:14px}.modal .btn-row{display:flex;gap:8px;justify-content:flex-end;margin-top:16px}
+.modal.modal-wide{max-width:960px;max-height:90vh}
 .hidden{display:none!important}
 
 /* 聊天 (Tab 3) */

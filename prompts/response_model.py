@@ -181,7 +181,8 @@ class TestCaseRow(BaseModel):
     )
     is_negative_test: bool = Field(
         default=False,
-        description="内部元数据：是否为写操作（增删改等）。LLM 输出，不写入 Excel"
+        description="内部元数据：是否为逆向/异常测试用例（预期结果为失败、报错、异常、拒绝、无权、冲突、不存在等）。"
+                    "true=逆向用例，false=正向用例。LLM 输出，不写入 Excel"
     )
 
 

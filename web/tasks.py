@@ -8,6 +8,7 @@ import asyncio
 import os
 import json as _json
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 
@@ -486,28 +487,38 @@ async def _resume_workflow_bg(task_id: str, session_id: str, state: dict):
 
 
 # ========================================================================
-# Phase A: 模块场景分析（入库预处理）
+# Phase A: 三步分析管线（2026-07-31 — 替代旧 _analyze_module_scenarios_bg）
 # ========================================================================
 
-async def _analyze_module_scenarios_bg(task_id: str, module_name: str):
-    """后台任务：分析模块场景 → 生成 module_analysis JSON → 写入 SQLite。
+async def _analyze_module_scenarios_3step_bg(task_id: str, module_name: str):
+    """三步分析管线：产品→场景 / Axure→逻辑关系 / API→接口映射。
 
-    前端按钮触发。加载该模块下全部产品文档和接口定义，调用 LLM 做场景分析
-    和接口映射（不生成用例），结果存入 module_analysis 表。
+    Step 1: product 文档 → scenario_analysis
+    Step 2: axure 文档 → ui_flow_analysis（无 Axure 跳过）
+    Step 3: api 定义 → api_analysis（无 API 跳过）
+    每步 thinking 模式，1 次 LLM 调用，输出自由文本。
     """
     from web.state import _update_task
-    from agent_components.nodes import reload_llm
+    from agent_components.nodes import reload_llm, _get_llm
+    from prompts.extraction_prompts import (
+        analyze_product_scenarios_prompt,
+        analyze_axure_ui_flow_prompt,
+        analyze_api_mapping_prompt,
+    )
+    import config as _cfg
 
     set_trace_id(task_id)
     reload_llm()
 
     try:
         await _update_task(task_id, status="running", progress=5,
-                           message=f"开始分析模块「{module_name}」...")
+                           message=f"三步分析「{module_name}」...")
 
-        # 1. 查 module_id
+        # ── 1. 查 module_id + 加载绑定文档（单 session 取完所有数据）──
         from database import get_session_ctx
-        from database.operations import ModuleOps
+        from database.operations import ModuleOps, BindingOps
+        from database.models import DocumentChunk, Document
+
         with get_session_ctx() as session:
             mod = ModuleOps.get_by_name(session, module_name)
             if not mod:
@@ -516,60 +527,63 @@ async def _analyze_module_scenarios_bg(task_id: str, module_name: str):
                 return
             module_id = mod.id
 
-        await _update_task(task_id, progress=10,
-                           message="正在加载模块文档...")
-
-        # 2. 加载该模块的全部文档 chunks（精确 metadata 查询，非向量检索）
-        from database.operations import BindingOps
-        from agent_components.dual_chroma import get_chroma_db
-
-        chroma = get_chroma_db()
-        with get_session_ctx() as session:
             bound_docs = BindingOps.get_bound_docs(session, module_name)
-            # 跨模块关系
             partners = BindingOps.get_partners(session, "module", module_name, "module")
 
-        # 拼接全部产品文档 chunks
-        all_product_chunks: list[str] = []
-        all_api_defs: list[dict] = []
-        for doc in bound_docs:
-            chunks = chroma.get_doc_chunks(doc.id)
-            if chunks:
+            # ── 分离三种文档类型（session 内提取纯数据）──
+            product_chunks: list[str] = []  # Step 1 输入
+            axure_chunks: list[tuple[str, str]] = []  # Step 2 输入: (page_name, content)
+            api_defs_raw: list[dict] = []  # Step 3 输入（session 内取出纯 dict）
+
+            for doc in bound_docs:
                 if doc.doc_type == "api":
-                    apis = chroma.get_doc_apis(doc.id)
-                    all_api_defs.extend(apis)
+                    if doc.api_url:
+                        api_defs_raw.append({
+                            "name": doc.api_name, "url": doc.api_url,
+                            "method": doc.api_method,
+                            "description": doc.api_description,
+                            "headers": _json.loads(doc.api_headers or "[]"),
+                            "parameters": _json.loads(doc.api_parameters or "[]"),
+                            "returns": _json.loads(doc.api_returns or "[]"),
+                        })
                 else:
-                    all_product_chunks.extend(c.get("content", "") for c in chunks)
+                    chunks = session.query(DocumentChunk).filter_by(
+                        doc_id=doc.id).order_by(DocumentChunk.chunk_index).all()
+                    for c in chunks:
+                        content = c.content
+                        pn = c.page_name or doc.file_name
+                        if doc.doc_type == "axure":
+                            axure_chunks.append((pn, content))
+                        else:
+                            product_chunks.append(content)
 
-        product_docs_text = "\n\n---\n\n".join(all_product_chunks) or "（无产品文档）"
-        api_defs_json = _json.dumps(all_api_defs, indent=2, ensure_ascii=False)
+            # 跨模块文本
+            cross_text = ", ".join(p[1] for p in partners) if partners else "无"
 
-        # 模块树
-        with get_session_ctx() as session:
+            # 模块树
             tree = ModuleOps.get_tree(session)
-        module_tree_json = _json.dumps(tree, indent=2, ensure_ascii=False)
+            module_tree_json = _json.dumps(tree, indent=2, ensure_ascii=False)
 
-        # 跨模块关系文本
-        cross_text = ", ".join(p[1] for p in partners) if partners else "无"
-
-        await _update_task(task_id, progress=30,
-                           message=f"已加载 {len(all_product_chunks)} 个文档块 + {len(all_api_defs)} 个接口，开始 LLM 分析...")
-
-        # 3. LLM 两段式：thinking 分析 → json_mode 格式化
-        from agent_components.nodes import _get_llm
-        from prompts.definitions import PromptFactory
+        # ── session 已关闭，后续只使用提取后的纯数据 ──
+        api_defs_json = _json.dumps(api_defs_raw, indent=2, ensure_ascii=False)
 
         llm = _get_llm()
-        prompt_factory = PromptFactory()
+        think_kwargs = {}
+        if _cfg.ENABLE_THINKING:
+            think_kwargs["extra_body"] = {"thinking": {"type": "enabled"}}
 
-        # ── 心跳辅助 ──
-        _heartbeat_stop = False
+        scenario_text = ""
+        ui_flow_text = ""
+        api_text = ""
 
-        async def _heartbeat(msg="LLM 正在分析场景...", base_progress=40):
-            import time as _time
+        # ── 心跳工具 ──
+        import asyncio as _asyncio
+        import time as _time
+
+        async def _heartbeat(msg: str, base_progress: int):
             _t0 = _time.time()
             while not _heartbeat_stop:
-                await asyncio.sleep(10)
+                await _asyncio.sleep(10)
                 if _heartbeat_stop:
                     break
                 elapsed = int(_time.time() - _t0)
@@ -578,104 +592,169 @@ async def _analyze_module_scenarios_bg(task_id: str, module_name: str):
                     message=f"{msg}（{elapsed}s）",
                 )
 
-        # ── 阶段 1：thinking 自由文本分析 ──
-        think_prompt = prompt_factory.analyze_module_scenarios()
-        think_kwargs = {}
-        if _config.ENABLE_THINKING:
-            think_kwargs["extra_body"] = {"thinking": {"type": "enabled"}}
+        # ════════════════════════════════════════════
+        # Step 1: 产品文档 → 测试场景总结
+        # ════════════════════════════════════════════
+        if product_chunks:
+            await _update_task(task_id, progress=15,
+                               message=f"Step 1/3: 分析产品文档（{len(product_chunks)} 块）...")
+            product_docs_text = "\n\n---\n\n".join(product_chunks)
 
-        hb_task = asyncio.create_task(_heartbeat("LLM 正在分析场景...", 35))
-        try:
-            bound_llm = llm.bind(temperature=0.6, **think_kwargs)
-            result = await asyncio.to_thread(
-                bound_llm.invoke,
-                think_prompt.format_messages(
-                    product_docs=product_docs_text,
-                    api_definitions=api_defs_json,
-                    module_tree=module_tree_json,
-                    cross_module_relations=cross_text,
-                    user_context=f"分析模块「{module_name}」的测试场景",
-                ),
-            )
-            analysis_text = result.content if hasattr(result, "content") else str(result)
-        finally:
-            _heartbeat_stop = True
-            hb_task.cancel()
+            _heartbeat_stop = False
+            hb_task = _asyncio.create_task(_heartbeat("Step 1/3: LLM 分析产品文档...", 20))
             try:
-                await hb_task
-            except asyncio.CancelledError:
-                pass
+                prompt = analyze_product_scenarios_prompt()
+                bound_llm = llm.bind(temperature=0.6, **think_kwargs)
+                result = await asyncio.to_thread(
+                    bound_llm.invoke,
+                    prompt.format_messages(
+                        module_name=module_name,
+                        product_docs=product_docs_text,
+                        cross_module_relations=cross_text,
+                    ),
+                )
+                scenario_text = result.content if hasattr(result, "content") else str(result)
+            finally:
+                _heartbeat_stop = True
+                hb_task.cancel()
+                try: await hb_task
+                except _asyncio.CancelledError: pass
 
-        await _update_task(task_id, progress=70,
-                           message="分析完成，正在格式化 JSON...")
+            # 写入 Step 1 结果
+            with get_session_ctx() as session:
+                from database.operations.analysis import AnalysisOps
+                AnalysisOps.upsert_3step(
+                    session, module_id, module_name,
+                    scenario_analysis=scenario_text,
+                )
+                session.commit()
+            await _update_task(task_id, progress=40,
+                               message="Step 1/3 完成：场景总结已保存")
+        else:
+            logger.info("三步分析: 无 product 文档，跳过 Step 1")
 
-        # ── 阶段 2：json_mode 结构化输出（thinking off） ──
-        format_prompt = prompt_factory.format_module_scenarios()
-        # json_mode 不支持 thinking，强制禁用
-        format_kwargs = {"extra_body": {"thinking": {"type": "disabled"}}}
-
-        _heartbeat_stop = False
-        hb_task = asyncio.create_task(_heartbeat("LLM 正在格式化...", 75))
-        try:
-            bound_llm = llm.bind(temperature=0.2, **format_kwargs)
-            format_result = await asyncio.to_thread(
-                bound_llm.invoke,
-                format_prompt.format_messages(
-                    scenario_analysis=analysis_text,
-                    api_definitions=api_defs_json,
-                ),
+        # ════════════════════════════════════════════
+        # Step 2: 场景 + Axure → 逻辑关系总结
+        # ════════════════════════════════════════════
+        if axure_chunks and scenario_text:
+            await _update_task(task_id, progress=45,
+                               message=f"Step 2/3: 分析 Axure 页面（{len(axure_chunks)} 块）...")
+            axure_text = "\n\n---\n\n".join(
+                f"[页面: {pn}] {content}" for pn, content in axure_chunks
             )
-            json_text = format_result.content if hasattr(format_result, "content") else str(format_result)
-        finally:
-            _heartbeat_stop = True
-            hb_task.cancel()
+
+            _heartbeat_stop = False
+            hb_task = _asyncio.create_task(_heartbeat("Step 2/3: LLM 分析 Axure 交互...", 50))
             try:
-                await hb_task
-            except asyncio.CancelledError:
-                pass
+                prompt = analyze_axure_ui_flow_prompt()
+                bound_llm = llm.bind(temperature=0.6, **think_kwargs)
+                result = await asyncio.to_thread(
+                    bound_llm.invoke,
+                    prompt.format_messages(
+                        module_name=module_name,
+                        scenario_analysis=scenario_text,
+                        axure_pages=axure_text,
+                    ),
+                )
+                ui_flow_text = result.content if hasattr(result, "content") else str(result)
+            finally:
+                _heartbeat_stop = True
+                hb_task.cancel()
+                try: await hb_task
+                except _asyncio.CancelledError: pass
 
-        await _update_task(task_id, progress=80,
-                           message="格式化完成，正在保存...")
+            # 写入 Step 2 结果
+            with get_session_ctx() as session:
+                from database.operations.analysis import AnalysisOps
+                AnalysisOps.upsert_3step(
+                    session, module_id, module_name,
+                    ui_flow_analysis=ui_flow_text,
+                )
+                session.commit()
+            await _update_task(task_id, progress=65,
+                               message="Step 2/3 完成：交互逻辑已保存")
+        else:
+            logger.info("三步分析: 无 Axure 文档或场景文本，跳过 Step 2")
 
-        # 4. 清理 Markdown 包裹并写入数据库
-        json_text = json_text.strip()
-        if json_text.startswith("```"):
-            lines = json_text.split("\n")
-            if lines[0].startswith("```"):
-                lines = lines[1:]
-            if lines and lines[-1].strip() == "```":
-                lines = lines[:-1]
-            json_text = "\n".join(lines).strip()
+        # ════════════════════════════════════════════
+        # Step 3: 场景 + 逻辑关系 + API → 接口总结
+        # ════════════════════════════════════════════
+        if api_defs_raw:
+            await _update_task(task_id, progress=70,
+                               message=f"Step 3/3: 分析 API 映射（{len(api_defs_raw)} 个接口文档）...")
 
-        # 写入 module_analysis 表
-        with get_session_ctx() as session:
-            from database.operations.analysis import AnalysisOps
-            AnalysisOps.upsert(session, module_id, module_name, json_text)
-            session.commit()
+            _heartbeat_stop = False
+            hb_task = _asyncio.create_task(_heartbeat("Step 3/3: LLM 分析接口映射...", 75))
+            try:
+                prompt = analyze_api_mapping_prompt()
+                bound_llm = llm.bind(temperature=0.6, **think_kwargs)
+                result = await asyncio.to_thread(
+                    bound_llm.invoke,
+                    prompt.format_messages(
+                        module_name=module_name,
+                        scenario_analysis=scenario_text or "（未分析）",
+                        ui_flow_analysis=ui_flow_text or "（未分析）",
+                        api_definitions=api_defs_json,
+                        module_tree=module_tree_json,
+                        cross_module_relations=cross_text,
+                    ),
+                )
+                api_text = result.content if hasattr(result, "content") else str(result)
+            finally:
+                _heartbeat_stop = True
+                hb_task.cancel()
+                try: await hb_task
+                except _asyncio.CancelledError: pass
 
-        # 简单统计
-        try:
-            parsed = _json.loads(json_text)
-            api_count = len(parsed.get("api_analysis", []))
-            scenario_count = len(parsed.get("scenario_analysis", []))
-        except Exception:
-            api_count = scenario_count = "?"
+            # 写入 Step 3 结果
+            with get_session_ctx() as session:
+                from database.operations.analysis import AnalysisOps
+                AnalysisOps.upsert_3step(
+                    session, module_id, module_name,
+                    api_analysis=api_text,
+                )
+                session.commit()
+            await _update_task(task_id, progress=90,
+                               message="Step 3/3 完成：接口映射已保存")
+        else:
+            logger.info("三步分析: 无 API 文档，跳过 Step 3")
 
+        # ── 完成 ──
         resp = {
             "success": True,
             "module_name": module_name,
             "analysis": {
-                "api_count": api_count,
-                "scenario_count": scenario_count,
-                "summary": f"{scenario_count}个场景 · {api_count}个接口",
+                "has_scenario": bool(scenario_text),
+                "has_ui_flow": bool(ui_flow_text),
+                "has_api": bool(api_text),
+                "summary": (
+                    f"{'场景' if scenario_text else ''}"
+                    f"{' · ' if scenario_text and ui_flow_text else ''}"
+                    f"{'交互逻辑' if ui_flow_text else ''}"
+                    f"{' · ' if (scenario_text or ui_flow_text) and api_text else ''}"
+                    f"{'接口映射' if api_text else ''}"
+                ),
             },
         }
         await _update_task(task_id, status="completed", progress=100,
-                           message="场景分析完成", result=resp)
+                           message="三步分析完成", result=resp)
 
     except Exception as e:
-        logger.error("❌ 模块场景分析失败: %s", e)
+        logger.error("❌ 三步分析失败: %s", e)
         await _update_task(task_id, status="failed", error=str(e))
+
+
+# ========================================================================
+# Phase A: 模块场景分析（旧版 — 已废弃，保留兼容未升级的前端调用）
+# ========================================================================
+
+async def _analyze_module_scenarios_bg(task_id: str, module_name: str):
+    """[已废弃] 后台任务：分析模块场景 → 生成 module_analysis JSON → 写入 SQLite。
+
+    请使用 _analyze_module_scenarios_3step_bg() 替代。
+    """
+    # 委托新版三步分析
+    await _analyze_module_scenarios_3step_bg(task_id, module_name)
 
 
 async def _commit_apis_bg(task_id: str, file_path: str, module_name: str,
@@ -718,3 +797,202 @@ async def _commit_apis_bg(task_id: str, file_path: str, module_name: str,
     except Exception as e:
         logger.error("❌ 接口入库失败: %s", e)
         await _update_task(task_id, status="failed", error=str(e))
+
+
+# ========================================================================
+# 补偿 Worker（独立轮询线程，处理 simple_summary / chroma_rebuild 等异步任务）
+# ========================================================================
+
+_compensation_stop = False
+_compensation_thread = None
+
+
+def _start_compensation_worker():
+    """启动补偿 worker 后台线程（应用启动时调用一次）。"""
+    global _compensation_thread, _compensation_stop
+    if _compensation_thread is not None:
+        return
+    _compensation_stop = False
+    _compensation_thread = threading.Thread(
+        target=_compensation_loop, name="compensation-worker", daemon=True,
+    )
+    _compensation_thread.start()
+    logger.info("补偿 worker 已启动（poll_interval=%ds）", _config.COMPENSATION_POLL_INTERVAL)
+
+
+def _stop_compensation_worker():
+    """停止补偿 worker（应用关闭时调用）。"""
+    global _compensation_stop
+    _compensation_stop = True
+    logger.info("补偿 worker 已停止")
+
+
+def _compensation_loop():
+    """补偿 worker 主循环：轮询 pending 任务，按 task_type 分发处理。"""
+    import config
+    poll_interval = config.COMPENSATION_POLL_INTERVAL
+
+    while not _compensation_stop:
+        try:
+            _process_pending_compensation()
+        except Exception:
+            logger.error("补偿 worker 异常", exc_info=True)
+        # 轮询间隔（可被 _compensation_stop 提前打断）
+        for _ in range(poll_interval):
+            if _compensation_stop:
+                break
+            time.sleep(1)
+
+
+def _process_pending_compensation():
+    """处理一批 pending 补偿任务。"""
+    from database import get_session_ctx
+    from database.operations.compensation import CompensationOps
+
+    with get_session_ctx() as session:
+        tasks = CompensationOps.fetch_pending(session, limit=10)
+        if not tasks:
+            return
+        logger.debug("补偿 worker: 发现 %d 个待处理任务", len(tasks))
+        for task in tasks:
+            if _compensation_stop:
+                break
+            CompensationOps.mark_running(session, task)
+            try:
+                if task.task_type == "simple_summary":
+                    _compensate_simple_summary(session, task)
+                elif task.task_type == "chroma_rebuild":
+                    _compensate_chroma_rebuild(session, task)
+                elif task.task_type == "api_search_text":
+                    _compensate_api_search_text(session, task)
+                CompensationOps.mark_success(session, task)
+                logger.info("补偿任务完成: %s id=%s", task.task_type, task.id)
+            except Exception as e:
+                logger.warning("补偿任务失败: %s id=%s — %s", task.task_type, task.id, e)
+                CompensationOps.mark_failed(session, task, str(e))
+        session.commit()
+
+
+def _compensate_simple_summary(session, task):
+    """补偿 simple_summary 生成：重试 LLM 调用。"""
+    import json as _json
+    import config
+    from agent_components.nodes import _get_llm
+    from prompts.extraction_prompts import batch_chunk_summary_prompt
+    from database.models import DocumentChunk
+    from agent_components.dual_chroma import get_chroma_db
+
+    payload = _json.loads(task.payload)
+    doc_id = payload["doc_id"]
+    chunk_indices = payload.get("chunk_indices", [])
+    file_name = payload.get("file_name", "")
+
+    # 从 document_chunks 读原文
+    chunks = session.query(DocumentChunk).filter_by(
+        doc_id=doc_id).order_by(DocumentChunk.chunk_index).all()
+    if not chunks:
+        raise ValueError(f"document_chunks 无记录: {doc_id}")
+
+    llm = _get_llm()
+    prompt = batch_chunk_summary_prompt()
+    batch_size = config.BATCH_SUMMARY_CHUNK_SIZE
+    db = get_chroma_db()
+
+    for bi in range(0, len(chunk_indices), batch_size):
+        batch_idxs = chunk_indices[bi:bi + batch_size]
+        batch_chunks = [(idx, chunks[idx].content) for idx in batch_idxs if idx < len(chunks)]
+        if not batch_chunks:
+            continue
+
+        chunks_text = "\n\n".join(
+            f"[块{idx}] {content}" for idx, content in batch_chunks
+        )
+        result = llm.invoke(prompt.format_messages(
+            file_name=file_name,
+            start_idx=batch_chunks[0][0],
+            end_idx=batch_chunks[-1][0],
+            total=len(chunks),
+            page_name=chunks[batch_chunks[0][0]].page_name if batch_chunks[0][0] < len(chunks) else "",
+            chunks=chunks_text,
+        ))
+        llm_text = result.content if hasattr(result, "content") else str(result)
+        from ingest_v2 import _parse_chunk_summaries
+        summaries = _parse_chunk_summaries(llm_text, len(batch_chunks))
+
+        for (idx, _), summary in zip(batch_chunks, summaries):
+            if summary:
+                session.query(DocumentChunk).filter_by(
+                    doc_id=doc_id, chunk_index=idx,
+                ).update({"simple_summary": summary})
+
+        # 更新 ChromaDB 检索文本
+        try:
+            all_chunks = session.query(DocumentChunk).filter_by(
+                doc_id=doc_id).order_by(DocumentChunk.chunk_index).all()
+            from ingest_v2 import _build_doc_search_text
+            texts = [_build_doc_search_text({
+                "content": c.content,
+                "simple_summary": c.simple_summary,
+                "analyzed_summary": c.analyzed_summary,
+                "page_name": c.page_name,
+            }) for c in all_chunks]
+            db.delete_by_doc_id(doc_id)
+            db.add_product_doc_chunks(doc_id, texts)
+        except Exception as e:
+            logger.warning("   [补偿] ChromaDB 更新失败（非致命）: %s", e)
+
+    logger.info("补偿 simple_summary 完成: doc_id=%s, %d chunks", doc_id, len(chunk_indices))
+
+
+def _compensate_chroma_rebuild(session, task):
+    """补偿 ChromaDB 重建：从 SQLite 全量重建 collection。"""
+    import json as _json
+    from database.models import DocumentChunk
+    from agent_components.dual_chroma import get_chroma_db
+    from ingest_v2 import _build_doc_search_text
+
+    payload = _json.loads(task.payload)
+    doc_id = payload.get("doc_id", "")
+
+    db = get_chroma_db()
+    if doc_id:
+        chunks = session.query(DocumentChunk).filter_by(doc_id=doc_id).order_by(DocumentChunk.chunk_index).all()
+        texts = [_build_doc_search_text({
+            "content": c.content,
+            "simple_summary": c.simple_summary,
+            "analyzed_summary": c.analyzed_summary,
+            "page_name": c.page_name,
+        }) for c in chunks]
+        db.delete_by_doc_id(doc_id)
+        db.add_product_doc_chunks(doc_id, texts)
+    logger.info("补偿 chroma_rebuild 完成: doc_id=%s", doc_id or "all")
+
+
+def _compensate_api_search_text(session, task):
+    """补偿 API 检索文本重建。"""
+    import json as _json
+    from database.models import Document
+    from agent_components.dual_chroma import get_chroma_db
+    from ingest_v2 import _build_api_search_text
+
+    payload = _json.loads(task.payload)
+    doc_id = payload.get("doc_id", "")
+
+    db = get_chroma_db()
+    if doc_id:
+        doc = session.query(Document).filter_by(id=doc_id).first()
+        if doc and doc.doc_type == "api" and doc.api_url:
+            api = {
+                "name": doc.api_name, "url": doc.api_url, "method": doc.api_method,
+                "description": doc.api_description,
+                "headers": _json.loads(doc.api_headers or "[]"),
+                "parameters": _json.loads(doc.api_parameters or "[]"),
+                "returns": _json.loads(doc.api_returns or "[]"),
+                "annotations": _json.loads(doc.api_annotations or "{}"),
+                "_search_text": _build_api_search_text({}),
+            }
+            # 重新构造检索文本
+            api["_search_text"] = _build_api_search_text(api)
+            db.delete_by_doc_id(doc_id)
+            db.add_api_defs(doc_id, [api])
+    logger.info("补偿 api_search_text 完成: doc_id=%s", doc_id)

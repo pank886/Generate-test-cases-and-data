@@ -1,7 +1,10 @@
-"""双集合向量数据库封装（纯检索引擎，供 Phase B 使用）。
+"""统一向量检索引擎封装（纯检索引擎，供 Phase B 使用）。
 
-ChromaDB 只存 chunk 文本、向量和检索必要的 metadata（doc_id, chunk_index, api_name）。
+ChromaDB 只存 chunk 检索文本、向量和检索必要的 metadata（doc_id, chunk_index, doc_type）。
 所有业务关系（模块、绑定、文档元数据）由 SQLite database/ 层管理。
+正文以 SQLite 为唯一真相源，ChromaDB 损坏时可从 SQLite 全量重建。
+
+单一 Collection（doc_search）替代旧双集合架构，靠 metadata.doc_type 区分 api / product / axure。
 """
 
 import json
@@ -17,8 +20,7 @@ from agent_components.fallback_embeddings import FallbackOllamaEmbeddings
 
 from config import (
     CHROMA_DB_DIR,
-    COLLECTION_PRODUCT_DOCS,
-    COLLECTION_API_DEFS,
+    COLLECTION_DOC_SEARCH,
     EMBEDDING_MODEL,
     EMBEDDING_URL,
     EMBEDDING_TIMEOUT,
@@ -26,7 +28,7 @@ from config import (
 
 
 class DualChromaDB:
-    """双集合向量数据库封装（纯向量检索，不含业务逻辑）。"""
+    """统一向量数据库封装（单一 doc_search Collection，纯向量检索，不含业务逻辑）。"""
 
     def __init__(self, persist_directory: str = None):
         persist = persist_directory or CHROMA_DB_DIR
@@ -40,65 +42,86 @@ class DualChromaDB:
             client_kwargs={"timeout": EMBEDDING_TIMEOUT},
         )
 
-        pd_dir = os.path.join(persist, "product_docs") if persist else None
-        ad_dir = os.path.join(persist, "api_defs") if persist else None
+        ds_dir = os.path.join(persist, "doc_search") if persist else None
 
-        self.product_store = Chroma(
-            persist_directory=pd_dir,
+        self.doc_store = Chroma(
+            persist_directory=ds_dir,
             embedding_function=embeddings,
-            collection_name=COLLECTION_PRODUCT_DOCS,
-        )
-        self.api_store = Chroma(
-            persist_directory=ad_dir,
-            embedding_function=embeddings,
-            collection_name=COLLECTION_API_DEFS,
+            collection_name=COLLECTION_DOC_SEARCH,
         )
 
-    # ---- 产品文档操作 ----
+    # ---- 产品/Axure 文档操作 ----
 
-    def add_product_doc_chunks(self, doc_id: str, chunks: list):
-        """添加产品文档分块（仅存 doc_id 和 chunk_index，不存业务关系）。"""
+    def add_product_doc_chunks(self, doc_id: str, chunks: list,
+                                doc_type: str = "product"):
+        """添加产品/Axure 文档分块（检索文本为 page_content）。
+
+        metadata: doc_id / chunk_index / doc_type / source / page_name。
+        source 标记检索文本来源：simple_summary / analyzed_summary / content_fallback。
+        """
         docs = []
         for i, chunk in enumerate(chunks):
+            if isinstance(chunk, str):
+                content = chunk
+                source = "raw_legacy"
+                page_name = ""
+            else:
+                content = chunk.get("content", "")
+                page_name = chunk.get("page_name", "")
+                if chunk.get("analyzed_summary"):
+                    source = "analyzed_summary"
+                elif chunk.get("simple_summary"):
+                    source = "simple_summary"
+                else:
+                    source = "content_fallback"
+
             docs.append(Document(
-                page_content=chunk,
+                page_content=str(content),
                 metadata={
                     "doc_id": doc_id,
                     "chunk_index": i,
-                    "type": "product_doc",
+                    "doc_type": doc_type,
+                    "source": source,
+                    "page_name": page_name,
                 }
             ))
-        self.product_store.add_documents(docs)
+        self.doc_store.add_documents(docs)
 
     def search_product_docs(self, query: str, k: int = 10,
                             doc_ids: list[str] = None) -> list:
-        """检索产品文档，可选按 doc_id 列表过滤。
+        """检索产品/Axure 文档，可选按 doc_id 列表过滤。
 
         Args:
             doc_ids: 由 SQLite 层查出的 doc_id 列表，None 表示全库检索
         """
-        kwargs = {"k": k}
+        filter_dict = {"doc_type": {"$in": ["product", "axure"]}}
         if doc_ids:
-            kwargs["filter"] = {"doc_id": {"$in": doc_ids}}
-        return self.product_store.similarity_search(query, **kwargs)
+            filter_dict["doc_id"] = {"$in": doc_ids}
+        return self.doc_store.similarity_search(query, k=k, filter=filter_dict)
 
     # ---- 接口定义操作 ----
 
     def add_api_defs(self, doc_id: str, apis: list):
-        """添加接口定义（仅存 doc_id / api_name，不存业务关系）。"""
+        """添加接口定义（检索文本优先，存 doc_id / api_name / doc_type / source）。
+
+        page_content: _search_text（自然语言检索文本）> JSON 原文（降级）。
+        metadata: 含 doc_type='api'、source='api_search_text' 标记检索文本来源。
+        """
         docs = []
         for i, api in enumerate(apis):
-            api_text = json.dumps(api, ensure_ascii=False)
+            search_text = api.get("_search_text", "")
+            api_text = search_text if search_text else json.dumps(api, ensure_ascii=False)
             docs.append(Document(
                 page_content=api_text,
                 metadata={
                     "doc_id": doc_id,
                     "api_name": api.get("name", ""),
                     "chunk_index": i,
-                    "type": "api_def",
+                    "doc_type": "api",
+                    "source": "api_search_text" if search_text else "api_json_fallback",
                 }
             ))
-        self.api_store.add_documents(docs)
+        self.doc_store.add_documents(docs)
 
     def search_api_defs(self, query: str, k: int = 10,
                         doc_ids: list[str] = None) -> list:
@@ -107,26 +130,49 @@ class DualChromaDB:
         Args:
             doc_ids: 由 SQLite 层查出的 doc_id 列表，None 表示全库检索
         """
-        kwargs = {"k": k}
+        filter_dict = {"doc_type": "api"}
         if doc_ids:
-            kwargs["filter"] = {"doc_id": {"$in": doc_ids}}
-        return self.api_store.similarity_search(query, **kwargs)
+            filter_dict["doc_id"] = {"$in": doc_ids}
+        return self.doc_store.similarity_search(query, k=k, filter=filter_dict)
 
     # ---- 通用操作 ----
 
     def delete_by_doc_id(self, doc_id: str):
-        """幂等更新：删除指定文档的所有记录。两个 store 独立执行，单侧失败不阻塞另一侧。"""
-        for name, store in (("product_docs", self.product_store), ("api_defs", self.api_store)):
-            try:
-                store.delete(where={"doc_id": doc_id})
-            except Exception:
-                logger.error("ChromaDB %s delete_by_doc_id(%s) 失败", name, doc_id, exc_info=True)
+        """幂等更新：删除指定文档的所有记录。"""
+        try:
+            self.doc_store.delete(where={"doc_id": doc_id})
+        except Exception:
+            logger.error("ChromaDB delete_by_doc_id(%s) 失败", doc_id, exc_info=True)
 
     def get_doc_chunks(self, doc_id: str) -> list[dict]:
-        """获取文档的所有文本块（供前端查看原文内容）。"""
-        # 从两个集合中查找
-        for store in (self.product_store, self.api_store):
-            results = store.get(where={"doc_id": doc_id})
+        """获取文档的所有文本块（优先 SQLite document_chunks，降级 ChromaDB）。"""
+        # 优先：SQLite document_chunks 表
+        try:
+            from database import get_session_ctx
+            from database.models import DocumentChunk
+            with get_session_ctx() as session:
+                rows = session.query(DocumentChunk).filter_by(
+                    doc_id=doc_id).order_by(DocumentChunk.chunk_index).all()
+                if rows:
+                    return [{
+                        "chunk_id": str(r.id),
+                        "chunk_index": r.chunk_index,
+                        "content": r.content,
+                        "simple_summary": r.simple_summary,
+                        "page_name": r.page_name,
+                        "type": r.chunk_type,
+                        "api_name": "",
+                    } for r in rows]
+        except Exception:
+            logger.debug("document_chunks 查询失败，降级 ChromaDB: %s", doc_id, exc_info=True)
+
+        # 降级：ChromaDB（从 SQLite 即时补偿）
+        return self._chunks_from_chroma(doc_id)
+
+    def _chunks_from_chroma(self, doc_id: str) -> list[dict]:
+        """从 ChromaDB 读取 chunks（降级/即时补偿路径）。"""
+        try:
+            results = self.doc_store.get(where={"doc_id": doc_id})
             if results and results.get("ids"):
                 chunks = []
                 for i, mid in enumerate(results["ids"]):
@@ -135,46 +181,80 @@ class DualChromaDB:
                         "chunk_id": mid,
                         "chunk_index": meta.get("chunk_index", i),
                         "content": results["documents"][i] if results.get("documents") else "",
-                        "type": meta.get("type", ""),
+                        "simple_summary": "",
+                        "page_name": meta.get("page_name", ""),
+                        "type": meta.get("doc_type", ""),
                         "api_name": meta.get("api_name", ""),
                     })
                 return sorted(chunks, key=lambda c: c["chunk_index"])
+        except Exception:
+            logger.debug("ChromaDB get 失败: %s", doc_id, exc_info=True)
         return []
 
     def search_context(self, query: str, k: int = 50) -> str:
-        """全库检索（两集合合并，用于 LLM 上下文构建）。"""
-        pd = self.product_store.similarity_search(query, k=k)
-        ad = self.api_store.similarity_search(query, k=k)
-        # 交错合并，确保两类结果都能被召回
-        combined = []
-        for i in range(max(len(pd), len(ad))):
-            if i < len(pd):
-                combined.append(pd[i])
-            if i < len(ad):
-                combined.append(ad[i])
-        combined = combined[:k]
-        if not combined:
+        """全库检索（跨类型，用于 LLM 上下文构建）。"""
+        results = self.doc_store.similarity_search(query, k=k)
+        if not results:
             return "未在知识库中找到相关内容。"
         parts = []
-        for doc in combined:
+        for doc in results:
             src = doc.metadata.get("doc_id", "?")
             parts.append(f"[{src}] {doc.page_content}")
         return "\n\n---\n\n".join(parts)
 
     # ---- 接口查询 ----
+
     def get_doc_apis(self, doc_id: str) -> list[dict]:
-        """获取指定文档下的所有接口定义。"""
-        results = self.api_store.get(where={"doc_id": doc_id})
-        if not results or not results.get("ids"):
-            return []
-        apis = []
-        for i, mid in enumerate(results["ids"]):
-            meta = results["metadatas"][i] if results.get("metadatas") else {}
-            apis.append({
-                "api_name": meta.get("api_name", "?"),
-                "content": results["documents"][i] if results.get("documents") else "",
-            })
-        return apis
+        """获取指定文档下的所有接口定义（优先 SQLite documents.api_* 列，降级 ChromaDB）。"""
+        import json as _json
+        # 优先：SQLite documents 表
+        try:
+            from database import get_session_ctx
+            from database.models import Document as DocModel
+            with get_session_ctx() as session:
+                docs = session.query(DocModel).filter_by(id=doc_id, doc_type="api").all()
+                if docs:
+                    apis = []
+                    for d in docs:
+                        if d.api_url:  # api_* 列已填充
+                            api = {
+                                "name": d.api_name, "url": d.api_url,
+                                "method": d.api_method, "description": d.api_description,
+                                "headers": _json.loads(d.api_headers or "[]"),
+                                "parameters": _json.loads(d.api_parameters or "[]"),
+                                "returns": _json.loads(d.api_returns or "[]"),
+                                "annotations": _json.loads(d.api_annotations or "{}"),
+                            }
+                            apis.append({
+                                "api_name": d.api_name,
+                                "content": _json.dumps(api, ensure_ascii=False),
+                                "_doc_id": doc_id,
+                            })
+                    if apis:
+                        return apis
+        except Exception:
+            logger.debug("documents 查询失败，降级 ChromaDB: %s", doc_id, exc_info=True)
+
+        # 降级：ChromaDB
+        return self._apis_from_chroma(doc_id)
+
+    def _apis_from_chroma(self, doc_id: str) -> list[dict]:
+        """从 ChromaDB 读取 API 定义（降级/即时补偿路径）。"""
+        try:
+            results = self.doc_store.get(where={"doc_id": doc_id})
+            if not results or not results.get("ids"):
+                return []
+            apis = []
+            for i, mid in enumerate(results["ids"]):
+                meta = results["metadatas"][i] if results.get("metadatas") else {}
+                apis.append({
+                    "api_name": meta.get("api_name", "?"),
+                    "content": results["documents"][i] if results.get("documents") else "",
+                })
+            return apis
+        except Exception:
+            logger.debug("ChromaDB get(api) 失败: %s", doc_id, exc_info=True)
+        return []
 
 
 # 模块级单例（避免每次请求都重新连接 Ollama）

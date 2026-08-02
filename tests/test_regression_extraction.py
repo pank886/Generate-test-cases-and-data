@@ -222,17 +222,15 @@ class TestSafeDocId:
         assert "api.md" in doc_id
         assert "智慧用电" in doc_id
 
-    def test_doc_id_rejects_html_module_name(self):
-        """如果 module_name 不小心带了 HTML，至少 _safe_doc_id 也应该检测。"""
+    def test_doc_id_sanitizes_html_module_name(self):
+        """module_name 含 HTML 标签时 _safe_doc_id 自动净化。"""
         from ingest_v2 import _safe_doc_id
         bad_module = '<h1>用电</h1>'
         doc_id = _safe_doc_id("api", "api.md", bad_module, "GET", "/api/x", "接口")
-        assert "<" in doc_id, (
-            f"当前 _safe_doc_id 不净化 HTML 标签。"
-            f" 如果上游 module_name 含HTML，doc_id会受污染。"
-            f" doc_id={doc_id!r}"
+        assert "<" not in doc_id, (
+            f"_safe_doc_id 应净化 HTML 标签，但 doc_id 仍含 <: doc_id={doc_id!r}"
         )
-        # 确认：这是待修复项，暂时记录现状
+        assert ">" not in doc_id, f"doc_id 不应含原始 > 字符: {doc_id!r}"
 
 
 # ============================================================
@@ -245,10 +243,11 @@ class TestRealApiMdExtraction:
 
     @pytest.fixture
     def real_md_path(self):
-        path = r"D:\1-ceshi\md\用电\api.md"
-        if not os.path.exists(path):
-            pytest.skip(f"测试文件不存在: {path}")
-        return path
+        for path in (r"D:\ai_test\用电测试\api.md",
+                     r"D:\1-ceshi\md\用电\api.md"):
+            if os.path.exists(path):
+                return path
+        pytest.skip("测试文件不存在: 候选路径均缺失")
 
     def test_all_72_apis_extracted(self, real_md_path):
         """应提取出恰好 72 个 API。"""
@@ -301,3 +300,45 @@ class TestRealApiMdExtraction:
             assert isinstance(api["returns"], list), (
                 f"returns应为list: {api.get('name')}"
             )
+
+    # ── 2026-08 提取修复：desc HTML 残留 / Query·Body 参数 / 响应信封误塞 ──
+    def _extract(self, real_md_path):
+        from ingest_v2 import extract_apis_from_yapi_md, _extract_text
+        return extract_apis_from_yapi_md(_extract_text(real_md_path).strip())["apis"]
+
+    def test_no_html_tag_in_description(self, real_md_path):
+        """修复：description 不应含 </p> 等 HTML 标签残留（原 63 个接口全是 </p>）。"""
+        apis = self._extract(real_md_path)
+        bad = [a for a in apis if re.search(r"</?p>|<[^>]+>", a["description"] or "")]
+        assert not bad, f"存在HTML残留描述: {[a['url'] for a in bad]}"
+
+    def test_import_api_has_file_param(self, real_md_path):
+        """修复：导入类接口 Body 的 file 参数应被提取（原丢失）。"""
+        apis = self._extract(real_md_path)
+        api = next((a for a in apis if a["url"] == "/electricBillEnterprise/import"), None)
+        assert api, "缺少 /electricBillEnterprise/import"
+        names = [p["name"] for p in api["parameters"]]
+        assert "file" in names, f"导入公摊面积应含 file 参数，实际: {names}"
+
+    def test_query_params_extracted(self, real_md_path):
+        """修复：Query 参数表应被解析（原完全跳过）。"""
+        apis = self._extract(real_md_path)
+        api = next((a for a in apis if a["url"] == "/shareBill/import/enterprise"), None)
+        assert api, "缺少 /shareBill/import/enterprise"
+        names = {p["name"] for p in api["parameters"]}
+        assert {"startTime", "endTime", "payType"} <= names, f"Query参数缺失: {sorted(names)}"
+
+    def test_no_response_envelope_as_params(self, real_md_path):
+        """修复：不得把返回数据信封 retCode/msg/data/queue 误塞进 parameters。"""
+        apis = self._extract(real_md_path)
+        env = {"retCode", "msg", "data", "queue"}
+        bad = [a["url"] for a in apis
+               if a["parameters"] and a["parameters"][0]["name"] in env]
+        assert not bad, f"响应信封误塞参数: {bad}"
+
+    def test_empty_param_api_stays_empty(self, real_md_path):
+        """修复：参数区为空的接口不应 fallback 误取返回表（原被塞信封）。"""
+        apis = self._extract(real_md_path)
+        api = next((a for a in apis if a["url"] == "/electricMeter/updateAll"), None)
+        assert api, "缺少 /electricMeter/updateAll"
+        assert api["parameters"] == [], f"空参数接口不应有参数: {api['parameters']}"

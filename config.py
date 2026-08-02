@@ -48,9 +48,10 @@ def DEEP_API_KEY() -> str:
     """获取 DeepSeek API Key（运行时读取，避免模块级变量暴露敏感信息）"""
     return settings.deep_api_key
 
-# ====== Phase A 双集合配置 ======
-COLLECTION_PRODUCT_DOCS = settings.collection_product_docs
-COLLECTION_API_DEFS = settings.collection_api_defs
+# ====== ChromaDB Collection 配置 ======
+COLLECTION_PRODUCT_DOCS = settings.collection_product_docs    # 旧双集合（已废弃，保留兼容）
+COLLECTION_API_DEFS = settings.collection_api_defs            # 旧双集合（已废弃，保留兼容）
+COLLECTION_DOC_SEARCH = settings.collection_doc_search        # 统一检索 Collection
 CHUNK_SIZE = settings.chunk_size
 CHUNK_OVERLAP = settings.chunk_overlap
 MAX_INGEST_CHARS_PER_BATCH = settings.max_ingest_chars_per_batch
@@ -90,5 +91,9 @@ CHROMA_RETRY_DELAY = settings.chroma_retry_delay
 TASK_TTL_SECONDS = settings.task_ttl_seconds
 TASK_MAX_WORKERS = settings.task_max_workers
 TASK_MAX_QUEUE = settings.task_max_queue
+LLM_GLOBAL_CONCURRENCY = settings.llm_global_concurrency
+BATCH_SUMMARY_CHUNK_SIZE = settings.batch_summary_chunk_size
+COMPENSATION_POLL_INTERVAL = settings.compensation_poll_interval
+COMPENSATION_MAX_RETRIES = settings.compensation_max_retries
 UPLOAD_MAX_SIZE = settings.upload_max_size_mb * 1024 * 1024
 WORKFLOW_SESSION_TTL = settings.workflow_session_ttl

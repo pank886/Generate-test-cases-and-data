@@ -22,9 +22,11 @@ function escText(s) {
   return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
-function showModal(html) {
-  document.getElementById('modal-content').innerHTML = html;
+function showModal(html, extraClass) {
   document.getElementById('modal-overlay').classList.remove('hidden');
+  var box = document.getElementById('modal-content');
+  box.className = 'modal' + (extraClass ? ' ' + extraClass : '');
+  box.innerHTML = html;
 }
 function closeModal() { document.getElementById('modal-overlay').classList.add('hidden'); }
 
@@ -583,6 +585,10 @@ function showDocDetail(docId, docType) {
 
 var _docChunks = [], _docChunkIdx = 0;
 
+// ── 文档详情 Tab 状态 ──
+var _docDetailTab = {};  // docId → 'chunks' | 'analysis'
+var _docAnalysisCache = {};  // docId → analysis object
+
 async function toggleDocChunkDetail(docId, docType) {
   var detailEl = document.getElementById('doc-chunk-detail-' + docId);
   if (detailEl) {
@@ -590,6 +596,7 @@ async function toggleDocChunkDetail(docId, docType) {
     var btn = document.querySelector('.js-doc-detail[data-doc-id="' + docId + '"]');
     if (btn) btn.textContent = '详情';
     if (docType === 'product') { document.getElementById('glossary-content').classList.add('hidden'); }
+    delete _docDetailTab[docId];
     return;
   }
   var btn = document.querySelector('.js-doc-detail[data-doc-id="' + docId + '"]');
@@ -613,29 +620,94 @@ async function toggleDocChunkDetail(docId, docType) {
   }
   var rowEl = document.querySelector('.js-doc-detail[data-doc-id="' + docId + '"]').closest('.doc-assoc-item');
   if (!rowEl) return;
-  var html = '<div class="api-doc-detail" id="doc-chunk-detail-' + docId + '">';
-  html += renderChunkDetail(docId);
-  html += '</div>';
+  _docDetailTab[docId] = 'chunks';
+  // 只有 product / axure 显示分析 tab，API 文档只展示提取原文
+  var showAnalysis = docType === 'product' || docType === 'axure';
+  var html = '<div class="api-doc-detail" id="doc-chunk-detail-' + docId + '">'
+    + _renderDocDetailTabs(docId, docType, showAnalysis)
+    + '</div>';
   rowEl.insertAdjacentHTML('afterend', html);
+  if (showAnalysis) _loadDocAnalysis(docId);
 }
 
-function renderChunkDetail(docId) {
+function _renderDocDetailTabs(docId, docType, showAnalysis) {
+  var activeTab = _docDetailTab[docId] || 'chunks';
+  function tabClass(t) { return 'doc-detail-tab' + (activeTab === t ? ' active' : ''); }
+  var tabs = '<div class="doc-detail-tabs">'
+    + '<button class="' + tabClass('chunks') + '" onclick="event.stopPropagation();_switchDocDetailTab(\'' + docId + '\',\'' + docType + '\',\'chunks\')">📄 提取原文</button>';
+  if (showAnalysis) {
+    tabs += '<button class="' + tabClass('analysis') + '" onclick="event.stopPropagation();_switchDocDetailTab(\'' + docId + '\',\'' + docType + '\',\'analysis\')">📊 分析结果</button>';
+  }
+  tabs += '</div>'
+    + '<div id="doc-detail-content-' + docId + '">' + renderChunkDetail(docId, docType) + '</div>'
+    + '<div style="text-align:right;margin-top:6px"><button class="btn btn-sm btn-outline" onclick="event.stopPropagation();toggleDocChunkDetail(\'' + docId + '\',\'' + docType + '\')">▲ 收起</button></div>';
+  return tabs;
+}
+
+function _switchDocDetailTab(docId, docType, tab) {
+  _docDetailTab[docId] = tab;
+  var container = document.getElementById('doc-chunk-detail-' + docId);
+  if (!container) return;
+  container.innerHTML = _renderDocDetailTabs(docId, docType, true);
+}
+
+async function _loadDocAnalysis(docId) {
+  if (_docAnalysisCache[docId] || !selectedModuleName) return;
+  try {
+    var r = await fetch('/api/modules/' + encodeURIComponent(selectedModuleName) + '/analysis');
+    var d = await r.json();
+    if (d.success && d.analysis) _docAnalysisCache[docId] = d.analysis;
+  } catch (e) { /* 静默失败，tab 切换时再重试 */ }
+}
+
+function renderChunkDetail(docId, docType) {
+  var activeTab = _docDetailTab[docId] || 'chunks';
+
+  // ── 分析结果 tab ──
+  if (activeTab === 'analysis') {
+    var analysis = _docAnalysisCache[docId];
+    // 按文档类型只展示相关部分
+    var hasContent = analysis && (
+      (docType === 'product' && analysis.scenario_analysis) ||
+      (docType === 'axure' && (analysis.ui_flow_analysis || analysis.scenario_analysis))
+    );
+    if (!hasContent) {
+      return '<div style="padding:32px;text-align:center;color:var(--text-dim)">'
+        + '<div style="font-size:48px;margin-bottom:12px">📭</div>'
+        + '<div>暂无分析结果</div>'
+        + '<div style="font-size:11px;margin-top:4px">请先在模块详情中点击「分析测试场景」</div>'
+        + '</div>';
+    }
+    var h = '';
+    if (analysis.scenario_analysis) {
+      h += '<div style="margin-bottom:10px"><b>📋 测试场景分析</b>'
+        + '<pre style="white-space:pre-wrap;line-height:1.7;margin:4px 0 0;font-size:12px;max-height:250px;overflow-y:auto">'
+        + esc(analysis.scenario_analysis) + '</pre></div>';
+    }
+    if (analysis.ui_flow_analysis) {
+      h += '<div style="margin-bottom:10px"><b>🖥️ 页面交互逻辑</b>'
+        + '<pre style="white-space:pre-wrap;line-height:1.7;margin:4px 0 0;font-size:12px;max-height:250px;overflow-y:auto">'
+        + esc(analysis.ui_flow_analysis) + '</pre></div>';
+    }
+    return h;
+  }
+
+  // ── 提取原文 tab ──
   var c = _docChunks[_docChunkIdx];
   if (!c) return '<div class="empty-hint">无内容</div>';
   var total = _docChunks.length;
   var nav = '<div class="chunk-nav">'
-    + '<button class="btn btn-sm btn-outline" onclick="event.stopPropagation();_docChunkIdx=Math.max(0,_docChunkIdx-1);refreshChunkDetail(\'' + docId + '\')">◀ 上一个</button>'
+    + '<button class="btn btn-sm btn-outline" onclick="event.stopPropagation();_docChunkIdx=Math.max(0,_docChunkIdx-1);refreshChunkDetail(\'' + docId + '\',\'' + docType + '\')">◀ 上一个</button>'
     + '<span> ' + (_docChunkIdx + 1) + ' / ' + total + ' </span>'
-    + '<button class="btn btn-sm btn-outline" onclick="event.stopPropagation();_docChunkIdx=Math.min(' + (total - 1) + ',_docChunkIdx+1);refreshChunkDetail(\'' + docId + '\')">下一个 ▶</button>'
+    + '<button class="btn btn-sm btn-outline" onclick="event.stopPropagation();_docChunkIdx=Math.min(' + (total - 1) + ',_docChunkIdx+1);refreshChunkDetail(\'' + docId + '\',\'' + docType + '\')">下一个 ▶</button>'
     + (c.api_name ? ' <span style="color:var(--primary)">' + esc(c.api_name) + '</span>' : '')
     + '</div>';
-  return nav + '<pre style="white-space:pre-wrap;line-height:1.7;margin:8px 0 0;font-size:12px;max-height:300px;overflow-y:auto">' + esc(c.content || '') + '</pre>'
-    + '<div style="text-align:right;margin-top:6px"><button class="btn btn-sm btn-outline" onclick="event.stopPropagation();toggleDocChunkDetail(\'' + docId + '\')">▲ 收起</button></div>';
+  return nav + '<pre style="white-space:pre-wrap;line-height:1.7;margin:8px 0 0;font-size:12px;max-height:300px;overflow-y:auto">' + esc(c.content || '') + '</pre>';
 }
 
-function refreshChunkDetail(docId) {
-  var detailEl = document.getElementById('doc-chunk-detail-' + docId);
-  if (detailEl) detailEl.innerHTML = renderChunkDetail(docId);
+function refreshChunkDetail(docId, docType) {
+  var contentEl = document.getElementById('doc-detail-content-' + docId);
+  if (contentEl) contentEl.innerHTML = renderChunkDetail(docId, docType);
 }
 async function loadDocGlossary(docId) {
   try {
@@ -664,7 +736,10 @@ async function checkAnalysisAndConfirm(modName) {
   try {
     const r = await fetch('/api/modules/' + encodeURIComponent(modName) + '/analysis');
     const d = await r.json();
-    if (d.success && d.analysis && d.analysis.analysis_json) {
+    if (d.success && d.analysis && (
+      d.analysis.scenario_analysis || d.analysis.ui_flow_analysis ||
+      d.analysis.api_analysis || d.analysis.analysis_json
+    )) {
       // 已有分析 → 弹窗确认
       return new Promise(resolve => {
         document.getElementById('modal-content').innerHTML =
@@ -1094,12 +1169,15 @@ async function loadModuleAnalysis(modName) {
   try {
     const r = await fetch('/api/modules/' + encodeURIComponent(modName) + '/analysis');
     const d = await r.json();
-    if (d.success && d.analysis && d.analysis.analysis_json) {
+    if (d.success && d.analysis && (
+      d.analysis.scenario_analysis || d.analysis.ui_flow_analysis ||
+      d.analysis.api_analysis || d.analysis.analysis_json
+    )) {
       document.getElementById('analyze-scenarios-btn').style.display = 'none';
       document.getElementById('edit-analysis-btn').style.display = '';
       document.getElementById('analysis-status').textContent =
         '✅ 已分析 (v' + (d.analysis.version || 1) + ')';
-      renderAnalysisResult(d.analysis.analysis_json);
+      renderAnalysisResult(d.analysis);
     } else {
       document.getElementById('analyze-scenarios-btn').style.display = '';
       document.getElementById('edit-analysis-btn').style.display = 'none';
@@ -1134,9 +1212,39 @@ async function analyzeScenarios() {
   } catch (e) { st.textContent = '❌ ' + e.message; btn.disabled = false; btn.textContent = '🔍 分析测试场景'; }
 }
 
-function renderAnalysisResult(analysisJson) {
-  /* 渲染场景-接口映射图 */
-  var parsed, html = '';
+function renderAnalysisResult(result) {
+  /* 渲染场景分析结果。支持新格式（自由文本）和旧格式（JSON）。 */
+  var html = '';
+
+  // ── 新格式：三步分析自由文本 ──
+  if (typeof result === 'object' && (result.scenario_analysis || result.ui_flow_analysis || result.api_analysis)) {
+    var parts = [];
+    if (result.scenario_analysis) {
+      html += '<div class="card" style="margin-bottom:8px;padding:10px"><b>📋 测试场景分析</b>';
+      html += '<pre style="font-size:11px;max-height:300px;overflow-y:auto;white-space:pre-wrap;margin-top:6px">'
+        + esc(result.scenario_analysis) + '</pre></div>';
+      parts.push('场景');
+    }
+    if (result.ui_flow_analysis) {
+      html += '<div class="card" style="margin-bottom:8px;padding:10px"><b>🖥️ 页面交互逻辑</b>';
+      html += '<pre style="font-size:11px;max-height:300px;overflow-y:auto;white-space:pre-wrap;margin-top:6px">'
+        + esc(result.ui_flow_analysis) + '</pre></div>';
+      parts.push('交互');
+    }
+    if (result.api_analysis) {
+      html += '<div class="card" style="margin-bottom:8px;padding:10px"><b>📡 接口映射分析</b>';
+      html += '<pre style="font-size:11px;max-height:300px;overflow-y:auto;white-space:pre-wrap;margin-top:6px">'
+        + esc(result.api_analysis) + '</pre></div>';
+      parts.push('接口');
+    }
+    html += '<div style="font-size:11px;color:var(--text-dim)">三步分析完成: ' + parts.join(' · ') + '</div>';
+    document.getElementById('analysis-result').innerHTML = html;
+    return;
+  }
+
+  // ── 旧格式：analysis_json（JSON 结构化）──
+  var analysisJson = typeof result === 'string' ? result : (result ? result.analysis_json : '');
+  var parsed;
   try { parsed = JSON.parse(analysisJson); } catch (e) { parsed = null; }
   if (!parsed) {
     document.getElementById('analysis-result').innerHTML =
@@ -1205,25 +1313,44 @@ function renderAnalysisResult(analysisJson) {
 }
 
 function editAnalysis() {
-  /* 弹窗编辑分析结果 JSON */
+  /* 弹窗编辑分析结果 —— 支持新格式（自由文本）和旧格式（JSON）。*/
   if (!selectedModuleName) return;
   fetch('/api/modules/' + encodeURIComponent(selectedModuleName) + '/analysis')
     .then(r => r.json()).then(d => {
-      var json = '';
-      if (d.success && d.analysis && d.analysis.analysis_json) {
-        try { json = JSON.stringify(JSON.parse(d.analysis.analysis_json), null, 2); }
-        catch (e) { json = d.analysis.analysis_json; }
+      var a = (d.success && d.analysis) ? d.analysis : {};
+      var isNewFormat = a.scenario_analysis || a.ui_flow_analysis || a.api_analysis;
+      var html = '<h3 style="margin:0 0 4px">✏️ 编辑场景分析</h3>'
+        + '<p style="font-size:13px;color:var(--text-dim);margin-bottom:12px">模块: <b>' + esc(selectedModuleName) + '</b></p>';
+      if (isNewFormat) {
+        html += '<label style="font-size:13px;font-weight:600">📋 测试场景分析</label>'
+          + '<textarea id="edit-sa" style="width:100%;min-height:200px;padding:10px;border:1px solid var(--border);border-radius:4px;font-family:inherit;font-size:14px;margin-bottom:12px;resize:vertical">' + escText(a.scenario_analysis || '') + '</textarea>'
+          + '<label style="font-size:13px;font-weight:600">🖥️ 页面交互逻辑</label>'
+          + '<textarea id="edit-ua" style="width:100%;min-height:140px;padding:10px;border:1px solid var(--border);border-radius:4px;font-family:inherit;font-size:14px;margin-bottom:12px;resize:vertical">' + escText(a.ui_flow_analysis || '') + '</textarea>'
+          + '<label style="font-size:13px;font-weight:600">📡 接口映射分析</label>'
+          + '<textarea id="edit-aa" style="width:100%;min-height:140px;padding:10px;border:1px solid var(--border);border-radius:4px;font-family:inherit;font-size:14px;margin-bottom:12px;resize:vertical">' + escText(a.api_analysis || '') + '</textarea>'
+          + '<div class="btn-row" style="margin-top:8px"><button class="btn btn-outline js-close-modal">取消</button><button class="btn btn-success" id="save-analysis-btn">💾 保存</button></div>';
+      } else {
+        var json = a.analysis_json || '';
+        try { json = JSON.stringify(JSON.parse(json), null, 2); } catch (e) {}
+        html += '<textarea id="edit-analysis-json" style="width:100%;min-height:400px;padding:10px;border:1px solid var(--border);border-radius:4px;font-family:monospace;font-size:14px;resize:vertical">' + escText(json) + '</textarea>'
+          + '<div class="btn-row" style="margin-top:12px"><button class="btn btn-outline js-close-modal">取消</button><button class="btn btn-success" id="save-analysis-btn">💾 保存</button></div>';
       }
-      showModal('<h3>✏️ 编辑场景分析</h3><p style="font-size:12px;color:var(--text-dim);margin-bottom:8px">模块: <b>' + esc(selectedModuleName) + '</b></p>'
-        + '<textarea id="edit-analysis-json" style="width:100%;min-height:320px;padding:8px;border:1px solid var(--border);border-radius:4px;font-family:monospace;font-size:12px">' + escText(json) + '</textarea>'
-        + '<div class="btn-row" style="margin-top:12px"><button class="btn btn-outline js-close-modal">取消</button><button class="btn btn-success" id="save-analysis-btn">💾 保存</button></div>');
+      showModal(html, isNewFormat ? 'modal-wide' : '');
       document.getElementById('save-analysis-btn').onclick = async () => {
-        var newJson = document.getElementById('edit-analysis-json').value;
-        try { JSON.parse(newJson); } catch (e) { toast('❌ JSON 格式错误: ' + e.message); return; }
         closeModal();
+        var body = {};
+        if (isNewFormat) {
+          body.scenario_analysis = document.getElementById('edit-sa').value;
+          body.ui_flow_analysis = document.getElementById('edit-ua').value;
+          body.api_analysis = document.getElementById('edit-aa').value;
+        } else {
+          var newJson = document.getElementById('edit-analysis-json').value;
+          try { JSON.parse(newJson); } catch (e) { toast('❌ JSON 格式错误: ' + e.message); return; }
+          body.analysis_json = newJson;
+        }
         var r = await fetch('/api/modules/' + encodeURIComponent(selectedModuleName) + '/analysis', {
           method: 'PUT', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ analysis_json: newJson }),
+          body: JSON.stringify(body),
         });
         var rd = await r.json();
         toast(rd.success ? '✅ 已保存' : '❌ ' + (rd.message || '保存失败'));

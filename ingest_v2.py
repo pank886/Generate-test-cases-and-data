@@ -147,7 +147,15 @@ def _safe_doc_id(prefix: str, *parts: str) -> str:
     TODO(多用户): doc_id 追加 user_id 或 hash 后缀防跨用户碰撞，同时保持同文件幂等。
     """
     import hashlib
-    sanitized = [p.replace('/', '_').replace('\\', '_').replace('$', '_') for p in parts if p]
+    _HTML_CHARS = {'<': '_lt_', '>': '_gt_', '"': '_quot_', '&': '_amp_'}
+    sanitized = []
+    for p in parts:
+        if not p:
+            continue
+        s = p.replace('/', '_').replace('\\', '_').replace('$', '_')
+        for ch, repl in _HTML_CHARS.items():
+            s = s.replace(ch, repl)
+        sanitized.append(s)
     if not sanitized:
         return prefix
     raw = prefix + "_" + "_".join(sanitized)
@@ -245,6 +253,160 @@ def _save_to_sqlite(doc_id: str, file_name: str, file_type: str, doc_type: str,
     except Exception:
         logger.error("   [SQLite] 写入失败", exc_info=True)
         raise
+
+
+def _save_single_chunk(doc_id: str, chunk_index: int, content: str,
+                        page_name: str = ""):
+    """写入单条 document_chunk 记录（供 Axure 逐页写入）。"""
+    from database import get_session_ctx
+    from database.models import DocumentChunk
+    try:
+        with get_session_ctx() as session:
+            chunk = DocumentChunk(
+                doc_id=doc_id,
+                chunk_index=chunk_index,
+                content=content,
+                page_name=page_name,
+                token_count=len(content),
+            )
+            session.add(chunk)
+            session.commit()
+    except Exception:
+        logger.error("   [document_chunks] 单条写入失败: %s[%d]", doc_id, chunk_index, exc_info=True)
+        raise
+
+
+def _save_document_chunks(doc_id: str, chunks: list[str], page_name: str = ""):
+    """写入 document_chunks 表（原文 + 摘要占位）。"""
+    from database import get_session_ctx
+    from database.models import DocumentChunk
+    try:
+        with get_session_ctx() as session:
+            for i, content in enumerate(chunks):
+                chunk = DocumentChunk(
+                    doc_id=doc_id,
+                    chunk_index=i,
+                    content=content,
+                    page_name=page_name,
+                    token_count=len(content),
+                )
+                session.add(chunk)
+            session.commit()
+        logger.info(f"   [document_chunks] 写入 {len(chunks)} 条")
+    except Exception:
+        logger.error("   [document_chunks] 写入失败", exc_info=True)
+        raise
+
+
+def _delete_document_chunks(doc_id: str):
+    """删除 document_chunks 记录（ChromaDB 写入失败时的补偿动作）。"""
+    from database import get_session_ctx
+    from database.models import DocumentChunk
+    try:
+        with get_session_ctx() as session:
+            session.query(DocumentChunk).filter_by(doc_id=doc_id).delete()
+            session.commit()
+        logger.info("   [补偿] 已回滚 document_chunks: %s", doc_id)
+    except Exception as e:
+        logger.error("   [补偿] document_chunks 回滚失败: %s - %s", doc_id, e, exc_info=True)
+
+
+def _parse_chunk_summaries(text: str, expected_count: int) -> list[str]:
+    """正则解析 ===CHUNK_SUMMARY=== 分隔的摘要文本。
+
+    返回长度等于 expected_count 的列表，不足补空字符串。
+    """
+    import re
+    # 按 ===CHUNK_SUMMARY=== 拆分，取每段的第一行
+    parts = re.split(r'===CHUNK_SUMMARY===', text)
+    summaries = [p.strip().split('\n')[0].strip() for p in parts[1:]]  # 第一个是空
+    # 补齐
+    while len(summaries) < expected_count:
+        summaries.append("")
+    return summaries[:expected_count]
+
+
+def _generate_batch_summaries(doc_id: str, chunks: list[str], file_name: str,
+                               progress_cb=None, page_name: str = ""):
+    """批量生成 simple_summary（5 chunks/批，同步等待，失败写补偿任务）。
+
+    LLM 输出 ===CHUNK_SUMMARY=== 分隔词，正则匹配解析。
+    """
+    import re
+    import config
+    from agent_components.nodes import _get_llm
+    from prompts.extraction_prompts import batch_chunk_summary_prompt
+    from database import get_session_ctx
+    from database.models import DocumentChunk
+    from database.operations.compensation import CompensationOps
+
+    cb = progress_cb or (lambda p, m: None)
+    total = len(chunks)
+    batch_size = config.BATCH_SUMMARY_CHUNK_SIZE
+    prompt = batch_chunk_summary_prompt()
+    llm = _get_llm()
+
+    failed_indices = []
+    batch_count = (total + batch_size - 1) // batch_size
+
+    for bi in range(0, total, batch_size):
+        batch_end = min(bi + batch_size, total)
+        batch_chunks = chunks[bi:batch_end]
+        batch_num = bi // batch_size + 1
+        pct = 70 + int((batch_num / batch_count) * 15)
+        cb(pct, f"AI 生成摘要 ({batch_num}/{batch_count})...")
+
+        chunks_text = "\n\n".join(
+            f"[块{bi+j}] {c}" for j, c in enumerate(batch_chunks)
+        )
+        try:
+            result = llm.invoke(prompt.format_messages(
+                file_name=file_name,
+                start_idx=bi,
+                end_idx=batch_end - 1,
+                total=total,
+                page_name=page_name,
+                chunks=chunks_text,
+            ))
+            llm_text = result.content if hasattr(result, "content") else str(result)
+            summaries = _parse_chunk_summaries(llm_text, len(batch_chunks))
+        except Exception as e:
+            logger.warning("   [摘要] 批次 %d/%d LLM 调用失败: %s", batch_num, batch_count, e)
+            # 整批失败 → 全部标记补偿
+            summaries = [""] * len(batch_chunks)
+            failed_indices.extend(range(bi, batch_end))
+
+        # 写入 document_chunks.simple_summary
+        try:
+            with get_session_ctx() as session:
+                for j, summary in enumerate(summaries):
+                    if summary:  # 非空才写入
+                        session.query(DocumentChunk).filter_by(
+                            doc_id=doc_id, chunk_index=bi + j,
+                        ).update({"simple_summary": summary})
+                session.commit()
+        except Exception as e:
+            logger.error("   [摘要] 写入 SQLite 失败: %s", e)
+
+        # 收集解析失败的索引（空摘要）
+        for j, s in enumerate(summaries):
+            if not s and (bi + j) not in failed_indices:
+                failed_indices.append(bi + j)
+
+    # 创建补偿任务（失败的 chunk）
+    if failed_indices:
+        try:
+            with get_session_ctx() as session:
+                CompensationOps.create(
+                    session, "simple_summary",
+                    {"doc_id": doc_id, "chunk_indices": failed_indices,
+                     "file_name": file_name},
+                    max_retries=config.COMPENSATION_MAX_RETRIES,
+                )
+                session.commit()
+            logger.info("   [补偿] 已创建 simple_summary 补偿任务: %d 个 chunk", len(failed_indices))
+        except Exception as e:
+            logger.error("   [补偿] 创建补偿任务失败: %s", e)
 
 
 def process_product_doc(file_path: str, progress_cb=None) -> dict:
@@ -359,9 +521,11 @@ def process_product_doc(file_path: str, progress_cb=None) -> dict:
         except Exception as e:
             logger.warning("术语表提取跳过: %s", e, exc_info=True)
 
-        # 5. 写入 SQLite（先写关系库，成功后写向量库）
-        cb(85, "写入业务数据...")
+        # 5. 写入 SQLite document_chunks 表（原文 + 摘要占位）
+        cb(60, "写入文档块...")
         doc_id = _safe_doc_id("prod", file_name, module_name)
+        _save_document_chunks(doc_id, chunks, page_name="")
+        # 写 documents 表（元数据）
         _save_to_sqlite(
             doc_id=doc_id,
             file_name=file_name,
@@ -371,17 +535,37 @@ def process_product_doc(file_path: str, progress_cb=None) -> dict:
             module_name=module_name,
             glossary_terms=terms,
         )
-        logger.info(f"   [SQLite] 入库完成 (doc_id={doc_id})")
+        logger.info(f"   [SQLite] document_chunks + documents 入库完成 (doc_id={doc_id})")
 
-        # 6. 写入 ChromaDB（纯向量，失败时补偿回滚 SQLite）
+        # 6. 批量生成 simple_summary（同步等待，5 chunks/批）
+        cb(70, "AI 生成摘要...")
+        _generate_batch_summaries(doc_id, chunks, file_name, progress_cb=cb)
+
+        # 7. 写入 ChromaDB（检索文本，失败时补偿回滚 SQLite）
         cb(90, "向量化入库中...")
         try:
+            from database import get_session_ctx
+            from database.models import DocumentChunk
+            # 从 document_chunks 读摘要构造检索文本
+            chunk_records = []
+            with get_session_ctx() as session:
+                chunk_records = session.query(DocumentChunk).filter_by(
+                    doc_id=doc_id).order_by(DocumentChunk.chunk_index).all()
+                # detach from session
+                chunk_records = [{
+                    "content": c.content,
+                    "simple_summary": c.simple_summary,
+                    "page_name": c.page_name,
+                } for c in chunk_records]
+
+            search_texts = [_build_doc_search_text(c) for c in chunk_records]
             db.delete_by_doc_id(doc_id)
-            db.add_product_doc_chunks(doc_id, chunks)
-            logger.info(f"   [ChromaDB] 入库完成 (doc_id={doc_id})")
+            db.add_product_doc_chunks(doc_id, search_texts)
+            logger.info(f"   [ChromaDB] 入库完成 (doc_id={doc_id}, 检索文本)")
         except Exception:
             logger.error("   [ChromaDB] 写入失败，启动补偿回滚 SQLite", exc_info=True)
             _delete_sqlite_doc(doc_id)
+            _delete_document_chunks(doc_id)
             raise
 
         cb(95, "入库完成")
@@ -433,8 +617,11 @@ def extract_apis_from_yapi_md(text: str) -> list[dict]:
         method_match = _re.search(r'\*\*Method：\*\*\s*(.+)', part)
         method = method_match.group(1).strip().upper() if method_match else "?"
 
-        desc_match = _re.search(r'\*\*接口描述：\*\*\s*\n?\s*(?:<p>)?(.+?)(?:</p>)?\s*\n', part)
-        description = desc_match.group(1).strip() if desc_match else ""
+        # 接口描述：YApi 空描述导出为 <p></p>，正则捕获后再剥掉 HTML 标签残留（不能直接留 </p>）
+        desc_match = _re.search(r'\*\*接口描述：\*\*\s*\n?\s*(?:<p[^>]*>)?(.*?)(?:</p>)?\s*\n', part)
+        description = ""
+        if desc_match:
+            description = _re.sub(r'<[^>]+>', '', desc_match.group(1)).strip()
 
         # ── 辅助：解析 HTML 表格为参数数组 ──
         def _parse_html_table(html_str: str) -> list[dict]:
@@ -528,41 +715,72 @@ def extract_apis_from_yapi_md(text: str) -> list[dict]:
 
             return result
 
-        # ── 解析请求参数 ──
+        # ── 解析请求参数（支持 Headers/Query/Body；Markdown 表格或 HTML 表格）──
         headers_list = []
         params_list = []
 
-        # 查找 Headers 表
-        hdr_match = _re.search(r'\*\*Headers\*\*\s*\n(\|.+\|(?:\n\|.+\|)*)', part)
-        if hdr_match:
-            md_table = hdr_match.group(1)
-            # 转换 Markdown 表格为 HTML
-            rows = [r.strip('|').split('|') for r in md_table.strip().split('\n')]
-            if len(rows) >= 2:
-                # 表头行 + 分隔行 + 数据行
-                data_rows = rows[2:] if len(rows) > 2 and set(rows[1][0].strip()) <= {'-', ':', ' '} else rows[1:]
-                for row in data_rows:
-                    row = [c.strip() for c in row]
-                    if len(row) >= 2:
-                        headers_list.append({
-                            'name': row[0] if len(row) > 0 else '',
-                            'type': 'string',
-                            'required': '是' in (row[2] if len(row) > 2 else '') if len(row) > 2 else False,
-                            'description': row[4] if len(row) > 4 else '',
-                            'default': row[3] if len(row) > 3 and row[3] else None,
-                        })
+        # 辅助：解析 YApi 导出的 Markdown 参数表（按表头自动映射列名）
+        def _parse_md_table(md_str: str) -> list[dict]:
+            lines = [ln for ln in md_str.strip().split('\n') if ln.strip().startswith('|')]
+            if len(lines) < 2:
+                return []
+            rows = [[c.strip() for c in ln.strip().strip('|').split('|')] for ln in lines]
+            header = rows[0]
+            # 列映射：只映射第一个命中，避免「参数名称/参数值」都含"参数"时冲突
+            col_map = {'name': -1, 'type': -1, 'required': -1, 'default': -1, 'desc': -1}
+            for idx, h in enumerate(header):
+                hl = h.lower()
+                if col_map['name'] == -1 and ('名称' in h or 'name' in hl or '参数' in h or '字段' in h):
+                    col_map['name'] = idx
+                elif col_map['type'] == -1 and ('类型' in h or 'type' in hl):
+                    col_map['type'] = idx
+                elif col_map['required'] == -1 and ('必须' in h or 'required' in hl):
+                    col_map['required'] = idx
+                elif col_map['default'] == -1 and ('默认' in h or 'default' in hl):
+                    col_map['default'] = idx
+                elif col_map['desc'] == -1 and ('备注' in h or '说明' in h or 'desc' in hl or '描述' in h):
+                    col_map['desc'] = idx
+            result = []
+            for row in rows[1:]:
+                if all(set(c) <= {'-', ':', ' '} for c in row if c):
+                    continue  # 分隔行
+                def _cell(idx):
+                    return row[idx] if 0 <= idx < len(row) else ''
+                name_val = _cell(col_map['name'])
+                if not name_val:
+                    continue
+                req_str = _cell(col_map['required'])
+                result.append({
+                    'name': name_val,
+                    'type': _cell(col_map['type']) or 'string',
+                    'required': '必须' in req_str or req_str.lower() == '是' or req_str.lower() == 'true',
+                    'description': _cell(col_map['desc']),
+                    'default': _cell(col_map['default']) or None,
+                })
+            return result
 
-        # 查找 Body 参数表（HTML 格式）
-        body_start = part.find('**Body**')
-        if body_start >= 0:
-            body_section = part[body_start:]
-            # 找到下一个 ### 或 ## 作为结束标记
-            body_end = _re.search(r'\n###\s|\n##\s', body_section)
-            body_html = body_section[:body_end.start()] if body_end else body_section
-            params_list = _parse_html_table(body_html)
-        else:
-            # 没有 Body 标题，尝试直接找 <table>
-            params_list = _parse_html_table(part)
+        # 请求参数区（### 请求参数 → ### 返回数据），只在区内解析，避免误取返回数据表
+        req_section = ''
+        req_match = _re.search(r'### 请求参数\s*\n(.*?)(?=\n### 返回数据|\Z)', part, _re.DOTALL)
+        if req_match:
+            req_section = req_match.group(1)
+
+        def _subsection(sec: str, title: str) -> str:
+            """取 **title** 标题后的子段内容（到下一个 **标题 或 ### 或结尾）。"""
+            m = _re.search(r'\*\*' + _re.escape(title) + r'\*\*\s*\n(.*?)(?=\n\*\*|\n###\s|\Z)',
+                           sec, _re.DOTALL)
+            return m.group(1) if m else ''
+
+        hdr_section = _subsection(req_section, 'Headers')
+        query_section = _subsection(req_section, 'Query')
+        body_section = _subsection(req_section, 'Body')
+
+        headers_list = _parse_md_table(hdr_section) if hdr_section else []
+        if query_section:
+            params_list.extend(_parse_md_table(query_section))
+        if body_section:
+            body_params = _parse_md_table(body_section)
+            params_list.extend(body_params or _parse_html_table(body_section))
 
         # ── 解析返回数据 ──
         returns_list = []
@@ -731,14 +949,77 @@ def process_api_doc_extract(file_path: str, default_module: str = None,
     return {"module_name": module, "apis": apis, "file_name": file_name}
 
 
+def _build_api_search_text(api: dict) -> str:
+    """构造 API 自然语言检索文本（替代 JSON 原文写入 ChromaDB）。
+
+    格式: "{method} {url} {api_name}。{description}。
+            参数: {param_name}{param_type}{'必填' if required else ''}{param_desc}; ...
+            返回值: {ret_name}{ret_type}; ..."
+    """
+    name = api.get("name", "")
+    url = api.get("url", "")
+    method = api.get("method", "?").upper()
+    desc = api.get("description", name)
+
+    parts = [f"{method} {url} {name}。{desc}。"]
+
+    # 参数
+    params = api.get("parameters", [])
+    if isinstance(params, list) and params:
+        param_strs = []
+        for p in params[:20]:  # 最多 20 个参数，防过长
+            pn = p.get("name", "")
+            pt = p.get("type", "string")
+            pr = "必填" if p.get("required") else ""
+            pd = p.get("description", "")
+            param_strs.append(f"{pn}{pt}{pr}{pd}")
+        parts.append("参数: " + "; ".join(param_strs))
+
+    # 返回值
+    returns = api.get("returns", [])
+    if isinstance(returns, list) and returns:
+        ret_strs = [f"{r.get('name', '')}{r.get('type', '')}" for r in returns[:10]]
+        parts.append("返回值: " + "; ".join(ret_strs))
+
+    # 标签
+    tags = []
+    annotations = api.get("annotations", {})
+    if isinstance(annotations, dict):
+        if annotations.get("is_export", {}).get("active"):
+            tags.append("导出接口")
+        if annotations.get("has_path_params", {}).get("active"):
+            tags.append("RESTful路径参数")
+    if tags:
+        parts.append("标签: " + " ".join(tags))
+
+    return "。".join(parts)
+
+
+def _build_doc_search_text(chunk: dict) -> str:
+    """构造产品/Axure 文档检索文本。
+
+    优先级: analyzed_summary > simple_summary > content 前 500 字
+    """
+    page = chunk.get("page_name", "")
+    summary = chunk.get("analyzed_summary") or chunk.get("simple_summary") or ""
+    if summary:
+        return f"[{page}] {summary}" if page else summary
+    # fallback: content 截断
+    content = chunk.get("content", "")
+    truncated = content[:500] if len(content) > 500 else content
+    return f"[{page}] {truncated}" if page else truncated
+
+
 def commit_api_docs(file_path: str, module_name: str, apis: list[dict],
                     progress_cb=None, delete_original: bool = False) -> dict:
     """Phase 2: 用户确认后，接口批量入库。
 
-    所有 API 先批量写入 SQLite（同一事务），再逐条写入 ChromaDB。
+    所有 API 先批量写入 SQLite（同一事务，含 api_* 结构化列），再逐条写入 ChromaDB。
+    ChromaDB 写入检索文本（自然语言），不再存原始 JSON。
     ChromaDB 任一条失败时补偿回滚所有 SQLite 记录。
     仅 delete_original=True 时删除原文件。
     """
+    import json as _json
     cb = progress_cb or (lambda p, m: None)
     logger.info(f"[Phase A] 入库 {len(apis)} 个接口文档")
 
@@ -747,7 +1028,7 @@ def commit_api_docs(file_path: str, module_name: str, apis: list[dict],
     file_type = os.path.splitext(file_path)[1].lstrip(".")
     doc_ids = []
 
-    # ---- Phase 1: 批量写入 SQLite（同一事务）----
+    # ---- Phase 1: 批量写入 SQLite（同一事务，含 api_* 结构化列）----
     from database import get_session_ctx
     from database.models import Document
     from datetime import datetime, timezone
@@ -771,6 +1052,15 @@ def commit_api_docs(file_path: str, module_name: str, apis: list[dict],
             chunk_count=1,
             status="pending",
             upload_time=datetime.now(timezone.utc),
+            # ── API 结构化列 ──
+            api_name=api_name,
+            api_url=url,
+            api_method=method.upper() if method else "?",
+            api_description=api.get("description", api_name),
+            api_headers=_json.dumps(api.get("headers", []), ensure_ascii=False),
+            api_parameters=_json.dumps(api.get("parameters", []), ensure_ascii=False),
+            api_returns=_json.dumps(api.get("returns", []), ensure_ascii=False),
+            api_annotations=_json.dumps(api.get("annotations", {}), ensure_ascii=False),
         ))
 
     try:
@@ -781,27 +1071,35 @@ def commit_api_docs(file_path: str, module_name: str, apis: list[dict],
         logger.error("   [SQLite] 批量写入失败，无数据需要补偿", exc_info=True)
         raise
 
-    logger.info(f"   [SQLite] 批量入库完成: {len(doc_ids)} 条")
+    logger.info(f"   [SQLite] 批量入库完成: {len(doc_ids)} 条（含 api_* 结构化列）")
 
-    # ---- Phase 2: 逐条写入 ChromaDB（失败时补偿回滚 SQLite）----
+    # ---- Phase 2: 逐条写入 ChromaDB（检索文本，失败时补偿回滚 SQLite）----
     try:
         for i, api in enumerate(apis):
             api_name = api.get("name", f"api_{i}")
             url = api.get("url", "")
-            pct = int(50 + (i / len(apis)) * 48)
-            cb(pct, f"向量化入库 {i+1}/{len(apis)}...")
             method = api.get("method", "?")
             doc_id = doc_ids[i]
-            cb(int(50 + (i / len(apis)) * 40), f"入库 {method} {url}")
+            pct = int(50 + (i / len(apis)) * 40)
+            cb(pct, f"向量化入库 {i+1}/{len(apis)}...")
+
+            # 构造检索文本并写入 ChromaDB
+            search_text = _build_api_search_text(api)
+            # 包装为兼容现有 add_api_defs 的格式：单个 dict 含检索文本
+            api_for_chroma = dict(api)
+            api_for_chroma["_search_text"] = search_text
+            api_for_chroma["name"] = api_name
+            api_for_chroma["_doc_id"] = doc_id
+
             db.delete_by_doc_id(doc_id)
-            db.add_api_defs(doc_id, [api])
+            db.add_api_defs(doc_id, [api_for_chroma])
     except Exception:
         logger.error("   [ChromaDB] 写入失败，启动补偿回滚所有 SQLite 记录", exc_info=True)
         for did in doc_ids:
             _delete_sqlite_doc(did)
         raise
 
-    logger.info(f"   [ChromaDB] 入库完成: {len(doc_ids)} 条")
+    logger.info(f"   [ChromaDB] 入库完成: {len(doc_ids)} 条（检索文本）")
 
     # 仅当全部接口选中时才废弃原文件
     if delete_original:
@@ -886,9 +1184,20 @@ def process_axure_zip(file_path: str, module_name: str = None, progress_cb=None)
             logger.error("   => 关联模块分析失败: %s", e, exc_info=True)
         related.discard(module)
 
-        # 写入 SQLite（先写关系库，成功后写向量库）
-        cb(85, "写入业务数据...")
+        # ── 提取每块 page_name（从 "## 页面: xxx" 行中解析）──
+        import re as _re
+        def _extract_page_name(chunk: str) -> str:
+            m = _re.search(r'##\s*页面[：:]\s*(.+)', chunk)
+            return m.group(1).strip() if m else ""
+
+        # 5a. 写入 SQLite document_chunks 表（含 page_name）
+        cb(75, "写入文档块...")
         doc_id = _safe_doc_id("axure", file_name, module)
+        for i, chunk_text in enumerate(chunks):
+            page = _extract_page_name(chunk_text)
+            _save_single_chunk(doc_id, i, chunk_text, page_name=page)
+
+        # 5b. 写入 documents 元数据
         _save_to_sqlite(
             doc_id=doc_id,
             file_name=file_name,
@@ -897,17 +1206,36 @@ def process_axure_zip(file_path: str, module_name: str = None, progress_cb=None)
             chunk_count=len(chunks),
             module_name=module,
         )
-        logger.info(f"   [SQLite] 入库完成 (doc_id={doc_id})")
+        logger.info(f"   [SQLite] document_chunks + documents 入库完成 (doc_id={doc_id})")
 
-        # 写入 ChromaDB（纯向量，失败时补偿回滚 SQLite）
+        # 6. 批量生成 simple_summary（同步等待，失败写补偿任务）
+        cb(80, "AI 生成摘要...")
+        _generate_batch_summaries(doc_id, chunks, file_name,
+                                   progress_cb=cb,
+                                   page_name=_extract_page_name(chunks[0]) if chunks else "")
+
+        # 7. 写入 ChromaDB（检索文本，失败时补偿回滚 SQLite）
         cb(90, "向量化入库中...")
         try:
+            from database import get_session_ctx
+            from database.models import DocumentChunk
+            chunk_records = []
+            with get_session_ctx() as session:
+                chunk_records = session.query(DocumentChunk).filter_by(
+                    doc_id=doc_id).order_by(DocumentChunk.chunk_index).all()
+                chunk_records = [{
+                    "content": c.content,
+                    "simple_summary": c.simple_summary,
+                    "page_name": c.page_name,
+                } for c in chunk_records]
+            search_texts = [_build_doc_search_text(c) for c in chunk_records]
             db.delete_by_doc_id(doc_id)
-            db.add_product_doc_chunks(doc_id, chunks)
-            logger.info(f"   [ChromaDB] 入库完成 (doc_id={doc_id}), {len(chunks)} 块")
+            db.add_product_doc_chunks(doc_id, search_texts, doc_type="axure")
+            logger.info(f"   [ChromaDB] 入库完成 (doc_id={doc_id}), {len(chunks)} 块（检索文本）")
         except Exception:
             logger.error("   [ChromaDB] 写入失败，启动补偿回滚 SQLite", exc_info=True)
             _delete_sqlite_doc(doc_id)
+            _delete_document_chunks(doc_id)
             raise
 
         cb(95, "入库完成")

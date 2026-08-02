@@ -21,6 +21,9 @@ __pycache__/
 coverage.xml
 htmlcov/
 
+# 节点评估输出（thinking 生成结果 run_XX.json）
+tests/eval_output/
+
 # 工作流运行日志
 logs/
 *.log

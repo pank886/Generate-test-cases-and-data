@@ -23,6 +23,118 @@ def _mod_exists_in_tree(module_name: str, session) -> bool:
         return False
 
 
+def _build_full_api_defs_text(api_defs: list[dict]) -> str:
+    """从 api_definitions 中提取 doc_id，到 SQLite 查完整定义，构造 LLM 输入文本。
+
+    每个 API 格式:
+      [{method}] {url} — {name}
+        描述: {description}
+        参数: param1(type, 必填/可选): desc; param2(type, 可选): desc
+        返回值: ret1(type): desc; ret2(type): desc
+    """
+    import json as _json
+    from database import get_session_ctx
+    from database.models import Document as DocModel
+
+    # 收集所有 api 文档的 doc_id（去重）
+    doc_ids: set[str] = set()
+    for a in api_defs:
+        sid = a.get("source", a.get("_doc_id", ""))
+        if sid:
+            doc_ids.add(sid)
+
+    if not doc_ids:
+        # 降级：直接用 api_defs 字典里的数据拼
+        return _fallback_api_text(api_defs)
+
+    # 从 SQLite 查全量 API 定义
+    try:
+        with get_session_ctx() as session:
+            records = session.query(DocModel).filter(
+                DocModel.id.in_(list(doc_ids)), DocModel.doc_type == "api"
+            ).all()
+            if not records:
+                return _fallback_api_text(api_defs)
+
+            parts = []
+            for d in records:
+                if not d.api_url:
+                    continue
+                lines = [f"[{d.api_method or '?'}] {d.api_url} — {d.api_name or ''}"]
+                if d.api_description:
+                    lines.append(f"  描述: {d.api_description}")
+                # 参数
+                params = _json.loads(d.api_parameters or "[]")
+                if params:
+                    param_strs = _format_params(params)
+                    if param_strs:
+                        lines.append(f"  参数: {param_strs}")
+                # 返回值
+                returns = _json.loads(d.api_returns or "[]")
+                if returns:
+                    ret_strs = _format_params(returns)
+                    if ret_strs:
+                        lines.append(f"  返回值: {ret_strs}")
+                parts.append("\n".join(lines))
+            return "\n\n".join(parts)
+    except Exception:
+        logger.warning("SQLite API 定义查询失败，降级", exc_info=True)
+        return _fallback_api_text(api_defs)
+
+
+def _format_params(params: list, indent: int = 3) -> str:
+    """递归格式化参数列表为紧凑文本。
+
+    每项: name(type, 必填/可选): desc
+
+    Args:
+        params: 参数列表
+        indent: 缩进 level，用于嵌套子字段前缀
+    """
+    strs = []
+    prefix = "  " * indent
+    for p in params:
+        if not isinstance(p, dict):
+            continue
+        name = p.get("name", "")
+        ptype = p.get("type", "string")
+        required = "必填" if p.get("required") else "可选"
+        desc = p.get("description", "")
+        if desc:
+            item = f"{prefix}{name}({ptype}, {required}): {desc}"
+        else:
+            item = f"{prefix}{name}({ptype}, {required})"
+        strs.append(item)
+        # 递归处理子字段
+        children = p.get("children", [])
+        if children:
+            child_str = _format_params(children, indent + 1)
+            if child_str:
+                strs.append(child_str)
+    return "; ".join(strs)
+
+
+def _fallback_api_text(api_defs: list[dict]) -> str:
+    """降级：直接用 api_defs 字典拼凑（ChromaDB 检索结果可能只有摘要）。"""
+    lines = []
+    for a in api_defs:
+        name = a.get("name", "?")
+        method = a.get("method", "GET")
+        url = a.get("url", "")
+        desc = a.get("description", "")
+        params = a.get("parameters", [])
+        returns = a.get("returns", [])
+        line = f"[{method}] {url} — {name}"
+        if desc:
+            line += f"\n  描述: {desc}"
+        if params:
+            line += f"\n  参数: {_format_params(params)}"
+        if returns:
+            line += f"\n  返回值: {_format_params(returns)}"
+        lines.append(line)
+    return "\n\n".join(lines) if lines else "无"
+
+
 class RetrievalMixin:
     """Phase B 多跳检索 + 测试点分析节点"""
     # ==================== 图外方法（确认后执行） ====================
@@ -42,10 +154,13 @@ class RetrievalMixin:
                 parts.append(d.get("content", d.get("page_content", "")))
         return "\n\n---\n\n".join(parts)
 
-    # ---- 辅助：从 ChromaDB 检索 ----
+    # ---- 辅助：从 ChromaDB 检索（含 SQLite 即时补偿） ----
 
     def _search_product_docs(self, query: str, doc_ids: list[str] | None = None) -> list[dict]:
-        """检索产品文档，无结果返回空列表。"""
+        """检索产品文档，ChromaDB 空/异常时从 SQLite 即时补偿。
+
+        补偿数据源优先级：analyzed_summary > simple_summary > content 前 500 字。
+        """
         try:
             results = self.dual_chroma.search_product_docs(query, k=config.RETRIEVAL_K, doc_ids=doc_ids)
             if results:
@@ -57,10 +172,42 @@ class RetrievalMixin:
                 ]
         except Exception as e:
             logger.warning("ChromaDB product_docs 检索异常: %s", e, exc_info=True)
-        return []
+
+        # ── 即时补偿：ChromaDB 空/异常 → SQLite document_chunks ──
+        logger.info("   ChromaDB 无结果，走 SQLite 即时补偿...")
+        return self._compensate_product_docs_from_sqlite(doc_ids)
+
+    @staticmethod
+    def _compensate_product_docs_from_sqlite(doc_ids: list[str] | None = None) -> list[dict]:
+        """ChromaDB 不可用时，从 SQLite document_chunks 即时补偿产品/Axure 文档。
+
+        补偿数据源优先级：analyzed_summary > simple_summary > content 前 500 字
+        """
+        from database import get_session_ctx
+        from database.models import DocumentChunk
+        docs = []
+        try:
+            with get_session_ctx() as session:
+                q = session.query(DocumentChunk)
+                if doc_ids:
+                    q = q.filter(DocumentChunk.doc_id.in_(doc_ids))
+                chunks = q.order_by(DocumentChunk.chunk_index).limit(config.RETRIEVAL_K).all()
+                for c in chunks:
+                    text = c.analyzed_summary or c.simple_summary or (
+                        c.content[:500] if c.content else "")
+                    docs.append({
+                        "content": text,
+                        "source": c.doc_id,
+                        "type": "product_doc",
+                        "_compensated": True,
+                    })
+            logger.info(f"   SQLite 即时补偿: {len(docs)} 条 document_chunks")
+        except Exception as e:
+            logger.warning("SQLite 即时补偿也失败: %s", e)
+        return docs
 
     def _search_api_defs(self, query: str, doc_ids: list[str] | None = None) -> list[dict]:
-        """检索接口定义，无结果返回空列表。"""
+        """检索接口定义，ChromaDB 空/异常时从 SQLite 即时补偿。"""
         try:
             results = self.dual_chroma.search_api_defs(query, k=config.RETRIEVAL_K, doc_ids=doc_ids)
             if results:
@@ -78,7 +225,40 @@ class RetrievalMixin:
                 return apis
         except Exception as e:
             logger.warning("ChromaDB api_defs 检索异常: %s", e, exc_info=True)
-        return []
+
+        # ── 即时补偿：ChromaDB 空/异常 → SQLite documents ──
+        logger.info("   ChromaDB 无结果，走 SQLite 即时补偿...")
+        return self._compensate_api_defs_from_sqlite(doc_ids)
+
+    @staticmethod
+    def _compensate_api_defs_from_sqlite(doc_ids: list[str] | None = None) -> list[dict]:
+        """ChromaDB 不可用时，从 SQLite documents.api_* 列即时补偿 API 定义。"""
+        import json as _json
+        from database import get_session_ctx
+        from database.models import Document as DocModel
+        apis = []
+        try:
+            with get_session_ctx() as session:
+                q = session.query(DocModel).filter_by(doc_type="api")
+                if doc_ids:
+                    q = q.filter(DocModel.id.in_(doc_ids))
+                records = q.limit(config.RETRIEVAL_K).all()
+                for d in records:
+                    if d.api_url:
+                        api = {
+                            "name": d.api_name, "url": d.api_url,
+                            "method": d.api_method, "description": d.api_description,
+                            "headers": _json.loads(d.api_headers or "[]"),
+                            "parameters": _json.loads(d.api_parameters or "[]"),
+                            "returns": _json.loads(d.api_returns or "[]"),
+                            "annotations": _json.loads(d.api_annotations or "{}"),
+                            "source": d.id, "_compensated": True,
+                        }
+                        apis.append(api)
+            logger.info(f"   SQLite 即时补偿: {len(apis)} 条 API 定义")
+        except Exception as e:
+            logger.warning("SQLite 即时补偿也失败: %s", e)
+        return apis
 
     # ---- 节点 1：意图识别与推荐 ----
 
@@ -372,7 +552,18 @@ class RetrievalMixin:
                 if mod:
                     record = AnalysisOps.get_by_module_id(session, mod.id)
                     if record:
-                        analysis_text = record.analysis_json
+                        # 三步分析文本优先，旧 analysis_json 降级兼容
+                        parts = []
+                        if getattr(record, 'scenario_analysis', None):
+                            parts.append("### 测试场景分析\n" + record.scenario_analysis)
+                        if getattr(record, 'ui_flow_analysis', None):
+                            parts.append("### 页面交互逻辑\n" + record.ui_flow_analysis)
+                        if getattr(record, 'api_analysis', None):
+                            parts.append("### 接口映射分析\n" + record.api_analysis)
+                        if parts:
+                            analysis_text = "\n\n".join(parts)
+                        elif record.analysis_json:
+                            analysis_text = record.analysis_json
                         logger.info(f"   📋 命中 module_analysis（{len(analysis_text)} 字符），走优先路径")
         except Exception:
             logger.warning("   ⚠️ module_analysis 查询失败，走降级路径", exc_info=True)
@@ -388,10 +579,10 @@ class RetrievalMixin:
             )
 
         related_text = ", ".join(state.get("related_modules", [])) or "无"
-        apis_text = "\n".join(
-            f"  - {a.get('name', '?')} ({a.get('method', 'GET')} {a.get('url', '')})"
-            for a in state.get("api_definitions", [])
-        )
+
+        # ── 构造完整 API 定义文本（从 SQLite 查全量，非 ChromaDB 摘要）──
+        apis_text = _build_full_api_defs_text(state.get("api_definitions", []))
+        logger.info(f"   => API 定义文本: {len(apis_text)} 字符")
 
         # 显式控制 thinking 开关
         llm_kwargs = {}
