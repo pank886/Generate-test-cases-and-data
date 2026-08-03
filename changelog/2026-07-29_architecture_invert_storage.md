@@ -378,7 +378,7 @@ Phase 1: Schema 变更（基础设施，无依赖）
   │
   ├── Phase 2: 阶段1 — API 原文入库
   │     │
-  │     └── Phase 6 Step 3 前置依赖（三步分析 Step 3 从 SQLite 读 API 定义）
+  │     └── Phase 4 Step 3 前置依赖（三步分析 Step 3 从 SQLite 读 API 定义）
   │
   ├── Phase 3: 阶段1 — 产品/Axure 原文入库 + 补偿体系
   │     │
