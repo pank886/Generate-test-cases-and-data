@@ -154,13 +154,18 @@ def repair_excel_plan_prompt() -> ChatPromptTemplate:
          "- preconditions 是 PRE ID 数组，无则为 []\n"
          "- mutates_data/is_negative_test 为布尔值\n\n"
          "### 测试场景分析（参考上下文）\n{analysis_section}\n\n"
+         "### 共享前置（参考原始设计，如有错误接口路径需一并修正）\n{shared_pre_section}\n\n"
          "### 完整用例描述（参考原始设计）\n{cases_section}\n\n"
+         "### 模块树\n{module_tree}\n\n"
+         "### 接口定义列表（核对接口路径用）\n{all_apis_info}\n\n"
          "### 失败的行及错误\n{failed_test_cases}\n\n"
          "### 拦截方法提示（以下为被拦截的用例与原因提示，修正时需消除对应问题）\n{block_reasons}\n\n"
          "### 修正要求\n"
          "1. 依据上方「失败的行及错误」与「拦截方法提示」修正失败用例，保持正确字段不变\n"
-         "2. 修正后必须满足上方「字段硬约束」：五字段齐全、步骤/预期条数一致、前置引用有效\n"
-         "3. 禁止 Markdown，只输出 JSON"),
+         "2. 步骤中引用的接口路径必须能在「接口定义列表」中匹配到真实接口；疑似 URL 拼写错误时改为正确的 url\n"
+         "3. 若共享前置（PRE-xxx）的步骤含错误接口路径，在 shared_preconditions 中输出修正后的版本（按原 id 修正即可）\n"
+         "4. 修正后必须满足上方「字段硬约束」：五字段齐全、步骤/预期条数一致、前置引用有效\n"
+         "5. 禁止 Markdown，只输出 JSON"),
         ("human", "请输出修正后的测试用例 JSON：")
     ])
 

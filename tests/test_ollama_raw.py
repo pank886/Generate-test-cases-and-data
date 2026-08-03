@@ -21,6 +21,11 @@ import sys
 import os
 import time
 
+# 本文件是 Ollama 诊断脚本（python tests/test_ollama_raw.py），test_* 函数为
+# main() 调用的普通函数，非 pytest 用例。禁止 pytest 收集，避免把 base_url/model
+# 参数误当 fixtures（2026-08-03）。
+__test__ = False
+
 # Ensure project root is in sys.path for config import
 _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _PROJECT_ROOT not in sys.path:

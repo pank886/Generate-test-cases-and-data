@@ -212,7 +212,7 @@ class TestNoSqliteRecord:
 class TestChromaRetrySuccess:
     """_chroma_db 为 None 时创建延迟任务，模拟 5 分钟后重试成功。"""
 
-    @patch("web.app._chroma_db", None)
+    @patch("web.state._chroma_db", None)  # 2026-08-03：files.py 从 web.state 导入，patch 原 web.app 无效
     @patch("config.CHROMA_RETRY_DELAY", 0.1)  # 100ms，不等 5 分钟
     def test_retry_succeeds(self, client):
         """ChromaDB 不可用 → 延迟重试 → 成功。"""
@@ -246,26 +246,34 @@ class TestChromaRetrySuccess:
 class TestChromaRetryFail:
     """_chroma_db 为 None → 延迟重试也失败 → 输出日志和控制台。"""
 
-    @patch("web.app._chroma_db", None)
+    @patch("web.state._chroma_db", None)  # 2026-08-03：files.py 从 web.state 导入，patch 原 web.app 无效
     @patch("config.CHROMA_RETRY_DELAY", 0.1)
     @patch("agent_components.dual_chroma.get_chroma_db", side_effect=Exception("Ollama 未启动"))
-    def test_retry_fails_with_console_output(self, mock_get_db, client, capsys):
-        """ChromaDB 不可用 → 延迟重试也失败 → print 输出到控制台。"""
+    def test_retry_fails_with_console_output(self, mock_get_db, client, caplog):
+        """ChromaDB 不可用 → 延迟重试也失败 → 记录失败日志。
+
+        2026-08-03：改用 caplog 捕获日志。TestClient 在独立线程跑应用，
+        print 发生在应用线程（sys.stdout 持旧 fd），capsys/capfd 均捕获不到；
+        logger 记录跨线程可被 caplog 捕获。
+        """
+        import logging
+        caplog.set_level(logging.INFO)
+
         _create_doc("chroma_fail.pdf")
 
         resp = _delete_file(client, "chroma_fail.pdf")
         assert resp.status_code == 200
 
-        # 等待延迟任务执行
+        # 等待延迟任务执行（应用线程的 asyncio.create_task 按真实时间运行）
         import asyncio
         try:
             loop = asyncio.get_event_loop()
             loop.run_until_complete(asyncio.sleep(0.3))
         except RuntimeError:
-            # 事件循环可能已在运行，改用 create_task
             pass
 
-        # 捕获 print 输出
-        captured = capsys.readouterr()
-        # 验证控制台输出了失败信息
-        assert "ChromaDB" in captured.out or "延迟删除" in captured.out or "失败" in captured.out
+        # 验证日志记录了失败信息（同步"ChromaDB 不可用" + 异步"延迟删除失败"）
+        text = caplog.text
+        assert "ChromaDB 不可用" in text or "ChromaDB 延迟删除失败" in text, (
+            f"应记录 ChromaDB 不可用/延迟删除失败日志，实际: {text[:500]}"
+        )

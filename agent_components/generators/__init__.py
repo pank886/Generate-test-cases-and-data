@@ -73,16 +73,21 @@ class GenerationMixin:
         last_error = None
         for attempt in range(1 + config.YAML_REPAIR_ROUNDS):
             try:
-                result = bound_llm.invoke(prompt.format_messages(
-                    data_factory_methods=factory_methods_text,
-                    all_apis_info=api_defs_json,
-                    excel_rows=excel_rows_json,
-                    module_tree=module_tree_json,
-                    product_docs=product_docs_json,
-                    context_note=context_note,
-                    user_context=user_ctx,
-                ))
-                raw_text = result.content if hasattr(result, "content") else str(result)
+                # 空 content 走公共方法 _invoke_think（max_retries=0：外层已有重试循环，避免双重重试）
+                raw_text = self._invoke_think(
+                    bound_llm,
+                    prompt.format_messages(
+                        data_factory_methods=factory_methods_text,
+                        all_apis_info=api_defs_json,
+                        excel_rows=excel_rows_json,
+                        module_tree=module_tree_json,
+                        product_docs=product_docs_json,
+                        context_note=context_note,
+                        user_context=user_ctx,
+                    ),
+                    max_retries=0,
+                    label="generate_dependency_map",
+                )
 
                 # 提取 JSON（LLM 可能在 JSON 外面包了 markdown 代码块）
                 json_text = raw_text.strip()
@@ -552,8 +557,9 @@ class GenerationMixin:
 
         llm_kwargs = {"extra_body": {"thinking": {"type": "enabled"}}}
         bound_llm = self.llm.bind(**llm_kwargs)
-        analysis_result = bound_llm.invoke(think_prompt.format_messages(**prompt_vars))
-        analysis = analysis_result.content if hasattr(analysis_result, "content") else str(analysis_result)
+        # 空 content 有限重试（公共方法 _invoke_think，复用同一输入重试 config.MAX_RETRIES 次）
+        analysis = self._invoke_think(
+            bound_llm, think_prompt.format_messages(**prompt_vars), label=node_label)
 
         # Phase C 思考全文与 Phase B 同规格写入 thinking_trace.log
         log_thinking(node_label, case_label, analysis, prompt_label=prompt_label)

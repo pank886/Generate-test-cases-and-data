@@ -591,7 +591,9 @@ class RetrievalMixin:
         else:
             llm_kwargs["extra_body"] = {"thinking": {"type": "disabled"}}
         bound_llm = self.llm.bind(temperature=0.6, **llm_kwargs)
-        result = bound_llm.invoke(
+        # 空 content 有限重试（公共方法 _invoke_think，复用同一输入，重试 config.MAX_RETRIES 次）
+        analysis = self._invoke_think(
+            bound_llm,
             prompt.format_messages(
                 user_context=state["original_input"],
                 module_analysis=analysis_text or "无",
@@ -599,8 +601,8 @@ class RetrievalMixin:
                 related_docs=related_text,
                 api_definitions=apis_text,
             ),
+            label="analyze_test_points_raw",
         )
-        analysis = result.content if hasattr(result, "content") else str(result)
         logger.info(f"   => 测试场景分析完成（{len(analysis)} 字符）")
         from observability import log_thinking
         log_thinking("analyze_test_points_raw", state["original_input"], analysis, prompt_label="analyze_test_points_raw_prompt")

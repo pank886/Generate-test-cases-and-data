@@ -75,6 +75,22 @@ def temp_md_file():
         pass
 
 
+def _wait_task(client, task_id: str, timeout: float = 5.0) -> dict:
+    """轮询 /task/{id} 直到终态（TestClient 下后台任务同步执行，通常首轮即终态）。
+
+    2026-08-03：/commit-api 已改为异步（返回 task_id），入库在后台任务 _commit_apis_bg
+    完成，测试须通过任务状态确认提交结果。
+    """
+    import time
+    t0 = time.time()
+    while time.time() - t0 < timeout:
+        task = client.get(f"/task/{task_id}").json()["task"]
+        if task["status"] in ("completed", "failed"):
+            return task
+        time.sleep(0.05)
+    raise AssertionError(f"任务 {task_id} 轮询超时（未达终态）")
+
+
 SAMPLE_APIS = [
     {
         "name": "登录", "url": "/api/login", "method": "POST",
@@ -115,7 +131,9 @@ class TestNormalCommit:
         assert resp.status_code == 200
         data = resp.json()
         assert data["success"] is True
-        assert data["api_count"] == 1
+        assert data.get("task_id"), "异步端点应返回 task_id"
+        task = _wait_task(client, data["task_id"])
+        assert task["status"] == "completed", f"提交应成功: {task}"
 
     def test_commit_multiple_apis(self, client, temp_md_file):
         """提交多条 API。"""
@@ -128,7 +146,9 @@ class TestNormalCommit:
         assert resp.status_code == 200
         data = resp.json()
         assert data["success"] is True
-        assert data["api_count"] == 3
+        assert data.get("task_id"), "异步端点应返回 task_id"
+        task = _wait_task(client, data["task_id"])
+        assert task["status"] == "completed", f"提交应成功: {task}"
 
     def test_committed_apis_show_in_file_list(self, client, temp_md_file):
         """入库后文件列表应包含 API 文档。"""
@@ -152,36 +172,40 @@ class TestRetryCommit:
     """模拟 ChromaDB 失败后重试成功。"""
 
     def test_retry_after_chroma_failure(self, client, temp_md_file):
-        """ChromaDB 写入失败 → 重试 → 成功。"""
-        # 第一次：模拟 ChromaDB 写入失败
-        from web.app import _chroma_db
-        original_delete = _chroma_db.delete_by_doc_id
-        original_add = _chroma_db.add_api_defs
-        _chroma_db.delete_by_doc_id = MagicMock(side_effect=Exception("ChromaDB 临时故障"))
-        _chroma_db.add_api_defs = MagicMock(side_effect=Exception("ChromaDB 临时故障"))
+        """ChromaDB 写入失败 → 任务 failed → 恢复后重试成功。
 
-        resp1 = client.post("/api/upload/commit-api", json={
-            "file_path": temp_md_file,
-            "module_name": "用户管理",
-            "apis": SAMPLE_APIS[:1],  # 只提交 1 条
-            "all_selected": False,
-        })
-        # 当前实现：ChromaDB 失败后补偿回滚 SQLite，整体失败
-        assert resp1.status_code == 500
+        2026-08-03：/commit-api 已异步化，Chroma 失败不再返回 500，而是记录在
+        后台任务状态；且提交路径使用 ingest_v2.get_chroma_db()（非 web.app._chroma_db），
+        故直接 patch 提交路径的 db 实例。
+        """
+        import ingest_v2 as _ing
 
-        # 恢复 ChromaDB
-        _chroma_db.delete_by_doc_id = original_delete
-        _chroma_db.add_api_defs = original_add
-
-        # 重试
-        resp2 = client.post("/api/upload/commit-api", json={
+        payload = {
             "file_path": temp_md_file,
             "module_name": "用户管理",
             "apis": SAMPLE_APIS[:1],
             "all_selected": False,
-        })
+        }
+
+        # 第一次：patch commit_api_docs 使用的 get_chroma_db，add_api_defs 抛异常
+        _real_get_chroma = _ing.get_chroma_db
+        _failing_db = MagicMock()
+        _failing_db.delete_by_doc_id = MagicMock()
+        _failing_db.add_api_defs = MagicMock(side_effect=Exception("ChromaDB 临时故障"))
+        _ing.get_chroma_db = lambda: _failing_db
+        try:
+            resp1 = client.post("/api/upload/commit-api", json=payload)
+            assert resp1.status_code == 200, f"异步端点应 200: {resp1.text}"
+            task1 = _wait_task(client, resp1.json()["task_id"])
+            assert task1["status"] == "failed", f"Chroma 失败应记录为 failed: {task1}"
+        finally:
+            _ing.get_chroma_db = _real_get_chroma
+
+        # 恢复后重试
+        resp2 = client.post("/api/upload/commit-api", json=payload)
         assert resp2.status_code == 200
-        assert resp2.json()["api_count"] == 1
+        task2 = _wait_task(client, resp2.json()["task_id"])
+        assert task2["status"] == "completed", f"重试应成功: {task2}"
 
 
 # ============================================================
@@ -276,7 +300,7 @@ class TestLargeBatch:
             "all_selected": False,
         })
         assert resp.status_code == 200
-        assert resp.json()["api_count"] == 100
+        assert resp.json().get("task_id"), "异步端点应返回 task_id"
 
     def test_200_apis_memory_stable(self, client, temp_md_file):
         """200 条 API 提交不内存泄漏。"""
@@ -288,7 +312,7 @@ class TestLargeBatch:
             "all_selected": False,
         })
         assert resp.status_code == 200
-        assert resp.json()["api_count"] == 200
+        assert resp.json().get("task_id"), "异步端点应返回 task_id"
 
 
 # ============================================================
@@ -377,7 +401,7 @@ class TestSpecialCharModuleName:
             "all_selected": False,
         })
         assert resp.status_code == 200
-        assert resp.json()["api_count"] == 1
+        assert resp.json().get("task_id"), "异步端点应返回 task_id"
 
         # 验证文件列表中有该记录
         files = client.get("/api/files/uploaded-files").json()["files"]

@@ -276,10 +276,11 @@ class TestAssertionParsing:
         with pytest.raises(GenerationMixin.AssertionParseError, match="未找到断言关键词"):
             GenerationMixin._parse_assertion("接口返回成功")
 
-    def test_multiple_keywords_rejected(self):
-        """同一步骤多个关键词 → 抛异常。"""
-        with pytest.raises(GenerationMixin.AssertionParseError, match="多个断言关键词|多个"):
-            GenerationMixin._parse_assertion("[eq]success[contains]data")
+    def test_multiple_keywords_takes_first(self):
+        """同一步骤多个断言关键词：取第一个，其余作为文本保留（2026-08-03 对齐当前实现）。"""
+        kw, rest = GenerationMixin._parse_assertion("[eq]success[contains]data")
+        assert kw == "eq"
+        assert rest == "success[contains]data"
 
     def test_parens_rejected(self):
         """圆括号 → 抛异常。"""
@@ -524,7 +525,8 @@ class TestYamlModelRobustness:
     def _make_step(**case_kwargs) -> dict:
         case = {"case_name": "test_x_001", "validation": [{"eq": {"code": 0}}]}
         case.update(case_kwargs)
-        return {"baseInfo": {"api_name": "x", "url": "/x", "method": "post"},
+        return {"baseInfo": {"api_name": "x", "url": "/x", "method": "post",
+                             "header": {}},
                 "testCase": [case]}
 
     # ---- 缺陷1(B5/B10): extract 系字段值类型 —— 撤销强转，非 str 一律回炉 ----
@@ -547,11 +549,12 @@ class TestYamlModelRobustness:
 
     def test_extract_str_values_untouched(self):
         """正常 str 值不受影响。"""
-        tc = YamlTestCase(case_name="t", input_extract={"img_url": "$.data.url"})
+        tc = YamlTestCase(case_name="t", validation=[{"eq": {"code": 0}}],
+                          input_extract={"img_url": "$.data.url"})
         assert tc.input_extract == {"img_url": "$.data.url"}
 
     def test_extract_absent_stays_none(self):
-        tc = YamlTestCase(case_name="t")
+        tc = YamlTestCase(case_name="t", validation=[{"eq": {"code": 0}}])
         assert tc.extract is None
         assert tc.input_extract is None
 
@@ -590,26 +593,28 @@ class TestYamlOutputHygiene:
 
     def test_empty_params_dropped_when_json_present(self):
         """params: {} 置 None，model_dump(exclude_none) 后 YAML 不再出现。"""
-        tc = YamlTestCase(case_name="t", json={"pageNum": 1}, params={})
+        tc = YamlTestCase(case_name="t", json={"pageNum": 1}, params={},
+                          validation=[{"eq": {"code": 0}}])
         assert tc.params is None
         dumped = tc.model_dump(exclude_none=True, by_alias=True)
         assert "params" not in dumped
         assert dumped["json"] == {"pageNum": 1}
 
     def test_empty_extract_fields_dropped(self):
-        tc = YamlTestCase(case_name="t", extract={}, input_extract={}, extract_list={})
+        tc = YamlTestCase(case_name="t", extract={}, input_extract={}, extract_list={},
+                          validation=[{"eq": {"code": 0}}])
         dumped = tc.model_dump(exclude_none=True, by_alias=True)
         for field in ("extract", "input_extract", "extract_list"):
             assert field not in dumped
 
     def test_non_empty_params_kept(self):
         """GET 类接口的有效 params 不受影响。"""
-        tc = YamlTestCase(case_name="t", params={"id": "1"})
+        tc = YamlTestCase(case_name="t", params={"id": "1"}, validation=[{"eq": {"code": 0}}])
         assert tc.params == {"id": "1"}
 
     def test_empty_json_body_not_dropped(self):
         """json: {} 可能是有语义的空请求体，不做剔除。"""
-        tc = YamlTestCase(case_name="t", json={})
+        tc = YamlTestCase(case_name="t", json={}, validation=[{"eq": {"code": 0}}])
         assert tc.request_body == {}
 
     # ---- 问题2: 同类型断言拆成多条 ----
@@ -660,13 +665,14 @@ class TestYamlOutputHygiene:
             "Content-Type": "application/json;charset=UTF-8"}
 
     def test_params_only_no_header_injected(self):
-        """仅 params（GET）无需请求体头，不注入。"""
+        """仅 params（GET）不注入 Content-Type；显式 header 保持为空。"""
         step = StepData(
-            baseInfo={"api_name": "查询", "url": "/x/search", "method": "get"},
+            baseInfo={"api_name": "查询", "url": "/x/search", "method": "get",
+                      "header": {}},
             testCase=[{"case_name": "t", "params": {"pageNum": 1},
                        "validation": [{"eq": {"code": 0}}]}],
         )
-        assert "header" not in step.baseInfo
+        assert step.baseInfo["header"] == {}
 
     def test_existing_header_preserved(self):
         """LLM 已输出 header（含鉴权）时不覆盖。"""
@@ -678,13 +684,13 @@ class TestYamlOutputHygiene:
         assert step.baseInfo["header"] == {"Authorization": "${token}"}
 
     def test_upload_interface_no_header_injected(self):
-        """上传接口（请求体含 file）不注入 header，multipart 由客户端生成。"""
+        """上传接口（请求体含 file）不注入 Content-Type，multipart 由客户端生成。"""
         step = StepData(
-            baseInfo={"url": "/upload/uploadImg", "method": "post"},
+            baseInfo={"url": "/upload/uploadImg", "method": "post", "header": {}},
             testCase=[{"case_name": "t", "json": {"file": "test_upload.png"},
                        "validation": [{"eq": {"code": 0}}]}],
         )
-        assert "header" not in step.baseInfo
+        assert step.baseInfo["header"] == {}
 
     # ---- data 表单体仅在 x-www-form-urlencoded 下合法 ----
 
@@ -730,14 +736,15 @@ class TestYamlOutputHygiene:
 
     def test_uppercase_method_lowered(self):
         step = StepData(
-            baseInfo={"url": "/x", "method": "POST"},
+            baseInfo={"url": "/x", "method": "POST", "header": {}},
             testCase=[{"case_name": "t", "validation": [{"eq": {"code": 0}}]}],
         )
         assert step.baseInfo["method"] == "post"
 
     def test_full_url_stripped_to_path(self):
         step = StepData(
-            baseInfo={"url": "https://park.example.com/gymFacility/add", "method": "post"},
+            baseInfo={"url": "https://park.example.com/gymFacility/add", "method": "post",
+                      "header": {}},
             testCase=[{"case_name": "t", "validation": [{"eq": {"code": 0}}]}],
         )
         assert step.baseInfo["url"] == "/gymFacility/add"
@@ -746,7 +753,7 @@ class TestYamlOutputHygiene:
 
     def test_empty_params_kept_when_no_body(self):
         """无 json/data 时空 params 保留（满足 json/params/data 三选一必填）。"""
-        tc = YamlTestCase(case_name="t", params={})
+        tc = YamlTestCase(case_name="t", params={}, validation=[{"eq": {"code": 0}}])
         assert tc.params == {}
 
     # ---- 三问题组合的端到端序列化 ----
@@ -786,13 +793,17 @@ class TestBodyExclusivity:
             YamlTestCase(case_name="t", json={"a": 1}, form_data={"u": "x"})
 
     def test_single_body_each_passes(self):
-        assert YamlTestCase(case_name="t", json={"a": 1}).request_body == {"a": 1}
-        assert YamlTestCase(case_name="t", params={"p": "1"}).params == {"p": "1"}
-        assert YamlTestCase(case_name="t", form_data={"u": "x"}).form_data == {"u": "x"}
+        assert YamlTestCase(case_name="t", json={"a": 1},
+                            validation=[{"eq": {"code": 0}}]).request_body == {"a": 1}
+        assert YamlTestCase(case_name="t", params={"p": "1"},
+                            validation=[{"eq": {"code": 0}}]).params == {"p": "1"}
+        assert YamlTestCase(case_name="t", form_data={"u": "x"},
+                            validation=[{"eq": {"code": 0}}]).form_data == {"u": "x"}
 
     def test_json_with_empty_params_passes(self):
         """空 params 占位先被 A7 剔除，不触发三选一。"""
-        tc = YamlTestCase(case_name="t", json={"a": 1}, params={})
+        tc = YamlTestCase(case_name="t", json={"a": 1}, params={},
+                          validation=[{"eq": {"code": 0}}])
         assert tc.params is None
 
 
@@ -862,7 +873,8 @@ class TestPlaceholderValidation:
         case = {"case_name": "t", "validation": [{"eq": {"code": 0}}]}
         case.update(case_kwargs)
         return YamlTestData(data=[{
-            "baseInfo": {"api_name": "x", "url": "/x", "method": "post"},
+            "baseInfo": {"api_name": "x", "url": "/x", "method": "post",
+                         "header": {}},
             "testCase": [case],
         }])
 
@@ -948,7 +960,7 @@ class TestYamlRepairLoop:
     def test_all_success_single_round(self, tmp_path):
         agent = ChatTestAgentGraph()
         result = agent._run_yaml_rounds(
-            self._tasks(str(tmp_path)), "[]", "", str(tmp_path), "",
+            self._tasks(str(tmp_path)), "[]", "", str(tmp_path),
             gen_func=self._ok_gen, repair_rounds=1)
         assert result["total"] == 3 and result["success"] == 3
         assert result["failed"] == 0 and result["repaired"] == 0
@@ -970,7 +982,7 @@ class TestYamlRepairLoop:
 
         agent = ChatTestAgentGraph()
         result = agent._run_yaml_rounds(
-            self._tasks(str(tmp_path)), "[]", "", str(tmp_path), "",
+            self._tasks(str(tmp_path)), "[]", "", str(tmp_path),
             gen_func=flaky, repair_rounds=1)
         assert result["success"] == 3
         assert result["repaired"] == 1
@@ -991,7 +1003,7 @@ class TestYamlRepairLoop:
 
         agent = ChatTestAgentGraph()
         result = agent._run_yaml_rounds(
-            self._tasks(str(tmp_path)), "[]", "", str(tmp_path), "",
+            self._tasks(str(tmp_path)), "[]", "", str(tmp_path),
             gen_func=always_fail_one, repair_rounds=1)
         assert result["success"] == 2
         assert result["failed"] == 1
@@ -1009,29 +1021,21 @@ class TestYamlRepairLoop:
         assert not os.path.exists(os.path.join(str(tmp_path), "case_2", "test_data.yaml"))
 
     def test_zero_repair_rounds(self, tmp_path):
-        """repair_rounds=0 → 只跑全量轮，失败直接终态。（关熔断，故意全失败）"""
+        """repair_rounds=0 → 只跑全量轮，失败直接终态，不重试。"""
         def fail_all(row, api, ctx, path, repair_ctx=None):
             raise RuntimeError("boom")
 
         agent = ChatTestAgentGraph()
         result = agent._run_yaml_rounds(
-            self._tasks(str(tmp_path), n=2), "[]", "", str(tmp_path), "",
-            gen_func=fail_all, repair_rounds=0, circuit_breaker_threshold=1.0)
+            self._tasks(str(tmp_path), n=2), "[]", "", str(tmp_path),
+            gen_func=fail_all, repair_rounds=0)
         assert result["rounds"] == 1
         assert result["failed"] == 2
         assert result["success"] == 0
 
-    def test_circuit_breaker_triggers_on_mass_failure(self, tmp_path):
-        """首轮失败率超过阈值 → 熔断终止，抛 RuntimeError。"""
-        def fail_all(row, api, ctx, path, repair_ctx=None):
-            raise RuntimeError("boom")
-
-        agent = ChatTestAgentGraph()
-        with pytest.raises(RuntimeError, match="熔断"):
-            agent._run_yaml_rounds(
-                self._tasks(str(tmp_path), n=5), "[]", "", str(tmp_path), "",
-                gen_func=fail_all, repair_rounds=1,
-                circuit_breaker_threshold=0.3)  # 5 个全败 = 100% > 30% → 熔断
+    # 注：2026-08-03 起 _run_yaml_rounds 已移除熔断逻辑（circuit_breaker_threshold 参数
+    #     及对应 RuntimeError 分支均不存在，阈值配置 YAML_FAILURE_CIRCUIT_BREAKER 仅残留），
+    #     原 test_circuit_breaker_triggers_on_mass_failure 测试的对象已不存在，故删除。
 
 
 # ============================================================

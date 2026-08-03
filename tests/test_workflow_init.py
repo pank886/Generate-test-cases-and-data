@@ -91,18 +91,22 @@ class TestGlobalDeclaration:
         )
 
     def test_phase_c_graph_in_global(self):
-        """_phase_c_graph 在 lifespan 的 global 声明中。"""
+        """工作流图经 _state 对象在 lifespan 中赋值（2026-08-03 起不再用模块级 global）。"""
         func = self._get_lifespan_ast()
-        global_vars = set()
+        state_attrs = set()
         for node in ast.walk(func):
-            if isinstance(node, ast.Global):
-                global_vars.update(node.names)
+            if isinstance(node, ast.Assign):
+                for target in node.targets:
+                    # 支持元组赋值（如 `_state.a, _state.b = build_workflow()`）
+                    targets = target.elts if isinstance(target, ast.Tuple) else [target]
+                    for t in targets:
+                        if (isinstance(t, ast.Attribute)
+                                and isinstance(t.value, ast.Name)
+                                and t.value.id == "_state"):
+                            state_attrs.add(t.attr)
 
-        assert "_phase_c_graph" in global_vars, (
-            "_phase_c_graph 必须在 lifespan 的 global 声明中"
-        )
-        assert "_phase_c_components" in global_vars, (
-            "_phase_c_components 必须在 lifespan 的 global 声明中"
+        assert {"_phase_b_graph", "_phase_b_components"} <= state_attrs, (
+            f"_state 必须在 lifespan 中赋值 _phase_b_graph/_phase_b_components，实际: {state_attrs}"
         )
 
 
@@ -113,13 +117,13 @@ class TestGlobalDeclaration:
 class TestPhaseCInitialized:
     """验证 lifespan 执行后 _phase_c_graph 已被正确赋值。"""
 
-    def test_phase_c_graph_not_none(self):
-        """_phase_c_graph 应被 build_new_workflow() 初始化。"""
+    def test_workflow_graph_builds(self):
+        """build_workflow()（Phase B 图）应正常构建返回 graph + components。"""
         # 直接测试函数本身可用
-        from agent_components.graph_builder import build_new_workflow
-        graph, components = build_new_workflow()
-        assert graph is not None, "build_new_workflow() 应返回 graph"
-        assert components is not None, "build_new_workflow() 应返回 components"
+        from agent_components.graph_builder import build_workflow
+        graph, components = build_workflow()
+        assert graph is not None, "build_workflow() 应返回 graph"
+        assert components is not None, "build_workflow() 应返回 components"
 
 
 # ============================================================
@@ -155,7 +159,7 @@ class TestWorkflowEndpointErrors:
             "r", encoding="utf-8",
         ) as f:
             content = f.read()
-        assert "Phase C 工作流未初始化" in content, (
+        assert "Phase B 工作流未初始化" in content, (
             "未初始化时应返回明确错误消息"
         )
 

@@ -207,13 +207,13 @@ async def lifespan(app: FastAPI):
     except Exception:
         print(f"[startup] Ollama 未响应，尝试自动启动（CPU 模式）...")
         import subprocess as _sp, os as _os
-        _env = {**_os.environ, "CUDA_VISIBLE_DEVICES": ""}
+        _ollama_env = {**_os.environ, "CUDA_VISIBLE_DEVICES": ""}  # 局部变量，勿与模块级 _env（Jinja2）重名
         try:
             if _os.name == "nt":
-                _sp.Popen(["ollama", "serve"], env=_env,
+                _sp.Popen(["ollama", "serve"], env=_ollama_env,
                           creationflags=_sp.CREATE_NO_WINDOW)
             else:
-                _sp.Popen(["ollama", "serve"], env=_env,
+                _sp.Popen(["ollama", "serve"], env=_ollama_env,
                           stdout=_sp.DEVNULL, stderr=_sp.DEVNULL)
             print("[startup] 已触发 Ollama 启动，等待就绪...")
             for _ in range(8):

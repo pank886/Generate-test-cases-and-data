@@ -1193,9 +1193,18 @@ def process_axure_zip(file_path: str, module_name: str = None, progress_cb=None)
         # 5a. 写入 SQLite document_chunks 表（含 page_name）
         cb(75, "写入文档块...")
         doc_id = _safe_doc_id("axure", file_name, module)
-        for i, chunk_text in enumerate(chunks):
-            page = _extract_page_name(chunk_text)
-            _save_single_chunk(doc_id, i, chunk_text, page_name=page)
+        # to_product_doc_chunks 返回 list[dict]（{content, page_name}），统一解包为字符串
+        # （2026-08-03 修复：原代码把 dict 当 str 传给 _extract_page_name → re 报
+        #   "expected string or bytes-like object, got 'dict'"）
+        chunk_texts = [
+            c.get("content", c) if isinstance(c, dict) else c for c in chunks
+        ]
+        chunk_pages = [
+            c.get("page_name", "") if isinstance(c, dict) else _extract_page_name(c)
+            for c in chunks
+        ]
+        for i, content in enumerate(chunk_texts):
+            _save_single_chunk(doc_id, i, content, page_name=chunk_pages[i])
 
         # 5b. 写入 documents 元数据
         _save_to_sqlite(
@@ -1203,16 +1212,16 @@ def process_axure_zip(file_path: str, module_name: str = None, progress_cb=None)
             file_name=file_name,
             file_type="zip",
             doc_type="axure",
-            chunk_count=len(chunks),
+            chunk_count=len(chunk_texts),
             module_name=module,
         )
         logger.info(f"   [SQLite] document_chunks + documents 入库完成 (doc_id={doc_id})")
 
         # 6. 批量生成 simple_summary（同步等待，失败写补偿任务）
         cb(80, "AI 生成摘要...")
-        _generate_batch_summaries(doc_id, chunks, file_name,
+        _generate_batch_summaries(doc_id, chunk_texts, file_name,
                                    progress_cb=cb,
-                                   page_name=_extract_page_name(chunks[0]) if chunks else "")
+                                   page_name=chunk_pages[0] if chunk_texts else "")
 
         # 7. 写入 ChromaDB（检索文本，失败时补偿回滚 SQLite）
         cb(90, "向量化入库中...")

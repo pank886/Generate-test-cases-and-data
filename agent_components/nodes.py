@@ -226,21 +226,23 @@ class ChatTestAgentGraph(RetrievalMixin, GenerationMixin):
         # ── 2. 构造 prompt ──
         prompt = self.prompt_factory.generate_excel_plan_thinking()
 
-        # ── 3. thinking + json_object 调用 ──
+        # ── 3. thinking + json_object 调用（空 content 有限重试，走公共方法）──
+        #    2026-08-03 P2：deepseek-v4-flash 偶发返回空 content，复用同一份输入重试
+        #    config.MAX_RETRIES 次（默认 2），仍失败抛异常 → 处理节点 requires_review。
         _think_llm = self.llm.bind(
             temperature=0.4,
             response_format={"type": "json_object"},
             extra_body={"thinking": {"type": "enabled"}},
         )
-        _raw = _think_llm.invoke(prompt.format_messages(
+        _messages = prompt.format_messages(
             json_schema=json.dumps(
                 ExcelPlanV2.model_json_schema(), ensure_ascii=False, indent=2),
             module_analysis=analysis_text or "（无预分析，请根据接口定义自行分析）",
             api_definitions=apis_text,
             related_docs=related_text,
             user_context=user_ctx,
-        ))
-        _text = _raw.content if hasattr(_raw, "content") else str(_raw)
+        )
+        _text = self._invoke_think(_think_llm, _messages, label="generate_plan_thinking")
 
         # ── 4. 解析 ──
         plan = ExcelPlanV2.model_validate(json.loads(_text))
@@ -319,6 +321,13 @@ class ChatTestAgentGraph(RetrievalMixin, GenerationMixin):
         api_full_for_snapshot = state.get("api_full_for_snapshot") or api_full_for_snapshot
         module_tree_json = state.get("module_tree_json") or module_tree_json
 
+        # URL 有效性校验用真实接口路径模板（含 {xxx} 路径参数），2026-08-03 建议 3
+        api_urls = [
+            str(d.get("url", "")).strip()
+            for d in (state.get("api_definitions") or [])
+            if d.get("url")
+        ]
+
         output_dir = None
         plan = None
         failed_details: list[tuple[int, dict, list[str]]] = []
@@ -348,8 +357,8 @@ class ChatTestAgentGraph(RetrievalMixin, GenerationMixin):
                     }
                 all_shared_pres = plan.shared_preconditions
 
-                # 首轮校验全部用例（校验收敛：ExcelPlanValidator，含 7 类错误聚合）
-                _vr = ExcelPlanValidator.validate(plan, test_analysis)
+                # 首轮校验全部用例（校验收敛：ExcelPlanValidator，含 8 类错误聚合 + URL 有效性）
+                _vr = ExcelPlanValidator.validate(plan, test_analysis, api_urls=api_urls)
                 _new_failed = _vr.failed_details
                 all_confirmed = _vr.all_confirmed
 
@@ -426,8 +435,15 @@ class ChatTestAgentGraph(RetrievalMixin, GenerationMixin):
 
                 # 重试校验：只接受 ID 匹配失败行的修复
                 pre_ids_all = {p.id for p in all_shared_pres}
+                # 修复轮共享前置按 ID 合并回 all_shared_pres（如 URL 修正落地，2026-08-03 建议 3）
                 for p in plan.shared_preconditions:
                     pre_ids_all.add(p.id)
+                    _pre_idx = next(
+                        (i for i, x in enumerate(all_shared_pres) if x.id == p.id), None)
+                    if _pre_idx is not None:
+                        all_shared_pres[_pre_idx] = p
+                    else:
+                        all_shared_pres.append(p)
 
                 _new_failed = []
                 fixed_ids = set()
@@ -447,8 +463,8 @@ class ChatTestAgentGraph(RetrievalMixin, GenerationMixin):
                         logger.warning(f"   ⚠️ 重试批次内重复 TC {tc.id}，已丢弃")
                         continue
                     _seen_in_retry.add(tc.id)
-                    # 单用例校验（校验收敛：ExcelPlanValidator.check_case）
-                    errs = ExcelPlanValidator.check_case(tc, pre_ids_all)
+                    # 单用例校验（校验收敛：ExcelPlanValidator.check_case，含 URL 有效性）
+                    errs = ExcelPlanValidator.check_case(tc, pre_ids_all, api_urls=api_urls)
                     if errs:
                         _new_failed.append((0, tc.model_dump(), errs))
                     else:
@@ -456,11 +472,17 @@ class ChatTestAgentGraph(RetrievalMixin, GenerationMixin):
                         fixed_ids.add(tc.id)
 
                 # 仍未修复的失败行：保留在 failed_details 中
-                _still_failed = [
-                    (f_idx, f_dict, f_errs)
-                    for f_idx, f_dict, f_errs in failed_details
-                    if f_dict.get("id", "") not in fixed_ids
-                ]
+                #   - 已修复的 TC 移除
+                #   - PRE 条目（共享前置 URL 错误）：修复轮已输出修正版并按 ID 合并，
+                #     若该前置步骤 URL 现已命中真实接口 → 视为修复，移除
+                _still_failed = []
+                for f_idx, f_dict, f_errs in failed_details:
+                    if f_dict.get("id", "") in fixed_ids:
+                        continue
+                    if f_dict.get("id", "").startswith("PRE-") and api_urls:
+                        if not ExcelPlanValidator.check_urls(f_dict.get("steps", ""), api_urls):
+                            continue
+                    _still_failed.append((f_idx, f_dict, f_errs))
                 failed_details = _still_failed + _new_failed
                 # 去重：同一 ID 在旧版和新版同时存在时保留最新版
                 _seen_ids = {}
@@ -482,6 +504,9 @@ class ChatTestAgentGraph(RetrievalMixin, GenerationMixin):
             pre_ids = {p.id for p in all_shared_pres}
             valid_cases = [tc for tc in all_confirmed]
             for f_idx, f_dict, f_errs in failed_details:
+                if f_dict.get("id", "").startswith("PRE-"):
+                    # 共享前置失败行（URL 未修复）不参与用例落盘；仍计入 fail_warn 提示人工审查
+                    continue
                 orphan = [p for p in (f_dict.get("preconditions") or []) if p not in pre_ids]
                 if orphan:
                     continue
@@ -991,6 +1016,43 @@ class ChatTestAgentGraph(RetrievalMixin, GenerationMixin):
         """
         from data_factory.registry import render_for_prompt
         return render_for_prompt()
+
+    def _invoke_think(self, bound_llm, messages, max_retries: int | None = None,
+                      label: str = "LLM") -> str:
+        """通用 thinking 调用：LLM 返回空 content 时复用同一输入有限重试。
+
+        2026-08-03 P2：deepseek-v4-flash 偶发返回空 content（json.loads 报
+        "Expecting value: line 1 column 1 (char 0)"）。空 content 时后续解析/校验
+        都拿不到内容，故在此统一监测：复用同一份 messages 重试，重试耗尽仍空则抛错。
+
+        所有涉及 LLM 输出的节点（thinking 模式手动解析 content 的节点）统一走此方法：
+          - content 为空 → 重试（默认 config.MAX_RETRIES 次 = 重试 2 次）
+          - content 非空 → 立即返回文本（解析/校验失败由调用方按既有逻辑处理）
+          - 已有外层重试循环的调用方传 max_retries=0，避免双重重试
+
+        Args:
+            bound_llm: 已 bind 的 LLM 客户端（含 temperature / thinking / json 配置）
+            messages: 一次构造好的 prompt 消息列表（重试时原样复用，即"复用概要输入"）
+            max_retries: 空响应重试次数，None 用 config.MAX_RETRIES
+            label: 日志中的节点名
+
+        Returns:
+            非空响应文本
+
+        Raises:
+            RuntimeError: 连续 (max_retries+1) 次返回空 content
+        """
+        retries = config.MAX_RETRIES if max_retries is None else max_retries
+        for attempt in range(retries + 1):
+            result = bound_llm.invoke(messages)
+            text = result.content if hasattr(result, "content") else str(result)
+            if text and text.strip():
+                return text
+            if attempt < retries:
+                logger.warning(
+                    "   ⚠️ %s 返回空 content（第 %d 次），复用同一输入重试第 %d 次",
+                    label, attempt + 1, attempt + 2)
+        raise RuntimeError(f"{label} 连续 {retries + 1} 次返回空 content，已终止")
 
     def _invoke_structured(self, prompt, model_class: Type[BaseModel],
                            max_retries: int = config.MAX_RETRIES,
