@@ -217,7 +217,8 @@ class PromptFactory:
              "- [eq] 相等断言：验证返回值与预期完全相等\n"
              "- [contains] 包含断言：验证返回值包含预期内容\n"
              "- [ne] 不相等断言：确认删除/变更后旧数据不存在\n"
-             "- [db] 数据库断言：确认数据库中存在对应记录\n\n"
+             "- [db] 数据库断言：**仅当下方「数据库表结构信息」非空时才允许使用**；"
+             "表结构为空时禁止 [db] 断言（无法写正确 SQL），改用 [eq]/[contains]/[ne]\n\n"
              "### 共享前置引用规范（硬性要求，违反会整批校验失败）\n\n"
              "- 每个用例的 preconditions 字段**只能**引用 shared_preconditions 数组中实际存在的 id（形如 PRE-001）。\n"
              "- **禁止**在 preconditions 中写自由文本描述（如「已创建电表」）、TC 编号或其他非 PRE 编号内容。\n"
@@ -248,6 +249,7 @@ class PromptFactory:
              "### 接口定义\n{api_definitions}\n\n"
              "### 关联模块\n{related_docs}\n\n"
              "### 用户需求\n{user_context}\n\n"
+             "### 数据库表结构信息（为空时禁止 [db] 断言）\n{db_schema}\n\n"
              "请设计测试用例并输出 JSON。\n\n"
              "**⚠️ 输出前柔性自检（无需严格逐项核对，但需在思考中确认整体合理性）：**\n"
              "□ 逆向用例总数是否大致达到正向用例的 1/3？若明显不足，请思考是否有遗漏的异常场景。\n"
@@ -260,34 +262,6 @@ class PromptFactory:
              "如果「模块场景与接口分析」不为空，说明场景和接口映射已预分析完成，"
              "请直接据此生成测试用例，不要重复分析场景。"
              "如果为空，请按接口定义自行分析。"
-            )
-        ])
-
-    def format_test_points(self) -> ChatPromptTemplate:
-        """
-        Phase C — 格式化测试点为 JSON（thinking off + json_mode）。
-        接受 test_point_analysis 作为分析上下文。
-        """
-        return ChatPromptTemplate.from_messages([
-            ("system",
-             "你是一位资深测试架构师。\n"
-             "根据【产品文档】、【测试分析】和【接口定义】，生成结构化的测试点列表。\n\n"
-             "### 输出 JSON 字段要求（严格遵循）\n"
-             "输出格式：\n"
-             "- project_name: 字符串\n"
-             "- summary: 字符串\n"
-             "- test_points: 数组，每个元素含 module, scenario, description, priority (P0/P1/P2/P3), test_type (功能/边界/异常/兼容), related_requirement (可选), risk (true/false)\n"
-             "- risk_areas: 字符串数组，每个元素为一个风险点名称\n"
-             "每个 test_point 都必须包含以上所有字段，禁止使用 id 字段。\n"
-             "禁止输出 Markdown、禁止解释文字。"
-            ),
-            ("human",
-             "### 测试分析（供参考）:\n{test_point_analysis}\n\n"
-             "### 用户需求\n{user_context}\n\n"
-             "### 产品文档片段\n{product_docs}\n\n"
-             "### 关联模块产品文档\n{related_docs}\n\n"
-             "### 接口定义\n{api_definitions}\n\n"
-             "请根据以上信息，生成结构化的测试点列表："
             )
         ])
 
@@ -314,28 +288,4 @@ class PromptFactory:
          "请匹配最相关的模块："
         )
     ])
-
-    def generate_dependency_map(self):
-        """
-        Phase B-2: 生成 dependency_map.json（thinking 节点用）
-        返回带 format_messages(**kwargs) 接口的对象。
-        """
-        from prompts.extraction_prompts import generate_dependency_map_prompt
-        return generate_dependency_map_prompt()
-
-    def analyze_module_scenarios(self):
-        """
-        Phase A: 模块场景分析 — 第一阶段：thinking 自由文本分析。
-        只做场景+接口映射，不生成用例。
-        """
-        from prompts.extraction_prompts import analyze_module_scenarios_prompt
-        return analyze_module_scenarios_prompt()
-
-    def format_module_scenarios(self):
-        """
-        Phase A: 模块场景分析 — 第二阶段：json_mode 结构化输出。
-        输入 thinking 分析文本，输出严格 JSON。
-        """
-        from prompts.extraction_prompts import format_module_scenarios_prompt
-        return format_module_scenarios_prompt()
 

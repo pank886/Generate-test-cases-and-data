@@ -45,20 +45,6 @@ class TestApiAnnotationRegistry:
         assert "is_export" in keys
         assert "has_path_params" in keys
 
-    def test_get_type_by_key(self):
-        """按 key 查单个类型定义。"""
-        from agent_components.api_annotations import ApiAnnotationRegistry
-        t = ApiAnnotationRegistry.get_type("is_export")
-        assert t is not None
-        assert t.key == "is_export"
-        assert t.label == "导出/导入类接口"
-        assert t.category == "response"
-
-    def test_get_type_missing(self):
-        """不存在的 key 返回 None。"""
-        from agent_components.api_annotations import ApiAnnotationRegistry
-        assert ApiAnnotationRegistry.get_type("nonexistent") is None
-
     # ── 1.2 is_export 检测 ──
 
     @pytest.mark.parametrize("url,name,expected", [
@@ -74,7 +60,7 @@ class TestApiAnnotationRegistry:
     def test_is_export_detection(self, url, name, expected):
         """按 URL/name 关键词检测导出/导入类接口。"""
         from agent_components.api_annotations import ApiAnnotationRegistry
-        t = ApiAnnotationRegistry.get_type("is_export")
+        t = next(d for d in ApiAnnotationRegistry.get_types() if d.key == "is_export")
         matched, meta = t.detector({"url": url, "name": name})
         assert matched == expected
         assert matched is False or meta is None  # is_export 无附加元数据
@@ -91,7 +77,7 @@ class TestApiAnnotationRegistry:
     def test_has_path_params_detection(self, url, expected, param_count):
         """按 URL {xxx} 模式检测 RESTful 路径参数接口。"""
         from agent_components.api_annotations import ApiAnnotationRegistry
-        t = ApiAnnotationRegistry.get_type("has_path_params")
+        t = next(d for d in ApiAnnotationRegistry.get_types() if d.key == "has_path_params")
         matched, meta = t.detector({"url": url, "name": "test"})
         assert matched == expected
         if expected:
@@ -160,9 +146,8 @@ class TestApiAnnotationRegistry:
         ) is False
 
     def test_is_active_null_annotations(self):
-        """annotations=None → has_any 返回 False，is_active 返回 False。"""
+        """annotations=None → is_active 返回 False。"""
         from agent_components.api_annotations import ApiAnnotationRegistry
-        assert ApiAnnotationRegistry.has_any(None) is False
         assert ApiAnnotationRegistry.is_active(None, "is_export") is False
 
 
@@ -828,7 +813,6 @@ class TestEdgeCases:
         }
         assert ApiAnnotationRegistry.is_active(annotations, "is_export") is False
         assert ApiAnnotationRegistry.is_active(annotations, "has_path_params") is False
-        assert ApiAnnotationRegistry.has_any(annotations) is False
 
 
 # ═══════════════════════════════════════════════════════════════════

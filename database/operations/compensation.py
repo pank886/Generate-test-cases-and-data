@@ -76,13 +76,3 @@ class CompensationOps:
             task.status = "pending"  # 回退到 pending，等待下次轮询
         session.flush()
 
-    @staticmethod
-    def delete_completed(session: Session, before_hours: int = 24):
-        """清理超过指定时间的已完成/已失败任务。"""
-        from datetime import timedelta
-        cutoff = datetime.now(timezone.utc) - timedelta(hours=before_hours)
-        session.query(CompensationTask).filter(
-            CompensationTask.status.in_(["success", "failed"]),
-            CompensationTask.updated_at < cutoff,
-        ).delete()
-        session.flush()

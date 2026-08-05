@@ -231,42 +231,6 @@ class AxureParser:
 
         return None
 
-    @staticmethod
-    def _find_file_recursive(root: Path, filename: str) -> Path | None:
-        """递归遍历目录树，按文件名查找（带大小写不敏感降级）。"""
-        # 先精确大小写匹配
-        for path in root.rglob(filename):
-            if "__MACOSX" in path.parts:
-                continue
-            return path
-
-        # 降级：大小写不敏感匹配（Linux/macOS 文件系统区分大小写）
-        filename_lower = filename.lower()
-        for path in root.rglob("*"):
-            if "__MACOSX" in path.parts:
-                continue
-            if not path.is_file():
-                continue
-            if path.name.lower() == filename_lower:
-                return path
-
-        return None
-
-    @staticmethod
-    def _path_components_match(file_path: str, target_url: str) -> bool:
-        """检查 file_path 末尾的路径组件是否与 target_url 完全一致。
-
-        例如:
-          _path_components_match("a/sub/page1.html", "sub/page1.html") → True
-          _path_components_match("a/b/sub/page1.html", "sub/page1.html") → False
-             (末尾组件是 "b/sub/page1.html" ≠ "sub/page1.html")
-        """
-        file_parts = Path(file_path).parts
-        target_parts = Path(target_url).parts
-        if len(target_parts) > len(file_parts):
-            return False
-        return file_parts[-len(target_parts):] == target_parts
-
     def _find_page_html(self, root: Path, page_url: str) -> Path | None:
         """查找页面 HTML 文件（先精确路径 + 缓存，再递归降级）。
 

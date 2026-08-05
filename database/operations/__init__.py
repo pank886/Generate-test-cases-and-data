@@ -4,7 +4,7 @@
     from database.operations import DocOps, ModuleOps, BindingOps, GlossaryOps
 
     with get_session() as session:
-        doc = DocOps.add_document(session, ...)
+        doc = DocOps.get_document(session, doc_id)
         session.commit()
 """
 

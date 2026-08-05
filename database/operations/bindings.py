@@ -150,29 +150,6 @@ class BindingOps:
         ).delete()
 
     @staticmethod
-    def delete_bindings_for_module(session: Session, module_name: str):
-        """删除所有与某模块相关的绑定。"""
-        session.query(Binding).filter(
-            or_(
-                and_(Binding.left_type == "module", Binding.left_id == module_name),
-                and_(Binding.right_type == "module", Binding.right_id == module_name),
-            )
-        ).delete()
-
-    @staticmethod
-    def delete_bindings_between_docs(session: Session, doc_ids: list[str]):
-        """删除指定文档之间的所有 doc↔doc 绑定（SQL 直接过滤）。"""
-        if len(doc_ids) < 2:
-            return
-        doc_types = ("product", "api", "axure")
-        session.query(Binding).filter(
-            Binding.left_type.in_(doc_types),
-            Binding.right_type.in_(doc_types),
-            Binding.left_id.in_(doc_ids),
-            Binding.right_id.in_(doc_ids),
-        ).delete(synchronize_session=False)
-
-    @staticmethod
     def get_bound_docs(
         session: Session, module_name: str
     ) -> list[Document]:

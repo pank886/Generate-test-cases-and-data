@@ -96,7 +96,8 @@ class DualChromaDB:
         """
         filter_dict = {"doc_type": {"$in": ["product", "axure"]}}
         if doc_ids:
-            filter_dict["doc_id"] = {"$in": doc_ids}
+            # ChromaDB where 顶层只能一个操作符，多条件须用 $and 包裹（2026-08-05 修复）
+            filter_dict = {"$and": [filter_dict, {"doc_id": {"$in": doc_ids}}]}
         return self.doc_store.similarity_search(query, k=k, filter=filter_dict)
 
     # ---- 接口定义操作 ----
@@ -132,7 +133,8 @@ class DualChromaDB:
         """
         filter_dict = {"doc_type": "api"}
         if doc_ids:
-            filter_dict["doc_id"] = {"$in": doc_ids}
+            # ChromaDB where 顶层只能一个操作符，多条件须用 $and 包裹（2026-08-05 修复）
+            filter_dict = {"$and": [filter_dict, {"doc_id": {"$in": doc_ids}}]}
         return self.doc_store.similarity_search(query, k=k, filter=filter_dict)
 
     # ---- 通用操作 ----
@@ -143,31 +145,6 @@ class DualChromaDB:
             self.doc_store.delete(where={"doc_id": doc_id})
         except Exception:
             logger.error("ChromaDB delete_by_doc_id(%s) 失败", doc_id, exc_info=True)
-
-    def get_doc_chunks(self, doc_id: str) -> list[dict]:
-        """获取文档的所有文本块（优先 SQLite document_chunks，降级 ChromaDB）。"""
-        # 优先：SQLite document_chunks 表
-        try:
-            from database import get_session_ctx
-            from database.models import DocumentChunk
-            with get_session_ctx() as session:
-                rows = session.query(DocumentChunk).filter_by(
-                    doc_id=doc_id).order_by(DocumentChunk.chunk_index).all()
-                if rows:
-                    return [{
-                        "chunk_id": str(r.id),
-                        "chunk_index": r.chunk_index,
-                        "content": r.content,
-                        "simple_summary": r.simple_summary,
-                        "page_name": r.page_name,
-                        "type": r.chunk_type,
-                        "api_name": "",
-                    } for r in rows]
-        except Exception:
-            logger.debug("document_chunks 查询失败，降级 ChromaDB: %s", doc_id, exc_info=True)
-
-        # 降级：ChromaDB（从 SQLite 即时补偿）
-        return self._chunks_from_chroma(doc_id)
 
     def _chunks_from_chroma(self, doc_id: str) -> list[dict]:
         """从 ChromaDB 读取 chunks（降级/即时补偿路径）。"""
@@ -190,17 +167,6 @@ class DualChromaDB:
         except Exception:
             logger.debug("ChromaDB get 失败: %s", doc_id, exc_info=True)
         return []
-
-    def search_context(self, query: str, k: int = 50) -> str:
-        """全库检索（跨类型，用于 LLM 上下文构建）。"""
-        results = self.doc_store.similarity_search(query, k=k)
-        if not results:
-            return "未在知识库中找到相关内容。"
-        parts = []
-        for doc in results:
-            src = doc.metadata.get("doc_id", "?")
-            parts.append(f"[{src}] {doc.page_content}")
-        return "\n\n---\n\n".join(parts)
 
     # ---- 接口查询 ----
 

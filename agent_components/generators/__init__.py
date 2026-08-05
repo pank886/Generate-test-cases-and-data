@@ -322,6 +322,20 @@ class GenerationMixin:
         re.IGNORECASE,
     )  # 仅当关键词两侧至少有一处空格时命中
 
+    @staticmethod
+    def _takeover_export_assertions(steps) -> None:
+        """导出接口断言接管（兜底）：is_export 标注的步骤强制 validation = contains status_code。
+
+        2026-08-04 问题 3：prompt 已要求导出/下载/模板接口用 contains: {status_code: 200}，
+        此处为代码兜底——即使 LLM 输出 eq/ne 检查状态码，也在写盘前强制改为 contains。
+        独立方法便于单测。steps 为 StepData 列表。
+        """
+        for step in steps:
+            ann = step.baseInfo.get("_annotations", {})
+            if ann.get("is_export", {}).get("active"):
+                for tc in step.testCase:
+                    tc.validation = [{"contains": {"status_code": 200}}]
+
     @classmethod
     def _parse_assertion(cls, expected_text: str) -> tuple[str, str]:
         """从预期结果文本解析断言关键词。返回 (keyword_lower, rest_of_text)。
@@ -507,6 +521,8 @@ class GenerationMixin:
                            output_path: str, repair_ctx: dict | None = None) -> str:
         """Phase C V2 两段式 YAML 生成：thinking 分析 → json_mode 单次输出。
 
+        db_schema 读取 config.DB_SCHEMA（占位，为空时禁 db 断言，2026-08-04 问题 2）。
+
         与 Phase B 的 analyze_test_points_raw → generate_excel_plan 模式一致：
           - 第一阶段：thinking on，自由文本分析用例数据需求（全文落 thinking_trace.log）
           - 第二阶段：thinking off + json_mode，输出结构化 YAML
@@ -522,6 +538,7 @@ class GenerationMixin:
         )
         from observability import log_thinking
 
+        db_schema = config.DB_SCHEMA  # 数据库表结构（占位，为空禁 db 断言，2026-08-04 问题 2）
         factory_methods_text = self._load_factory_methods()
         test_case_logic = f"执行步骤: {row['steps']}\n预期结果: {row.get('expected', '')}"
         case_label = (
@@ -537,6 +554,7 @@ class GenerationMixin:
                 test_case_logic=test_case_logic,
                 user_context=user_ctx,
                 data_factory_methods=factory_methods_text,
+                db_schema=db_schema,
                 error_pattern_summary=repair_ctx.get("error_pattern_summary", ""),
                 prior_output=repair_ctx.get("prior_output", ""),
                 error_detail=repair_ctx.get("error_detail", ""),
@@ -551,6 +569,7 @@ class GenerationMixin:
                 test_case_logic=test_case_logic,
                 user_context=user_ctx,
                 data_factory_methods=factory_methods_text,
+                db_schema=db_schema,
             )
             node_label = "analyze_yaml_data"
             prompt_label = "analyze_yaml_data_prompt"
@@ -595,6 +614,10 @@ class GenerationMixin:
                                 tc["validation"] = [{"__placeholder_export": True}]
             return parsed
 
+        # db_schema 为空 → 禁 db 断言（TestData.validate_no_db_when_no_schema，2026-08-04 问题 2）
+        from prompts.response_model import set_db_schema_empty
+        set_db_schema_empty(not bool(db_schema))
+
         result = self._invoke_structured(format_prompt, TestData,
             max_retries=0,
             method="json_mode",
@@ -604,9 +627,10 @@ class GenerationMixin:
             test_case_logic=test_case_logic,
             user_context=user_ctx,
             data_factory_methods=factory_methods_text,
+            db_schema=db_schema,
         )
 
-        # ── 写盘前注入：路径参数替换 + 导出接口断言接管 ──
+        # ── 写盘前注入：路径参数替换 + 导出接口断言接管（兜底） ──
         for step in result.data:
             annotations = step.baseInfo.get("_annotations", {})
             hp = annotations.get("has_path_params", {})
@@ -616,9 +640,7 @@ class GenerationMixin:
                     url = url.replace(f"{{{param}}}",
                                       f"${{get_extract_data({param})}}")
                 step.baseInfo["url"] = url
-            if annotations.get("is_export", {}).get("active"):
-                for tc in step.testCase:
-                    tc.validation = [{"contains": {"status_code": 200}}]
+        self._takeover_export_assertions(result.data)
 
         # ── 序列化写盘（去除 _annotations 元数据字段） ──
         _clean_steps = []

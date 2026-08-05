@@ -50,10 +50,6 @@ class ValidationInterceptor:
             cls._samples[rule].append(message[:300])
 
     @classmethod
-    def get_summary(cls) -> dict:
-        return {"counts": dict(cls._counts), "samples": dict(cls._samples)}
-
-    @classmethod
     def write_report(cls, output_dir: str = "logs"):
         """写入拦截报告到 logs/VALIDATION_INTERCEPT.md"""
         import os as _os
@@ -111,6 +107,17 @@ class ValidationInterceptor:
 # （data_factory.registry.get_validation_rules()），此处不维护清单副本。
 _PLACEHOLDER_RE = re.compile(r"\$\{([^{}]*)\}")
 _PLACEHOLDER_CALL_RE = re.compile(r"^([A-Za-z_]\w*)\(([^()]*)\)$")
+
+# db_schema 空标记（2026-08-04 问题 2）：数据库表结构信息为空时禁止生成 db 断言。
+# YAML 生成节点在 format 前按 config.DB_SCHEMA 调用 set_db_schema_empty() 设置；
+# 当前 DB_SCHEMA 恒为空 → 默认 True。
+_DB_SCHEMA_EMPTY = True
+
+
+def set_db_schema_empty(flag: bool = True) -> None:
+    """设置 db_schema 是否为空（空 → 禁止 db 断言）。YAML 生成节点调用。"""
+    global _DB_SCHEMA_EMPTY
+    _DB_SCHEMA_EMPTY = flag
 
 
 # ============================================================
@@ -877,6 +884,55 @@ class TestData(BaseModel):
                 "'2029-12-31 10:00:00'）:\n" + "\n".join(issues[:10]))
         return self
 
+    @model_validator(mode="after")
+    def validate_no_db_when_no_schema(self) -> "TestData":
+        """db_schema 为空时禁止 db 断言（无表结构无法写正确 SQL）。2026-08-04 问题 2。"""
+        if not _DB_SCHEMA_EMPTY:
+            return self
+        for i, step in enumerate(self.data):
+            for j, tc in enumerate(step.testCase):
+                for k, v in enumerate(tc.validation):
+                    if isinstance(v, dict) and "db" in v:
+                        rule = "db断言无schema"
+                        msg = (
+                            f"data[{i}].testCase[{j}].validation[{k}] 含 'db' 断言，但数据库表结构信息为空"
+                            "(db_schema 未提供)，无法生成正确 SQL。请改用 eq/contains/ne 断言。"
+                        )
+                        ValidationInterceptor.record(rule, msg)
+                        raise ValueError(msg)
+        return self
+
+    @model_validator(mode="after")
+    def validate_export_assertion(self) -> "TestData":
+        """is_export 接口断言必须用 contains 检查状态码（导出返回二进制流，eq/ne 必败）。
+
+        2026-08-04 问题 3：_inject_annotations 预注入 _annotations.is_export，此处拦截
+        eq/ne 检查状态码的写法 → 回炉，让 LLM 改用 contains: {status_code: 200}。
+        """
+        for i, step in enumerate(self.data):
+            ann = step.baseInfo.get("_annotations") or {}
+            if not ann.get("is_export", {}).get("active"):
+                continue
+            url = step.baseInfo.get("url", "?")
+            for j, tc in enumerate(step.testCase):
+                for k, v in enumerate(tc.validation):
+                    if not isinstance(v, dict):
+                        continue
+                    for op, payload in v.items():
+                        if op not in ("eq", "ne") or not isinstance(payload, dict):
+                            continue
+                        keys = {kk.lstrip("$.") for kk in payload.keys()}
+                        if keys & {"status_code", "status", "retCode", "code"}:
+                            rule = "导出eq断言"
+                            msg = (
+                                f"data[{i}] 是 is_export 接口（{url}），断言用了 '{op}' 检查状态码"
+                                f"（{sorted(keys)}）。导出/下载/模板接口返回二进制流，res.json() 降级为空 dict，"
+                                "eq/ne 必败。必须用 contains: {status_code: 200}。"
+                            )
+                            ValidationInterceptor.record(rule, msg)
+                            raise ValueError(msg)
+        return self
+
 
 # ============================================================
 # 场景数据规划（Phase C YAML 生成 — 数据依赖分析）
@@ -894,14 +950,6 @@ class DataPlanStep(BaseModel):
     data_factory_calls: Optional[List[str]] = Field(default=None, description="需使用的工厂方法")
 
 
-class DataPlan(BaseModel):
-    """场景级数据规划结果"""
-    scenario_name: str = Field(description="场景名称")
-    steps: List[DataPlanStep] = Field(description="步骤列表")
-    shared_context: Optional[str] = Field(default=None, description="步骤间的数据传递说明")
-    note: Optional[str] = Field(default=None, description="补充说明")
-
-
 # ============================================================
 # 测试点分析（Phase C 产出）
 # ============================================================
@@ -915,14 +963,6 @@ class TestPointItem(BaseModel):
     test_type: str = Field(description="测试类型: 功能/边界/异常/兼容")
     related_requirement: Optional[str] = Field(default=None, description="关联的产品需求点说明")
     risk: Optional[bool] = Field(default=None, description="高风险填 true，否则 false")
-
-
-class TestPointList(BaseModel):
-    """测试点分析结果"""
-    project_name: str = Field(description="项目名称")
-    summary: str = Field(description="总体分析摘要")
-    test_points: List[TestPointItem] = Field(description="测试点列表")
-    risk_areas: List[str] = Field(default=[], description="风险点/需重点关注区域名称列表")
 
 
 # ============================================================
@@ -980,19 +1020,6 @@ class TranslationResult(BaseModel):
 # ============================================================
 # Phase B-2 依赖映射表
 # ============================================================
-
-class DecisionStep(BaseModel):
-    """decision_map 中单个步骤的赋值指令"""
-    api: str = Field(description="接口标识: METHOD /url，如 'POST /order/create'")
-    params: Dict[str, Any] = Field(
-        default_factory=dict,
-        description="请求参数赋值指令。静态值直接写，动态值用 ${} 字符串",
-    )
-    assertions: List[Dict[str, Any]] = Field(
-        default_factory=list,
-        description="断言列表，YAML 原生格式 [{'eq': {...}}, {'contains': {...}}]",
-    )
-
 
 class InternalDependency(BaseModel):
     """单条用例的变量提取与消费关系"""

@@ -190,3 +190,35 @@ class TestValidateUrl:
         reasons = vr.block_reasons
         assert any("疑似URL拼写错误" in r for r in reasons)
         assert any("被拦截" in r and "疑似URL拼写错误" in r for r in reasons)
+
+
+# ============================================================
+# 6. db 断言拦截（db_schema 为空，2026-08-04 问题 2）
+# ============================================================
+
+class TestDbForbidden:
+    @staticmethod
+    def _tc(expected: str) -> PlanTestCaseRow:
+        return PlanTestCaseRow(
+            id="TC-001", story="模块", title="用例", preconditions=[],
+            steps="1.调用查询接口", expected=expected,
+        )
+
+    def test_db_marker_flagged_when_no_schema(self):
+        errs = ExcelPlanValidator.check_case(
+            self._tc("1.[eq]成功\n2.[db]数据库存在记录"), set(), db_schema="")
+        assert any("db 断言" in e for e in errs)
+
+    def test_db_marker_allowed_when_schema(self):
+        errs = ExcelPlanValidator.check_case(
+            self._tc("1.[eq]成功\n2.[db]数据库存在记录"), set(), db_schema="CREATE TABLE ...")
+        assert not any("db 断言" in e for e in errs)
+
+    def test_non_db_marker_not_flagged(self):
+        errs = ExcelPlanValidator.check_case(
+            self._tc("1.[eq]成功\n2.[contains]列表非空"), set(), db_schema="")
+        assert not any("db 断言" in e for e in errs)
+
+    def test_classify_db_forbidden(self):
+        assert ExcelPlanValidator.classify(
+            "预期第2条含 db 断言，但数据库表结构信息为空") == "db_forbidden"

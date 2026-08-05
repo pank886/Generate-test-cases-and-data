@@ -67,8 +67,6 @@ def mock_chroma():
         fake_db = MagicMock(spec=DualChromaDB)
         fake_db.search_product_docs.return_value = []
         fake_db.search_api_defs.return_value = []
-        fake_db.search_context.return_value = "mock context"
-        fake_db.get_doc_chunks.return_value = []
         m.return_value = fake_db
         yield fake_db
 

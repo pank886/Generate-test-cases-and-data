@@ -26,13 +26,12 @@ class TestResponseModelImports:
         assert TestCase is not None
 
     def test_import_plan_models(self):
-        """ExcelPlan / DependencyMap / DataPlan 可导入。"""
+        """ExcelPlan / DependencyMap / DataPlanStep 可导入。"""
         from prompts.response_model import (
-            ExcelPlanV2, DependencyMap, DataPlan, DataPlanStep
+            ExcelPlanV2, DependencyMap, DataPlanStep
         )
         assert ExcelPlanV2 is not None
         assert DependencyMap is not None
-        assert DataPlan is not None
         assert DataPlanStep is not None
 
     def test_import_api_models(self):
@@ -50,7 +49,7 @@ class TestResponseModelImports:
         """TestCaseRow / SharedPrecondition / StoryDependencyMap 可导入。"""
         from prompts.response_model import (
             TestCaseRow, SharedPrecondition, StoryDependencyMap,
-            DecisionStep, InternalDependency, CrossModuleDep,
+            InternalDependency, CrossModuleDep,
         )
         assert TestCaseRow is not None
         assert SharedPrecondition is not None

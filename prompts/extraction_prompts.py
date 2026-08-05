@@ -34,57 +34,6 @@ def glossary_extract_prompt() -> ChatPromptTemplate:
     ])
 
 
-def analyze_data_deps_prompt() -> ChatPromptTemplate:
-    """数据依赖分析 prompt（thinking 节点用）：输出自由文本分析报告。"""
-    return ChatPromptTemplate.from_messages([
-        ("system",
-         "你是测试数据架构师。根据【接口定义】和【用例步骤】，分析测试数据依赖。\n\n"
-         "请分析以下方面（自由文本输出，不要输出 JSON）：\n"
-         "1. **数据覆盖**：正常值、边界值、异常值分别需要哪些数据\n"
-         "2. **数据传递链**：步骤间存在哪些数据依赖（步骤 B 依赖步骤 A 的哪个返回值）\n"
-         "3. **断言策略**：每个接口调用的关键校验点\n"
-         "4. **动态数据**：哪些字段需要使用工厂方法生成\n\n"
-         "分析要详细、具体，后续将基于你的分析生成结构化的数据规划。\n\n"
-         "### 断言关键词说明（预期结果中可能出现）\n"
-         "- [eq]: 精确相等断言 — 该校验需要特定的期望值，请分析期望值的来源\n"
-         "- [contains]: 包含断言 — 该校验需要数据中包含特定内容，请分析该内容的产生步骤\n"
-         "- [ne]: 不等断言 — 该校验需要确认数据已变更，请分析变更发生在哪个步骤\n"
-         "- [db]: 数据库断言 — 该校验需要数据库中存在对应记录，请确保数据已写入"),
-        ("human",
-         "### 接口定义\n{api_definitions}\n\n"
-         "### 用例步骤\n{test_case_steps}\n\n"
-         "### 用户意图\n{user_context}\n\n请分析以上场景的数据依赖：")
-    ])
-
-
-def generate_data_plan_prompt() -> ChatPromptTemplate:
-    """场景级数据规划 prompt（format 节点用：thinking off + json_mode）。"""
-    return ChatPromptTemplate.from_messages([
-        ("system",
-         "你是测试数据架构师。根据【接口定义】、【数据分析】和【用例步骤】，生成结构化的测试数据规划。\n\n"
-         "### 规划要求\n"
-         "1. 数据值覆盖：正常值、边界值、异常值。\n"
-         "2. 数据传递：如果步骤 B 依赖步骤 A 的返回值，规划 extract_rules。\n"
-         "3. 断言策略：每个接口调用必须规划断言，字段从接口 returns 中选择。\n"
-         "4. 工厂方法：需要随机/动态生成的数据，标注 data_factory_calls。\n\n"
-         "### 输出 JSON 字段\n"
-         "- scenario_name: 场景名称\n"
-         "- steps[]: 每个 API 调用的数据规划\n"
-         "  - api_name: 接口名\n"
-         "  - data_values: 请求数据对象\n"
-         "  - extract_rules: 从响应提取（可选）\n"
-         "  - assertions: 断言列表\n"
-         "  - data_factory_calls: 工厂方法列表（可选）\n"
-         "- shared_context: 步骤间的数据流转说明\n\n"
-         "不包含 Markdown。"),
-        ("human",
-         "### 数据分析（供参考）:\n{data_analysis}\n\n"
-         "### 接口定义\n{api_definitions}\n\n"
-         "### 用例步骤\n{test_case_steps}\n\n"
-         "### 用户意图\n{user_context}\n\n请规划测试数据：")
-    ])
-
-
 def api_def_extract_prompt() -> ChatPromptTemplate:
     """接口文档提取 prompt — 全量存储，不丢弃任何参数细节。"""
     return ChatPromptTemplate.from_messages([
@@ -158,14 +107,16 @@ def repair_excel_plan_prompt() -> ChatPromptTemplate:
          "### 完整用例描述（参考原始设计）\n{cases_section}\n\n"
          "### 模块树\n{module_tree}\n\n"
          "### 接口定义列表（核对接口路径用）\n{all_apis_info}\n\n"
+         "### 数据库表结构信息（为空时禁止 [db] 断言）\n{db_schema}\n\n"
          "### 失败的行及错误\n{failed_test_cases}\n\n"
          "### 拦截方法提示（以下为被拦截的用例与原因提示，修正时需消除对应问题）\n{block_reasons}\n\n"
          "### 修正要求\n"
          "1. 依据上方「失败的行及错误」与「拦截方法提示」修正失败用例，保持正确字段不变\n"
          "2. 步骤中引用的接口路径必须能在「接口定义列表」中匹配到真实接口；疑似 URL 拼写错误时改为正确的 url\n"
          "3. 若共享前置（PRE-xxx）的步骤含错误接口路径，在 shared_preconditions 中输出修正后的版本（按原 id 修正即可）\n"
-         "4. 修正后必须满足上方「字段硬约束」：五字段齐全、步骤/预期条数一致、前置引用有效\n"
-         "5. 禁止 Markdown，只输出 JSON"),
+         "4. 若「数据库表结构信息」为空，禁止在 expected 中使用 [db] 断言，改用 [eq]/[contains]/[ne]\n"
+         "5. 修正后必须满足上方「字段硬约束」：五字段齐全、步骤/预期条数一致、前置引用有效\n"
+         "6. 禁止 Markdown，只输出 JSON"),
         ("human", "请输出修正后的测试用例 JSON：")
     ])
 
@@ -216,6 +167,9 @@ def analyze_yaml_data_prompt() -> ChatPromptTemplate:
          "- **url 禁止动态占位符**——url 在框架中不经 replace_load() 解析，动态参数必须用 params 传递，url 保持静态路径\n"
          "- **params/json/data 只能放在 testCase 内**，禁止放在 baseInfo 层级\n"
          "- validation 支持 eq/contains/ne/db 四种断言（不等于是 ne 不是 neq）。**validation 不能为空数组**\n"
+         "- **db 断言禁止**：若「数据库表结构信息」为空，禁止生成 db 断言（无表结构无法写正确 SQL），改用 eq/contains/ne\n"
+         "- **导出/下载/模板接口**（URL 含 export/import/template/download/upload 或接口标注 is_export）：返回二进制流，"
+         "断言必须用 `contains: {{status_code: 200}}`，禁止 eq/ne 检查状态码\n"
          "- extract 从接口返回值中提取数据（JSONPath），供下游步骤用 ${{get_extract_data(key)}} 引用。"
          "input_extract 极少使用，不要把它当数据暂存。禁止填入 PRE 编号或固定字面量\n"
          "- extract/validation 的 JSONPath 必须以 $. 开头（如 $.data.id）\n"
@@ -226,6 +180,7 @@ def analyze_yaml_data_prompt() -> ChatPromptTemplate:
          "### 接口定义\n{api_definitions}\n\n"
          "### 用例逻辑\n{test_case_logic}\n\n"
          "### 用户意图\n{user_context}\n\n"
+         "### 数据库表结构信息（为空时禁止 db 断言）\n{db_schema}\n\n"
          "请分析测试数据需求：")
     ])
 
@@ -253,12 +208,15 @@ def repair_yaml_data_prompt() -> ChatPromptTemplate:
          "清单不支持的能力写合理固定字面量\n"
          "- 无需提取时省略 extract/input_extract 字段，禁止 {{}} 占位与 null 值条目\n"
          "- json/params/data 三选一，依据接口定义确定正确的请求方式\n"
+         "- **若「数据库表结构信息」为空，禁止 db 断言**，改用 eq/contains/ne\n"
+         "- **导出/下载/模板接口**（URL 含 export/import/template/download/upload）：断言用 contains: {{status_code: 200}}，禁止 eq/ne 检查状态码\n"
          "- 修正时保持原有正确部分不动，只改错误部分"),
         ("human",
          "{post_check_issues}"
          "### 接口定义\n{api_definitions}\n\n"
          "### 用例逻辑\n{test_case_logic}\n\n"
          "### 用户意图\n{user_context}\n\n"
+         "### 数据库表结构信息（为空时禁止 db 断言）\n{db_schema}\n\n"
          "### 你上一轮的输出（有错）\n{prior_output}\n\n"
          "### 校验错误明细\n{error_detail}\n\n"
          "请分析并给出修正方案：")
@@ -328,13 +286,17 @@ def format_yaml_data_prompt() -> ChatPromptTemplate:
          "11. extract/input_extract 用不到就省略整个字段，禁止输出空 {{}} 或 null\n"
          "12. validation 数组不能为空，每步至少一条断言（如 {{eq: {{retCode: 0}}}}）\n"
          "13. 断言运算符只用 [eq, contains, ne, db] 四种，不等于是 ne 不是 neq\n"
-         "14. JSONPath 必须以 $. 开头（如 $.data.code）\n"
-         "15. 禁止 Markdown，只输出纯净 JSON"),
+         "14. **若「数据库表结构信息」为空，禁止 db 断言**（无表结构无法写正确 SQL），改用 eq/contains/ne\n"
+         "15. **导出/下载/模板接口**（URL 含 export/import/template/download/upload 或标注 is_export）："
+         "返回二进制流，断言必须用 contains: {{status_code: 200}}，禁止 eq/ne 检查状态码\n"
+         "16. JSONPath 必须以 $. 开头（如 $.data.code）\n"
+         "17. 禁止 Markdown，只输出纯净 JSON"),
         ("human",
          "### 数据分析\n{data_analysis}\n\n"
          "### 接口定义\n{api_definitions}\n\n"
          "### 用例逻辑\n{test_case_logic}\n\n"
          "### 用户意图\n{user_context}\n\n"
+         "### 数据库表结构信息（为空时禁止 db 断言）\n{db_schema}\n\n"
          "请严格按照上方 JSON 结构输出：")
     ])
 
@@ -497,100 +459,4 @@ def analyze_api_mapping_prompt() -> ChatPromptTemplate:
          "### 模块树\n{module_tree}\n\n"
          "### 跨模块关系\n{cross_module_relations}\n\n"
          "请分析接口与场景的映射关系：")
-    ])
-
-
-# ====================================================================
-# Phase A: 模块场景分析（入库预处理）— 旧版（已废弃，保留兼容）
-# ====================================================================
-
-def analyze_module_scenarios_prompt() -> ChatPromptTemplate:
-    """模块场景分析 — 第一阶段：thinking 自由文本分析。
-
-    不生成测试用例，不分析测试内容（参数值/断言/预期结果）。
-    只做两件事：① 接口维度分析 ② 场景维度分析。
-    输出自由文本，后续由第二阶段 JSON 格式化。
-    """
-    return ChatPromptTemplate.from_messages([
-        ("system",
-         "你是一位资深测试架构师，专注于**接口自动化测试场景分析**。\n\n"
-         "根据【产品文档】和【接口定义】，分析该模块的所有测试场景。\n\n"
-         "### 分析要求\n"
-         "只做两件事，不越界：\n"
-         "1. **接口维度分析**：以每个 API 为粒度，分析四类覆盖维度\n"
-         "   - 正向：全字段合法值的正常业务场景\n"
-         "   - 边界值：字段长度/数值/时间的边界条件\n"
-         "   - 逆向：业务规则冲突 + 字段校验的错误场景（含 SQL 注入/XSS）\n"
-         "   - 安全：越权、未授权访问、路径遍历等攻击向量\n"
-         "   对每个接口标注 produces（产出变量）和 consumes（需从上游获取的变量）。\n\n"
-         "2. **场景维度分析**：以业务流程为粒度，描述接口间的依赖和时序约束\n"
-         "   每个场景列出步骤顺序、每步涉及的 API、数据依赖关系、跨模块约束。\n\n"
-         "### 禁止\n"
-         "- 禁止生成测试用例（参数值、断言、预期结果）\n"
-         "- 禁止分析单个字段的边界值细节\n"
-         "- 禁止编造不存在的接口路径或变量名\n\n"
-         "分析要详细、具体，后续将基于你的分析生成结构化 JSON。"),
-        ("human",
-         "### 产品文档\n{product_docs}\n\n"
-         "### 接口定义\n{api_definitions}\n\n"
-         "### 模块关系树\n{module_tree}\n\n"
-         "### 跨模块依赖\n{cross_module_relations}\n\n"
-         "### 用户上下文\n{user_context}\n\n"
-         "请分析以上模块的测试场景：")
-    ])
-
-
-def format_module_scenarios_prompt() -> ChatPromptTemplate:
-    """模块场景分析 — 第二阶段：json_mode 结构化输出（thinking off）。
-
-    输入为第一阶段 thinking 自由文本分析，输出严格 JSON。
-    """
-    return ChatPromptTemplate.from_messages([
-        ("system",
-         "你是数据格式化专家。根据【场景分析报告】和【接口定义】，输出结构化 JSON。\n\n"
-         "### 输出 JSON 结构（严格遵循）\n\n"
-         "{\n"
-         '  "module_name": "模块名",\n'
-         '  "api_analysis": [\n'
-         '    {\n'
-         '      "api_path": "/xxx/add",\n'
-         '      "api_method": "POST",\n'
-         '      "api_name": "新增XXX",\n'
-         '      "scope": {\n'
-         '        "正向": ["全字段合法值录入"],\n'
-         '        "边界值": ["编号最大长度"],\n'
-         '        "逆向": ["编号重复", "必填字段缺失"],\n'
-         '        "安全": ["编号字段 SQL 注入"]\n'
-         '      },\n'
-         '      "produces": ["xxx_code"],\n'
-         '      "consumes": ["上游变量名"]\n'
-         '    }\n'
-         '  ],\n'
-         '  "scenario_analysis": [\n'
-         '    {\n'
-         '      "scenario_id": "S001",\n'
-         '      "scenario_name": "流程名称",\n'
-         '      "description": "一句话描述",\n'
-         '      "steps": [\n'
-         '        {\n'
-         '          "order": 1,\n'
-         '          "api": "METHOD /path",\n'
-         '          "role": "步骤角色描述",\n'
-         '          "data_depends_on": []\n'
-         '        }\n'
-         '      ],\n'
-         '      "cross_module_deps": []\n'
-         '    }\n'
-         '  ]\n'
-         '}\n\n'
-         "### 字段规则\n"
-         "- scope 四维度可为空数组 []\n"
-         "- produces/consumes 变量名来自接口定义，禁止编造\n"
-         "- data_depends_on 引用前序步骤 produces 的变量名\n"
-         "- failure_condition 和 cross_module 是可选字段\n"
-         "- 输出纯 JSON，不要 Markdown 包裹，不要解释文字"),
-        ("human",
-         "### 场景分析报告\n{scenario_analysis}\n\n"
-         "### 接口定义（供核对路径和方法）\n{api_definitions}\n\n"
-         "请输出结构化 JSON：")
     ])

@@ -12,28 +12,6 @@ class DocOps:
     """文档 CRUD。"""
 
     @staticmethod
-    def add_document(
-        session: Session,
-        doc_id: str,
-        file_name: str,
-        file_type: str,
-        doc_type: str,
-        chunk_count: int = 0,
-        status: str = "pending",
-    ) -> Document:
-        """添加上传文档记录。"""
-        doc = Document(
-            id=doc_id,
-            file_name=file_name,
-            file_type=file_type,
-            doc_type=doc_type,
-            chunk_count=chunk_count,
-            status=status,
-        )
-        session.add(doc)
-        return doc
-
-    @staticmethod
     def get_document(session: Session, doc_id: str) -> Optional[Document]:
         """按 ID 查询文档。"""
         return session.get(Document, doc_id)
@@ -51,17 +29,6 @@ class DocOps:
         if status:
             q = q.filter(Document.status == status)
         return q.order_by(Document.upload_time.desc()).all()
-
-    @staticmethod
-    def update_document(session: Session, doc_id: str, **kwargs) -> Optional[Document]:
-        """更新文档字段（如 status, chunk_count）。"""
-        doc = session.get(Document, doc_id)
-        if not doc:
-            return None
-        for k, v in kwargs.items():
-            if hasattr(doc, k):
-                setattr(doc, k, v)
-        return doc
 
     @staticmethod
     def delete_document(session: Session, doc_id: str) -> bool:

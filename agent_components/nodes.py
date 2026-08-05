@@ -96,64 +96,6 @@ class ChatTestAgentGraph(RetrievalMixin, GenerationMixin):
         self._run_data: dict = {}
         self._run_timestamp: Optional[str] = None
 
-    # ── 共享：写 Excel + api_defs.json 快照 ──
-
-    def _finalize_excel_plan(self, state: State, plan,
-                             api_full_for_snapshot: list, module_tree: str) -> dict:
-        """将 ExcelPlanV2 写入 xlsx + api_defs.json，返回 state 更新 dict。"""
-        confirmed_module = state.get("confirmed_module", "")
-        output_dir = os.path.join(config.TESTCASE_BASE, confirmed_module)
-        os.makedirs(output_dir, exist_ok=True)
-        excel_path = os.path.join(output_dir, "test_plan.xlsx")
-
-        # 写入 Excel（双 Sheet）
-        hf = Font(bold=True, color="FFFFFF", size=11)
-        hfill = PatternFill(start_color="1A73E8", end_color="1A73E8", fill_type="solid")
-        tb = Border(left=Side(style="thin"), right=Side(style="thin"),
-                    top=Side(style="thin"), bottom=Side(style="thin"))
-        wa = Alignment(wrap_text=True, vertical="center")
-        wb = Workbook()
-        # Sheet 1: 测试计划
-        ws1 = wb.active
-        ws1.title = "测试计划"
-        for col, h in enumerate(["@allure.story", "@allure.title", "用例编号", "前置步骤", "执行步骤", "预期结果"], 1):
-            c = ws1.cell(row=1, column=col, value=h)
-            c.font, c.fill, c.border, c.alignment = hf, hfill, tb, Alignment(horizontal="center", vertical="center")
-        for i, tc in enumerate(plan.test_cases, 2):
-            for col, val in enumerate([tc.story, tc.title, tc.id,
-                                        ", ".join(tc.preconditions) if tc.preconditions else "无",
-                                        tc.steps, tc.expected], 1):
-                c = ws1.cell(row=i, column=col, value=val)
-                c.border, c.alignment = tb, wa
-        # Sheet 2: 共享前置
-        ws2 = wb.create_sheet("共享前置")
-        for col, h in enumerate(["前置编号", "前置名称", "详细步骤", "预期结果"], 1):
-            c = ws2.cell(row=1, column=col, value=h)
-            c.font, c.fill, c.border, c.alignment = hf, hfill, tb, Alignment(horizontal="center", vertical="center")
-        for i, pre in enumerate(plan.shared_preconditions, 2):
-            for col, val in enumerate([pre.id, pre.name, pre.steps, pre.expected], 1):
-                c = ws2.cell(row=i, column=col, value=val)
-                c.border, c.alignment = tb, wa
-        wb.save(excel_path)
-
-        # api_defs.json 快照
-        api_snapshot_path = os.path.join(output_dir, "api_defs.json")
-        with open(api_snapshot_path, "w", encoding="utf-8") as f:
-            json.dump(api_full_for_snapshot, f, ensure_ascii=False, indent=2)
-        logger.info(f"   📄 api_defs.json → {api_snapshot_path} ({len(api_full_for_snapshot)} 个接口)")
-
-        n_cases = len(plan.test_cases)
-        n_pres = len(plan.shared_preconditions)
-        n_modules = len(set(tc.story for tc in plan.test_cases))
-        logger.info(f"   📄 Excel: {excel_path} ({n_cases}条/{n_modules}模块, {n_pres}共享前置)")
-
-        return {
-            "excel_plan": plan,
-            "excel_path": excel_path,
-            "output_dir": output_dir,
-            "thinking": [f"生成 {n_cases} 条用例, {n_pres} 共享前置, {n_modules} 模块"],
-        }
-
     # ==================== 图内节点方法 ====================
 
     def _generate_excel_plan_thinking(self, state: State):
@@ -241,6 +183,7 @@ class ChatTestAgentGraph(RetrievalMixin, GenerationMixin):
             api_definitions=apis_text,
             related_docs=related_text,
             user_context=user_ctx,
+            db_schema=config.DB_SCHEMA,  # 数据库表结构（占位，为空禁 [db]，2026-08-04 问题 2）
         )
         _text = self._invoke_think(_think_llm, _messages, label="generate_plan_thinking")
 
@@ -357,8 +300,10 @@ class ChatTestAgentGraph(RetrievalMixin, GenerationMixin):
                     }
                 all_shared_pres = plan.shared_preconditions
 
-                # 首轮校验全部用例（校验收敛：ExcelPlanValidator，含 8 类错误聚合 + URL 有效性）
-                _vr = ExcelPlanValidator.validate(plan, test_analysis, api_urls=api_urls)
+                # 首轮校验全部用例（校验收敛：ExcelPlanValidator，含 9 类错误聚合 + URL 有效性 + db 拦截）
+                _vr = ExcelPlanValidator.validate(plan, test_analysis,
+                                                  api_urls=api_urls,
+                                                  db_schema=config.DB_SCHEMA)
                 _new_failed = _vr.failed_details
                 all_confirmed = _vr.all_confirmed
 
@@ -429,6 +374,7 @@ class ChatTestAgentGraph(RetrievalMixin, GenerationMixin):
                     shared_pre_section=_shared_vars["shared_pre_section"],
                     cases_section=_shared_vars["cases_section"],
                     all_apis_info=_shared_vars["all_apis_info"],
+                    db_schema=_shared_vars["db_schema"],
                 )
                 if isinstance(plan, list):
                     plan = ExcelPlanV2(shared_preconditions=[], test_cases=plan)
@@ -463,8 +409,10 @@ class ChatTestAgentGraph(RetrievalMixin, GenerationMixin):
                         logger.warning(f"   ⚠️ 重试批次内重复 TC {tc.id}，已丢弃")
                         continue
                     _seen_in_retry.add(tc.id)
-                    # 单用例校验（校验收敛：ExcelPlanValidator.check_case，含 URL 有效性）
-                    errs = ExcelPlanValidator.check_case(tc, pre_ids_all, api_urls=api_urls)
+                    # 单用例校验（校验收敛：ExcelPlanValidator.check_case，含 URL 有效性 + db 拦截）
+                    errs = ExcelPlanValidator.check_case(tc, pre_ids_all,
+                                                         api_urls=api_urls,
+                                                         db_schema=config.DB_SCHEMA)
                     if errs:
                         _new_failed.append((0, tc.model_dump(), errs))
                     else:
@@ -714,46 +662,7 @@ class ChatTestAgentGraph(RetrievalMixin, GenerationMixin):
             ),
         }
 
-    # ==================== 图外方法（确认后执行） ====================
-    # ==================== 通用工具方法 ====================
-
-    def _validate_excel_plan(self, plan: ExcelPlan) -> list:
-        """校验 Excel 计划数据质量"""
-        errors = []
-
-        if not plan.rows:
-            errors.append("rows 为空，未生成任何用例")
-            return errors
-
-        for idx, row in enumerate(plan.rows, 1):
-            if not row.project_name:
-                errors.append(f"第{idx}行: 项目名称为空")
-            if not row.module_name:
-                errors.append(f"第{idx}行: 模块名称为空")
-            if not row.allure_story:
-                errors.append(f"第{idx}行: Allure Story 为空")
-            if not row.fixture_level:
-                errors.append(f"第{idx}行: fixture等级为空")
-            if not row.case_name:
-                errors.append(f"第{idx}行: 用例名称为空")
-            elif not row.case_name.startswith("test_"):
-                errors.append(f"第{idx}行: 用例名称 '{row.case_name}' 必须以 test_ 开头")
-            if not row.test_data_yaml:
-                errors.append(f"第{idx}行: 测试数据YAML为空")
-            if row.enabled not in ("Y", "N"):
-                errors.append(f"第{idx}行: 是否启用必须为 Y 或 N，当前为 '{row.enabled}'")
-
-        return errors
-
     # ==================== Phase B 资源冲突消解 ====================
-
-    @staticmethod
-    def _find_pre(plan: ExcelPlanV2, pre_id: str) -> SharedPrecondition | None:
-        """在 plan.shared_preconditions 中查找指定 id 的前置条件。"""
-        for pre in plan.shared_preconditions:
-            if pre.id == pre_id:
-                return pre
-        return None
 
     def _resolve_resource_conflicts(self, plan: ExcelPlanV2,
                                      shared_pres: list = None) -> None:
@@ -877,6 +786,7 @@ class ChatTestAgentGraph(RetrievalMixin, GenerationMixin):
             "shared_pre_section": _sections["preconditions"],
             "cases_section": _sections["cases"],
             "all_apis_info": json.dumps(api_summaries, indent=2, ensure_ascii=False),
+            "db_schema": config.DB_SCHEMA,  # 数据库表结构（占位，为空禁 [db]，2026-08-04 问题 2）
             "plan_source": state.get("plan_source"),
             "user_context": state.get("original_input", ""),
         }

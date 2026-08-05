@@ -59,32 +59,11 @@ class ApiAnnotationRegistry:
         cls._registry[defn.key] = defn
 
     @classmethod
-    def get_type(cls, key: str) -> ApiAnnotationDef | None:
-        """按 key 查询单个类型定义。"""
-        return cls._registry.get(key)
-
-    @classmethod
     def get_types(cls) -> list[ApiAnnotationDef]:
         """返回全部已注册类型列表 → 供前端渲染选项。"""
         return list(cls._registry.values())
 
     # ========== 检测逻辑 ==========
-
-    @classmethod
-    def detect_all(cls, api_dict: dict) -> dict[str, dict]:
-        """对单个 api_dict 跑全部检测器，返回 {key: {active, source, ...meta}}。
-
-        注意：只返回本次检测到的类型，不包含 api_dict 中已有的手动标注。
-        """
-        result: dict[str, dict] = {}
-        for key, defn in cls._registry.items():
-            matched, meta = defn.detector(api_dict)
-            if matched:
-                entry = {"active": True, "source": "auto"}
-                if meta:
-                    entry.update(meta)
-                result[key] = entry
-        return result
 
     @classmethod
     def apply_all(cls, api_dict: dict) -> dict:
@@ -129,13 +108,6 @@ class ApiAnnotationRegistry:
         if not entry:
             return False
         return bool(entry.get("active", False))
-
-    @classmethod
-    def has_any(cls, annotations: dict | None) -> bool:
-        """是否有任意激活的异常标识。"""
-        if not annotations:
-            return False
-        return any(entry.get("active", False) for entry in annotations.values())
 
 
 # ====================================================================

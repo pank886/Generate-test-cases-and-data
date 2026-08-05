@@ -146,8 +146,3 @@ def _seed_from_json_if_empty():
                 session.query(Module).filter(Module.id == new_id).update(
                     {"parent_id": id_map[mod["parent_id"]]}
                 )
-
-
-def drop_db():
-    """删除所有表（仅测试用）。"""
-    Base.metadata.drop_all(get_engine())

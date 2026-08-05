@@ -36,6 +36,17 @@ def sep(title):
 # -----------------------------------------------------------
 from database import init_db, get_session
 from database.operations import DocOps, ModuleOps, BindingOps, GlossaryOps
+from database.models import Document
+
+
+def _add_doc(session, doc_id, file_name, file_type, doc_type, chunk_count=0):
+    """本地插入文档记录（原 DocOps.add_document 已删除，改用原生 Document 插入）。"""
+    doc = Document(
+        id=doc_id, file_name=file_name, file_type=file_type,
+        doc_type=doc_type, chunk_count=chunk_count,
+    )
+    session.add(doc)
+    return doc
 
 db_path = os.path.join(
     os.path.dirname(os.path.dirname(__file__)), "data", "app.db"
@@ -51,9 +62,9 @@ session = get_session()
 # -----------------------------------------------------------
 # Step 1: 文档入库
 # -----------------------------------------------------------
-sep("Step 1: 上传三个文档 (DocOps.add_document)")
+sep("Step 1: 上传三个文档 (本地插入 Document)")
 
-product_doc = DocOps.add_document(
+product_doc = _add_doc(
     session,
     doc_id="prod_健身房产品文档.pdf_健身管理",
     file_name="健身房产品文档.pdf",
@@ -61,7 +72,7 @@ product_doc = DocOps.add_document(
     doc_type="product",
     chunk_count=15,
 )
-api_doc = DocOps.add_document(
+api_doc = _add_doc(
     session,
     doc_id="api_健身房接口文档.md_健身管理",
     file_name="健身房接口文档.md",
@@ -69,7 +80,7 @@ api_doc = DocOps.add_document(
     doc_type="api",
     chunk_count=8,
 )
-axure_doc = DocOps.add_document(
+axure_doc = _add_doc(
     session,
     doc_id="axure_健身房原型.zip_健身管理",
     file_name="健身房原型.zip",
@@ -246,7 +257,7 @@ unassociated = DocOps.get_unassociated_docs(session)
 p(f"  当前未关联文档: {len(unassociated)} 个")
 
 # 增加一个未绑定模块的测试文档
-DocOps.add_document(
+_add_doc(
     session, doc_id="prod_独立文档.pdf_standalone",
     file_name="独立文档.pdf", file_type="pdf",
     doc_type="product", chunk_count=5,

@@ -74,7 +74,7 @@ class ValidationResult:
 class ExcelPlanValidator:
     """Excel 计划校验器：字段 / 前置引用 / 步骤对齐 / 断言格式。"""
 
-    # 8 类固定错误类型（聚合用），顺序即输出顺序
+    # 9 类固定错误类型（聚合用），顺序即输出顺序
     ERR_TYPES = {
         "pre_missing": "引用前置不存在",
         "field_empty": "必填字段为空",
@@ -84,6 +84,7 @@ class ExcelPlanValidator:
         "expected_bad_space": "断言关键词含空格",
         "expected_missing_assert": "预期缺少断言关键词",
         "invalid_url": "疑似URL拼写错误",
+        "db_forbidden": "db断言被禁止",
     }
 
     # ── URL 有效性校验：返回疑似拼写错误的路径列表 ──
@@ -105,8 +106,13 @@ class ExcelPlanValidator:
 
     # ── 单用例校验：返回具体错误信息列表 ──
     @staticmethod
-    def check_case(tc: Any, pre_ids: set, api_urls: Optional[list] = None) -> list:
-        """校验单个用例，返回错误信息列表（空列表 = 通过）。"""
+    def check_case(tc: Any, pre_ids: set, api_urls: Optional[list] = None,
+                   db_schema: str = "") -> list:
+        """校验单个用例，返回错误信息列表（空列表 = 通过）。
+
+        db_schema: 数据库表结构信息（占位）；为空时拦截 expected 中的 [db] 断言
+                   （无表结构无法写正确 SQL，2026-08-04 问题 2）。
+        """
         errs = []
 
         # 1. 必填字段为空
@@ -142,6 +148,15 @@ class ExcelPlanValidator:
             for bu in ExcelPlanValidator.check_urls(tc.steps, api_urls):
                 errs.append(f"疑似URL拼写错误: {bu}（未匹配 api_definitions 中任一真实接口）")
 
+        # 5. db 断言拦截（db_schema 为空时，2026-08-04 问题 2）
+        if not db_schema and tc.expected:
+            for ei, line in enumerate(tc.expected.split("\n"), 1):
+                if re.search(r"\[db\]", line, re.IGNORECASE):
+                    errs.append(
+                        f"预期第{ei}条含 db 断言，但数据库表结构信息为空（db_schema 未提供），"
+                        "无法生成正确 SQL，请改用 [eq]/[contains]/[ne]"
+                    )
+
         return errs
 
     # ── 错误信息 → 错误类型 ──
@@ -150,6 +165,8 @@ class ExcelPlanValidator:
         """把具体错误信息归类到 8 类固定错误类型。"""
         if "引用前置" in err:
             return "pre_missing"
+        if "db 断言" in err:
+            return "db_forbidden"
         if "为空" in err and any(k in err for k in ("编号", "子模块", "标题", "步骤", "预期")):
             return "field_empty"
         if "数量不一致" in err:
@@ -170,7 +187,8 @@ class ExcelPlanValidator:
     @classmethod
     def validate(cls, plan, test_analysis: str = "",
                  pre_ids: Optional[set] = None,
-                 api_urls: Optional[list] = None) -> ValidationResult:
+                 api_urls: Optional[list] = None,
+                 db_schema: str = "") -> ValidationResult:
         """校验整个 plan。
 
         Args:
@@ -180,6 +198,7 @@ class ExcelPlanValidator:
             pre_ids: 前置 ID 集合（默认取 plan.shared_preconditions）
             api_urls: 真实接口路径模板列表（含 {xxx} 路径参数），非空时启用
                       步骤 URL 有效性校验（含共享前置 steps 一起校验）
+            db_schema: 数据库表结构信息（占位）；为空时拦截 expected 中的 [db] 断言
 
         Returns:
             ValidationResult(failed_details, all_confirmed, block_reasons)
@@ -212,7 +231,7 @@ class ExcelPlanValidator:
         for i, tc in enumerate(plan.test_cases, 1):
             if tc.id in seen_ids:
                 continue
-            errs = cls.check_case(tc, pre_ids, api_urls)
+            errs = cls.check_case(tc, pre_ids, api_urls, db_schema)
             if _missing_pres_in_plan and any("引用前置" in e for e in errs):
                 errs = [
                     e.replace(

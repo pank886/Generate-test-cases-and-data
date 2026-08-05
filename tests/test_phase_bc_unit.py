@@ -188,27 +188,6 @@ class TestResolveResourceConflicts:
         )
         agent._resolve_resource_conflicts(plan)
 
-    def test_find_pre_returns_none_for_missing(self):
-        """_find_pre 对不存在的 PRE 返回 None。"""
-        plan = ExcelPlanV2(
-            shared_preconditions=[self._make_pre("PRE-001")],
-            test_cases=[],
-        )
-        result = ChatTestAgentGraph._find_pre(plan, "PRE-999")
-        assert result is None
-
-    def test_find_pre_returns_correct(self):
-        """_find_pre 正确返回匹配的 PRE。"""
-        pre = self._make_pre("PRE-001", "目标")
-        plan = ExcelPlanV2(
-            shared_preconditions=[self._make_pre("PRE-000"), pre, self._make_pre("PRE-002")],
-            test_cases=[],
-        )
-        result = ChatTestAgentGraph._find_pre(plan, "PRE-001")
-        assert result is not None
-        assert result.id == "PRE-001"
-        assert result.name == "目标"
-
     def test_multi_pre_conflict_only_isolates_conflicting(self):
         """多 PRE 引用，只隔离冲突的 PRE。"""
         agent = ChatTestAgentGraph()

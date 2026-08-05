@@ -51,49 +51,26 @@ from database.operations import DocOps, ModuleOps, BindingOps, GlossaryOps
 from database import get_session_ctx
 
 
+def _insert_doc(session, doc_id, file_name, file_type, doc_type, chunk_count=0):
+    """测试用：直接插入文档记录（替代已删除的 DocOps.add_document）。"""
+    from database.models import Document
+    session.add(Document(
+        id=doc_id, file_name=file_name, file_type=file_type,
+        doc_type=doc_type, chunk_count=chunk_count,
+    ))
+
+
 # ============================================================
 # 1. DocOps CRUD
 # ============================================================
 
 class TestDocOps:
 
-    def test_add_and_get(self, in_memory_sqlite):
-        """add_document + get_document 往返。"""
-        with get_session_ctx() as session:
-            doc = DocOps.add_document(
-                session, doc_id="doc-001", file_name="test.pdf",
-                file_type="pdf", doc_type="product", chunk_count=10,
-            )
-            session.commit()
-            assert doc.id == "doc-001"
-            assert doc.file_name == "test.pdf"
-
-        with get_session_ctx() as session:
-            fetched = DocOps.get_document(session, "doc-001")
-            assert fetched is not None
-            assert fetched.file_name == "test.pdf"
-            assert fetched.chunk_count == 10
-
-    def test_update_document(self, in_memory_sqlite):
-        """update_document 修改字段。"""
-        with get_session_ctx() as session:
-            DocOps.add_document(session, doc_id="doc-002",
-                              file_name="old.pdf", file_type="pdf", doc_type="product")
-            session.commit()
-
-        with get_session_ctx() as session:
-            updated = DocOps.update_document(
-                session, "doc-002", file_name="new.pdf", status="bound",
-            )
-            session.commit()
-            assert updated.file_name == "new.pdf"
-            assert updated.status == "bound"
-
     def test_delete_document(self, in_memory_sqlite):
         """delete_document 后 get 返回 None。"""
         with get_session_ctx() as session:
-            DocOps.add_document(session, doc_id="doc-003",
-                              file_name="del.pdf", file_type="pdf", doc_type="product")
+            _insert_doc(session, doc_id="doc-003",
+                        file_name="del.pdf", file_type="pdf", doc_type="product")
             session.commit()
 
         with get_session_ctx() as session:
@@ -106,10 +83,10 @@ class TestDocOps:
     def test_get_all_documents(self, in_memory_sqlite):
         """get_all_documents 返回列表。"""
         with get_session_ctx() as session:
-            DocOps.add_document(session, doc_id="d1", file_name="a.pdf",
-                              file_type="pdf", doc_type="product")
-            DocOps.add_document(session, doc_id="d2", file_name="b.md",
-                              file_type="md", doc_type="api")
+            _insert_doc(session, doc_id="d1", file_name="a.pdf",
+                        file_type="pdf", doc_type="product")
+            _insert_doc(session, doc_id="d2", file_name="b.md",
+                        file_type="md", doc_type="api")
             session.commit()
 
         with get_session_ctx() as session:
@@ -119,8 +96,8 @@ class TestDocOps:
     def test_get_unassociated_docs(self, in_memory_sqlite):
         """新文档默认出现在未关联列表中。"""
         with get_session_ctx() as session:
-            DocOps.add_document(session, doc_id="orphan-1",
-                              file_name="o.pdf", file_type="pdf", doc_type="product")
+            _insert_doc(session, doc_id="orphan-1",
+                        file_name="o.pdf", file_type="pdf", doc_type="product")
             session.commit()
 
         with get_session_ctx() as session:
@@ -198,8 +175,6 @@ class TestModuleOps:
             try:
                 ModuleOps.rename_module(session, mod_b_id, "模块A")
                 session.commit()
-                # 如果没抛异常，说明名字改了
-                renamed = ModuleOps.get_by_id(session, mod_b_id)
                 # 取决于业务逻辑：有些 rename 内部有重名检查
             except Exception:
                 session.rollback()
@@ -217,7 +192,7 @@ class TestModuleOps:
             assert ok is True
 
         with get_session_ctx() as session:
-            assert ModuleOps.get_by_id(session, mod_id) is None
+            assert ModuleOps.get_by_name(session, "待删除") is None
 
     def test_get_all_modules(self, in_memory_sqlite):
         """get_all 返回全部模块。"""
@@ -249,8 +224,8 @@ class TestBindingOps:
 
     def _setup_doc_and_module(self, session, doc_id="bd-1", module_name="绑定测试模块"):
         """创建文档和模块供绑定测试，返回 module 实例。"""
-        DocOps.add_document(session, doc_id=doc_id,
-                          file_name="bind_test.pdf", file_type="pdf", doc_type="product")
+        _insert_doc(session, doc_id=doc_id,
+                    file_name="bind_test.pdf", file_type="pdf", doc_type="product")
         mod = ModuleOps.create_module(session, name=module_name)
         session.flush()
         return mod
@@ -364,9 +339,9 @@ class TestBindingOps:
 class TestGlossaryOps:
 
     def _setup_doc(self, session, doc_id="gl-1"):
-        DocOps.add_document(session, doc_id=doc_id,
-                          file_name="glossary_test.pdf",
-                          file_type="pdf", doc_type="product")
+        _insert_doc(session, doc_id=doc_id,
+                    file_name="glossary_test.pdf",
+                    file_type="pdf", doc_type="product")
 
     def test_add_and_get_terms(self, in_memory_sqlite):
         """add_term + get_terms 往返。"""

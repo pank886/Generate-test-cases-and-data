@@ -181,6 +181,13 @@ class Settings(BaseSettings):
         description="thinking LLM 调用超时（秒）。None=沿用 LangChain 客户端默认（约 600s）。Phase B-2 和 Phase C _thinking_per_story 共用此配置",
     )
 
+    # -- 数据库表结构信息（2026-08-04 问题 2：占位，暂不传值） --
+    db_schema: str = Field(
+        default="",
+        description="数据库表结构信息（占位，当前不传实际值）。为空时禁止生成 db/SQL 断言"
+                    "（无表结构无法写正确 SQL），用例生成与 YAML 数据生成两节点均拦截，改用 eq/contains/ne",
+    )
+
     # -- Phase B 资源冲突消解关键词 --
     resource_mutate_keywords: list[str] = Field(
         default=[

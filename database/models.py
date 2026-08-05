@@ -141,19 +141,6 @@ class Binding(Base):
         )
         return left[0], left[1], right[0], right[1]
 
-    @staticmethod
-    def make(source_type: str, source_id: str,
-             target_type: str, target_id: str):
-        """构造一条规范化绑定的属性字典。"""
-        lt, li, rt, ri = Binding.normalize(source_type, source_id,
-                                            target_type, target_id)
-        return {
-            "left_type": lt,
-            "left_id": li,
-            "right_type": rt,
-            "right_id": ri,
-        }
-
     def __repr__(self):
         return f"<Binding {self.left_type}:{self.left_id} ↔ {self.right_type}:{self.right_id}>"
 

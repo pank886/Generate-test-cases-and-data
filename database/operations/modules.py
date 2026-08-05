@@ -26,10 +26,6 @@ class ModuleOps:
         return mod
 
     @staticmethod
-    def get_by_id(session: Session, module_id: str) -> Optional[Module]:
-        return session.get(Module, module_id)
-
-    @staticmethod
     def get_by_name(session: Session, name: str) -> Optional[Module]:
         return session.query(Module).filter(Module.name == name).first()
 

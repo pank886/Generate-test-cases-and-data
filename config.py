@@ -44,10 +44,6 @@ DEEP_MODEL = settings.deep_model
 DEEPSEEK_READY = settings.deepseek_ready
 
 
-def DEEP_API_KEY() -> str:
-    """获取 DeepSeek API Key（运行时读取，避免模块级变量暴露敏感信息）"""
-    return settings.deep_api_key
-
 # ====== ChromaDB Collection 配置 ======
 COLLECTION_PRODUCT_DOCS = settings.collection_product_docs    # 旧双集合（已废弃，保留兼容）
 COLLECTION_API_DEFS = settings.collection_api_defs            # 旧双集合（已废弃，保留兼容）
@@ -87,6 +83,7 @@ EXCEL_REPAIR_ATTEMPTS = settings.excel_repair_attempts
 DEPENDENCY_REPAIR_ATTEMPTS = settings.dependency_repair_attempts
 THINKING_TIMEOUT = settings.thinking_timeout
 RESOURCE_MUTATE_KEYWORDS = settings.resource_mutate_keywords
+DB_SCHEMA = settings.db_schema  # 数据库表结构信息（占位，为空时禁 db 断言，2026-08-04 问题 2）
 CHROMA_RETRY_DELAY = settings.chroma_retry_delay
 TASK_TTL_SECONDS = settings.task_ttl_seconds
 TASK_MAX_WORKERS = settings.task_max_workers
