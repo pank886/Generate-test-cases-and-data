@@ -242,8 +242,8 @@ class TestSaveToSqlite:
 # ══════════════════════════════════════════════════════════════════════
 
 class TestProcessProductDoc:
-    @patch("ingest_v2.ChatTestAgentGraph")
-    @patch("ingest_v2.get_chroma_db")
+    @patch("ingest.pipelines.ChatTestAgentGraph")
+    @patch("ingest.pipelines.get_chroma_db")
     def test_full_flow(self, mock_get_db, mock_graph_class, tmp_path, in_memory_sqlite):
         """完整产品文档入库流程。"""
         from ingest_v2 import process_product_doc
@@ -295,8 +295,8 @@ class TestProcessProductDoc:
         assert fake_db.delete_by_doc_id.called
         assert fake_db.add_product_doc_chunks.called
 
-    @patch("ingest_v2.ChatTestAgentGraph")
-    @patch("ingest_v2.get_chroma_db")
+    @patch("ingest.pipelines.ChatTestAgentGraph")
+    @patch("ingest.pipelines.get_chroma_db")
     def test_empty_file_rejected(self, mock_get_db, mock_graph_class, tmp_path):
         """空文件应当被拒绝。"""
         from ingest_v2 import process_product_doc
@@ -312,7 +312,7 @@ class TestProcessProductDoc:
 # ══════════════════════════════════════════════════════════════════════
 
 class TestApiDocExtract:
-    @patch("ingest_v2.ChatTestAgentGraph")
+    @patch("ingest.pipelines.ChatTestAgentGraph")
     def test_extract_apis(self, mock_graph_class, temp_md_file):
         """从 MD 提取接口定义。"""
         from ingest_v2 import process_api_doc_extract
@@ -337,7 +337,7 @@ class TestApiDocExtract:
         assert len(result["apis"]) == 1
         assert result["apis"][0]["url"] == "/api/login"
 
-    @patch("ingest_v2.ChatTestAgentGraph")
+    @patch("ingest.pipelines.ChatTestAgentGraph")
     def test_extract_merge_duplicates(self, mock_graph_class, tmp_path):
         """重复接口（method+url 相同）应合并。"""
         from ingest_v2 import process_api_doc_extract, _merge_api_defs
@@ -361,7 +361,7 @@ class TestApiDocExtract:
 # ══════════════════════════════════════════════════════════════════════
 
 class TestCommitApiDocs:
-    @patch("ingest_v2.get_chroma_db")
+    @patch("ingest.pipelines.get_chroma_db")
     def test_commit_single(self, mock_get_db, temp_md_file, in_memory_sqlite):
         """确认单个接口入库。"""
         from ingest_v2 import commit_api_docs
@@ -386,7 +386,7 @@ class TestCommitApiDocs:
             assert doc is not None
             assert doc.doc_type == "api"
 
-    @patch("ingest_v2.get_chroma_db")
+    @patch("ingest.pipelines.get_chroma_db")
     def test_commit_multiple(self, mock_get_db, temp_md_file, in_memory_sqlite):
         """多个接口入库。"""
         from ingest_v2 import commit_api_docs
@@ -406,7 +406,7 @@ class TestCommitApiDocs:
         assert result["api_count"] == 2
         assert len(result["doc_ids"]) == 2
 
-    @patch("ingest_v2.get_chroma_db")
+    @patch("ingest.pipelines.get_chroma_db")
     def test_delete_original(self, mock_get_db, in_memory_sqlite):
         """delete_original=True 应删除原文件。"""
         from ingest_v2 import commit_api_docs
@@ -439,8 +439,8 @@ class TestCommitApiDocs:
 class TestDataConsistency:
     """验证双库写入的原子性保障。"""
 
-    @patch("ingest_v2.ChatTestAgentGraph")
-    @patch("ingest_v2.get_chroma_db")
+    @patch("ingest.pipelines.ChatTestAgentGraph")
+    @patch("ingest.pipelines.get_chroma_db")
     def test_chroma_without_sqlite_orphan(self, mock_get_db, mock_graph_class,
                                            tmp_path, in_memory_sqlite):
         """模拟 SQLite 写入失败后 ChromaDB 数据是否孤立（当前设计允许孤立，非 crash）。"""
@@ -463,7 +463,7 @@ class TestDataConsistency:
         txt_path.write_text("测试内容", encoding="utf-8")
 
         # Scenario 1: SQLite 失败 → ChromaDB 永不执行（无孤立数据）
-        with patch("ingest_v2._save_to_sqlite",
+        with patch("ingest.pipelines._save_to_sqlite",
                    side_effect=Exception("SQLite write failed")):
             with pytest.raises(Exception, match="SQLite write failed"):
                 process_product_doc(str(txt_path))
@@ -509,7 +509,7 @@ class TestChunkBatching:
 # ══════════════════════════════════════════════════════════════════════
 
 class TestAxureIngest:
-    @patch("ingest_v2.get_chroma_db")
+    @patch("ingest.pipelines.get_chroma_db")
     @patch("agent_components.axure_parser.AxureParser")
     def test_axure_flow(self, mock_parser_class, mock_get_db,
                          in_memory_sqlite, tmp_path):
@@ -539,7 +539,7 @@ class TestAxureIngest:
         mock_get_db.return_value = fake_db
 
         # Mock LLM graph for module extraction
-        with patch("ingest_v2.ChatTestAgentGraph") as mock_graph_class:
+        with patch("ingest.pipelines.ChatTestAgentGraph") as mock_graph_class:
             mock_graph = MagicMock()
             mock_graph_class.return_value = mock_graph
             from prompts.response_model import DocModuleExtract

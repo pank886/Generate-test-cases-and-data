@@ -178,7 +178,7 @@ class TestRetryCommit:
         后台任务状态；且提交路径使用 ingest_v2.get_chroma_db()（非 web.app._chroma_db），
         故直接 patch 提交路径的 db 实例。
         """
-        import ingest_v2 as _ing
+        import ingest.pipelines as _ing
 
         payload = {
             "file_path": temp_md_file,

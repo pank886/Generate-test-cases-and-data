@@ -1,26 +1,31 @@
 """LangGraph 各个节点方法"""
 import json
 import os
-import re
-import threading
 from collections import defaultdict
-from datetime import datetime
-from typing import Callable, Optional, Type
+from typing import Optional
 
-import openai
-from pydantic import BaseModel, ValidationError
-
-import yaml
 from openpyxl import Workbook
 from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
 from openpyxl.utils import get_column_letter
-from langchain_core.exceptions import OutputParserException
-from agent_components.llm.deepseek import DeepSeekChatOpenAI
 
 import config
 from observability import get_logger
 from agent_components.dual_chroma import get_chroma_db
 from agent_components.state import State
+from agent_components.llm_client import (
+    reload_llm,
+    _get_llm,
+    load_factory_methods,
+    invoke_think,
+    invoke_structured,
+)
+from agent_components.graph_logging import (
+    split_thinking_sections,
+    serialize_for_log,
+    cleanup_logs,
+    log_node_output,
+)
+from agent_components.prompt_builder import prepare_plan_prompt_vars
 from prompts.response_model import (
     ProperResponse,
     ApiDefinition,
@@ -45,35 +50,6 @@ METHOD_FEATURES = {
     "json_schema": {"supports_thinking": False},
     "free_text": {"supports_thinking": True},
 }
-
-# 数据工厂方法缓存已归位 data_factory/registry.py（此处不再维护）
-
-# 全局共享的 LLM 客户端单例（避免多个 ChatTestAgentGraph 实例重复创建）
-_llm_instance: Optional[DeepSeekChatOpenAI] = None
-_llm_lock = threading.Lock()
-
-
-def reload_llm():
-    """重置 LLM 单例，下次 _get_llm 调用时使用最新配置重建（支持热重载）。"""
-    global _llm_instance
-    with _llm_lock:
-        _llm_instance = None
-
-
-def _get_llm() -> DeepSeekChatOpenAI:
-    global _llm_instance
-    if _llm_instance is None:
-        with _llm_lock:
-            if _llm_instance is None:  # 双重检查锁，防并发竞态
-                _llm_instance = DeepSeekChatOpenAI(
-                    model=config.LLM_MODEL,
-                    base_url=config.LLM_BASE_URL,
-                    api_key=config.LLM_API_KEY(),
-                    temperature=config.LLM_TEMPERATURE,
-                    max_tokens=config.LLM_MAX_TOKENS,
-                )
-    return _llm_instance
-
 
 class ChatTestAgentGraph(RetrievalMixin, GenerationMixin):
     """智能测试助手——LangGraph 节点方法的容器类
@@ -731,306 +707,53 @@ class ChatTestAgentGraph(RetrievalMixin, GenerationMixin):
                         len([p for p, r in pre_refs.items() if len(r) > 1]),
                         isolation_count)
 
-    # ==================== 日志辅助方法 ====================
+    # ==================== 日志辅助方法（实现已外移，此处薄转发保持签名） ====================
 
     @staticmethod
     def _split_thinking_sections(text: str) -> dict:
-        """将 thinking 分析输出按三个段落拆分为独立输入。
-
-        宽松匹配：包含关键词即视为段落起始，不要求精确标题。
-        LLM 输出标题略有偏差（如「测试分析」vs「测试场景分析」）时仍能正确解析。
-        """
-        result = {"analysis": "（无）", "preconditions": "（无）", "cases": "（无）"}
-        if not text:
-            return result
-
-        patterns = [
-            ("analysis",      re.compile(r'测试场景分析|场景分析|测试分析', re.IGNORECASE)),
-            ("preconditions", re.compile(r'共享前置|前置条件|前置准备', re.IGNORECASE)),
-            ("cases",         re.compile(r'测试用例|用例设计|用例列表', re.IGNORECASE)),
-        ]
-
-        positions = []
-        for key, pat in patterns:
-            m = pat.search(text)
-            if m:
-                positions.append((m.start(), key))
-        if not positions:
-            return result
-        positions.sort()
-
-        for i, (pos, key) in enumerate(positions):
-            next_pos = positions[i + 1][0] if i + 1 < len(positions) else len(text)
-            result[key] = text[pos:next_pos].strip()
-
-        return result
+        """将 thinking 分析输出按三个段落拆分（实现见 graph_logging.py）。"""
+        return split_thinking_sections(text)
 
     def _prepare_plan_prompt_vars(self, state: State) -> dict:
-        """生成/修复共用的 prompt 变量构造（单一数据源）。2026-08 新增。
-
-        供生成节点与修复节点统一调用，保证 API 信息（概要）、模块树、分析段落
-        来自同一份来源；入参含 plan_source 数据源标注。
-        接线到具体节点待「待删除清单」确认后执行（当前仅新增，不改现有行为）。
-        """
-        module_tree = state.get("module_tree_json") or "[]"
-        test_analysis = state.get("test_point_analysis") or "（无）"
-        _sections = self._split_thinking_sections(test_analysis)
-        api_summaries = [
-            {"name": d.get("name", "?"), "method": d.get("method", "GET"),
-             "url": d.get("url", ""), "description": d.get("description", "")}
-            for d in (state.get("api_definitions") or [])
-        ]
-        return {
-            "module_tree": module_tree,
-            "analysis_section": _sections["analysis"],
-            "shared_pre_section": _sections["preconditions"],
-            "cases_section": _sections["cases"],
-            "all_apis_info": json.dumps(api_summaries, indent=2, ensure_ascii=False),
-            "db_schema": config.DB_SCHEMA,  # 数据库表结构（占位，为空禁 [db]，2026-08-04 问题 2）
-            "plan_source": state.get("plan_source"),
-            "user_context": state.get("original_input", ""),
-        }
+        """生成/修复共用的 prompt 变量构造（实现见 prompt_builder.py）。"""
+        return prepare_plan_prompt_vars(self, state)
 
     @staticmethod
     def _serialize_for_log(obj):
-        """递归序列化对象为 JSON 可序列化的格式"""
-        if isinstance(obj, BaseModel):
-            return obj.model_dump()
-        elif isinstance(obj, dict):
-            return {k: ChatTestAgentGraph._serialize_for_log(v) for k, v in obj.items()}
-        elif isinstance(obj, (list, tuple)):
-            return [ChatTestAgentGraph._serialize_for_log(v) for v in obj]
-        elif isinstance(obj, datetime):
-            return obj.isoformat()
-        elif isinstance(obj, (str, int, float, bool, type(None))):
-            return obj
-        else:
-            return str(obj)
+        """递归序列化对象为 JSON 可序列化格式（实现见 graph_logging.py）。"""
+        return serialize_for_log(obj)
 
     def _log_node_output(self, node_name: str, output: dict):
-        """将节点产出物累积到当前运行日志文件（同一次运行共用一份 JSON + MD）"""
-        from pathlib import Path
-        log_dir = Path("logs") / "workflow"
-        log_dir.mkdir(parents=True, exist_ok=True)
-
-        # 首次调用时生成时间戳（同一次运行保持不变）
-        if self._run_timestamp is None:
-            self._run_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-
-        # 累积数据
-        self._run_data[node_name] = self._serialize_for_log(output)
-
-        base_name = f"workflow_{self._run_timestamp}"
-
-        # ---- JSON（全量数据） ----
-        json_path = log_dir / f"{base_name}.json"
-        with open(json_path, "w", encoding="utf-8") as f:
-            json.dump(self._run_data, f, ensure_ascii=False, indent=2)
-
-        # ---- MD（可读摘要） ----
-        md_lines = [
-            "# 工作流运行日志",
-            f"**运行时间**: {self._run_timestamp[:4]}-{self._run_timestamp[4:6]}-{self._run_timestamp[6:8]} "
-            f"{self._run_timestamp[9:11]}:{self._run_timestamp[11:13]}:{self._run_timestamp[13:15]}",
-            "",
-        ]
-        node_order = ["generate_excel_plan",
-                       "analyze_test_points_raw", "format_test_points",
-                       "generate_py_file", "generate_all_yamls"]
-        for nname in node_order:
-            if nname not in self._run_data:
-                continue
-            data = self._run_data[nname]
-            md_lines.append(f"## {nname}")
-
-            if nname == "generate_excel_plan":
-                plan = data.get("excel_plan", {})
-                # 兼容 ExcelPlanV2 (test_cases) 和 ExcelPlan (rows) 两种模型
-                rows = (plan.get("test_cases", []) or plan.get("rows", [])
-                        if isinstance(plan, dict) else [])
-                modules = len(set(r.get("story", r.get("module_name", "")) for r in rows)) if rows else 0
-                md_lines.append(f"**摘要**: {len(rows)} 条用例，{modules} 个模块")
-                md_lines.append(f"- **文件**: {data.get('excel_path', '')}")
-                if rows:
-                    md_lines.append("\n**模块列表**")
-                    seen = set()
-                    for r in rows:
-                        mn = r.get("module_name", "")
-                        if mn not in seen:
-                            seen.add(mn)
-                            md_lines.append(f"- `{mn}`")
-            elif nname == "generate_py_file":
-                md_lines.append(f"**摘要**: {data.get('py_file_name', '')}（{data.get('modules', 0)} 模块，{data.get('cases', 0)} 用例）")
-                md_lines.append(f"- **文件**: {data.get('py_file_name', '')}")
-                md_lines.append(f"- **路径**: {data.get('py_path', '')}")
-                md_lines.append(f"- **模块数**: {data.get('modules', 0)}")
-                md_lines.append(f"- **用例数**: {data.get('cases', 0)}")
-            elif nname == "generate_all_yamls":
-                total, ok, fail = data.get("total", 0), data.get("success", 0), data.get("failed", 0)
-                md_lines.append(f"**摘要**: {ok}/{total} 成功{'，' + str(fail) + ' 失败' if fail else ''}")
-                md_lines.append(f"- **总数**: {total}")
-                md_lines.append(f"- **成功**: {ok}")
-                md_lines.append(f"- **失败**: {fail}")
-            md_lines.append("")
-
-        md_path = log_dir / f"{base_name}.md"
-        with open(md_path, "w", encoding="utf-8") as f:
-            f.write("\n".join(md_lines) + "\n")
-
-        # 清理：保留 ≤15 组（30 个文件）
-        self._cleanup_logs(str(log_dir), max_pairs=15)
+        """将节点产出物累积到运行日志（实现见 graph_logging.py）。"""
+        return log_node_output(self, node_name, output)
 
     @staticmethod
     def _cleanup_logs(log_dir: str, max_pairs: int = 15):
-        """保留最多 max_pairs 组工作流日志，按组（.json + .md 成对）删除最旧的。
-
-        文件名格式: workflow_20260708_120000.json / .md
-        不完整的组（历史遗留孤儿文件）会被一并清理。
-        """
-        if not os.path.isdir(log_dir):
-            return
-
-        # 1. 按时间戳前缀分组
-        groups: dict[str, list[str]] = {}
-        for f in os.listdir(log_dir):
-            if f.startswith("workflow_") and f.endswith((".json", ".md")):
-                prefix = f[len("workflow_"):].rsplit(".", 1)[0]
-                groups.setdefault(prefix, []).append(f)
-
-        # 2. 删除不完整组（历史遗留孤儿文件）
-        for prefix, files in list(groups.items()):
-            if len(files) < 2:
-                for f in files:
-                    try:
-                        os.remove(os.path.join(log_dir, f))
-                    except OSError:
-                        pass
-                del groups[prefix]
-
-        # 3. 完整组按时间戳排序，超限则删除最旧组
-        sorted_prefixes = sorted(groups.keys())
-        while len(sorted_prefixes) > max_pairs:
-            oldest = sorted_prefixes.pop(0)
-            for f in groups[oldest]:
-                try:
-                    os.remove(os.path.join(log_dir, f))
-                except OSError:
-                    pass
+        """保留最多 max_pairs 组工作流日志（实现见 graph_logging.py）。"""
+        return cleanup_logs(log_dir, max_pairs)
 
     @staticmethod
     def _load_factory_methods() -> str:
-        """数据工厂方法清单（prompt 注入文本）。
-
-        薄壳：实现已归位 data_factory/registry.py（单一事实源 methods.yaml v2，
-        目录+分类详情渲染、缓存、旧结构兼容均在 registry 内）。
-        """
-        from data_factory.registry import render_for_prompt
-        return render_for_prompt()
+        """数据工厂方法清单（prompt 注入文本），实现见 llm_client.py。"""
+        return load_factory_methods()
 
     def _invoke_think(self, bound_llm, messages, max_retries: int | None = None,
                       label: str = "LLM") -> str:
-        """通用 thinking 调用：LLM 返回空 content 时复用同一输入有限重试。
+        """通用 thinking 调用（空 content 复用输入重试），实现见 llm_client.py。"""
+        return invoke_think(bound_llm, messages, max_retries=max_retries, label=label)
 
-        2026-08-03 P2：deepseek-v4-flash 偶发返回空 content（json.loads 报
-        "Expecting value: line 1 column 1 (char 0)"）。空 content 时后续解析/校验
-        都拿不到内容，故在此统一监测：复用同一份 messages 重试，重试耗尽仍空则抛错。
-
-        所有涉及 LLM 输出的节点（thinking 模式手动解析 content 的节点）统一走此方法：
-          - content 为空 → 重试（默认 config.MAX_RETRIES 次 = 重试 2 次）
-          - content 非空 → 立即返回文本（解析/校验失败由调用方按既有逻辑处理）
-          - 已有外层重试循环的调用方传 max_retries=0，避免双重重试
-
-        Args:
-            bound_llm: 已 bind 的 LLM 客户端（含 temperature / thinking / json 配置）
-            messages: 一次构造好的 prompt 消息列表（重试时原样复用，即"复用概要输入"）
-            max_retries: 空响应重试次数，None 用 config.MAX_RETRIES
-            label: 日志中的节点名
-
-        Returns:
-            非空响应文本
-
-        Raises:
-            RuntimeError: 连续 (max_retries+1) 次返回空 content
-        """
-        retries = config.MAX_RETRIES if max_retries is None else max_retries
-        for attempt in range(retries + 1):
-            result = bound_llm.invoke(messages)
-            text = result.content if hasattr(result, "content") else str(result)
-            if text and text.strip():
-                return text
-            if attempt < retries:
-                logger.warning(
-                    "   ⚠️ %s 返回空 content（第 %d 次），复用同一输入重试第 %d 次",
-                    label, attempt + 1, attempt + 2)
-        raise RuntimeError(f"{label} 连续 {retries + 1} 次返回空 content，已终止")
-
-    def _invoke_structured(self, prompt, model_class: Type[BaseModel],
+    def _invoke_structured(self, prompt, model_class,
                            max_retries: int = config.MAX_RETRIES,
                            method: str = "function_calling",
                            thinking: bool = False,
                            temperature: float | None = None,
                            log_label: str = "",
-                           pre_validate: Callable[[dict], dict] | None = None,
-                           **kwargs) -> BaseModel:
-        """调用 LLM 并校验结构化输出，失败时自动重试。
-
-        Args:
-            prompt: ChatPromptTemplate
-            model_class: Pydantic 模型类
-            max_retries: 最大重试次数（默认 2）
-            method: 结构化输出方法，可选 "function_calling" / "json_mode" / "json_schema"
-            thinking: 是否使用深度思考模式（由 METHOD_FEATURES 判定兼容性）
-            temperature: 温度参数，None 使用全局默认值
-            log_label: 不为空时将原始输出写入 thinking_trace.log
-            pre_validate: json_mode 下在 Pydantic 构造前对 dict 执行的回调（用于注入 _annotations 等元数据）
-            **kwargs: prompt 模板变量
-        """
-        # 根据 method 特性配置 thinking 开关
-        features = METHOD_FEATURES.get(method)
-        llm_kwargs = {}
-        if features is None:
-            logger.warning("未知 method '%s'，使用保守配置（禁用 thinking）", method)
-            llm_kwargs["extra_body"] = {"thinking": {"type": "disabled"}}
-        elif not features["supports_thinking"]:
-            if thinking:
-                logger.warning("%s 不支持 thinking=True，已自动禁用 thinking", method)
-            llm_kwargs["extra_body"] = {"thinking": {"type": "disabled"}}
-        elif thinking and config.ENABLE_THINKING:
-            llm_kwargs["extra_body"] = {"thinking": {"type": "enabled"}}
-
-        last_error = None
-        # max_tokens 在 model_kwargs 中，仅温度走 bind
-        _bind_kwargs: dict = {}
-        if temperature is not None:
-            _bind_kwargs["temperature"] = temperature
-        _llm = self.llm.bind(**_bind_kwargs) if _bind_kwargs else self.llm
-        # chain 在重试间不变，只需构建一次
-        chain = prompt | _llm.with_structured_output(
-            model_class, method=method, **llm_kwargs
-        )
-
-        for attempt in range(1 + max_retries):
-            try:
-                result = chain.invoke(kwargs)
-                if result is None:
-                    raise ValueError("LLM 返回了空结果（None）")
-                # ── pre_validate 钩子：json_mode 下在 Pydantic 构造前修改 dict ──
-                if pre_validate and isinstance(result, dict):
-                    result = pre_validate(result)
-                if log_label:
-                    from observability import log_thinking
-                    _raw = result.model_dump() if hasattr(result, "model_dump") else str(result)
-                    log_thinking(log_label, "", f"shared_preconditions={len(_raw.get('shared_preconditions',[]))}条, test_cases={len(_raw.get('test_cases',[]))}条\n{json.dumps(_raw, indent=2, ensure_ascii=False)[:8000]}",
-                                 prompt_label=log_label)
-                if isinstance(result, dict):
-                    result = model_class(**result)
-                return result
-            except Exception as e:
-                last_error = e
-                if attempt < max_retries:
-                    logger.warning("输出校验失败，第 %d 次重试 (%s): %s",
-                                   attempt + 1, type(e).__name__, e, exc_info=True)
-
-        raise RuntimeError(
-            f"LLM 结构化输出校验失败（本调用内重试 {max_retries} 次，外层修复轮独立计数）: {last_error}"
+                           pre_validate=None,
+                           **kwargs):
+        """调用 LLM 并校验结构化输出（实现见 llm_client.py）。"""
+        return invoke_structured(
+            self.llm, prompt, model_class, METHOD_FEATURES,
+            max_retries=max_retries, method=method, thinking=thinking,
+            temperature=temperature, log_label=log_label,
+            pre_validate=pre_validate, **kwargs,
         )
