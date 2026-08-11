@@ -31,5 +31,4 @@ class State(TypedDict):
 
     # --- Phase B 生成/处理解耦：数据源标注（2026-08 新增，纯增量） ---
     plan_source: Optional[str]              # excel_plan 来源: "thinking" / "analyze"
-    api_full_for_snapshot: Optional[list]   # 生成节点已构造的快照数据（供落盘复用）
     module_tree_json: Optional[str]         # 生成节点已取的模块树（避免重复查询）

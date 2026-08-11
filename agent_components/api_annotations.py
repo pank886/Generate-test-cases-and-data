@@ -1,6 +1,6 @@
 """API 异常标识注册表 — 统一管理接口级特殊处理标注。
 
-入库阶段自动检测 → 写入 api_defs.json → 校验阶段按标识精准放行。
+入库阶段自动检测 → 写入 annotations → 校验阶段按标识精准放行。
 
 用法:
     from agent_components.api_annotations import ApiAnnotationRegistry
@@ -20,6 +20,28 @@
 import re
 from dataclasses import dataclass, field
 from typing import Any, Callable
+
+
+def normalize_api_url(url: str) -> str:
+    """统一规范化 API url（入库端 + YAML 生成端共用，D1，消除两处实现漂移）。
+
+    规则:
+      1. 去域名: urlparse 取 path（LLM 可能输出 http://host/path）
+      2. 去 query: query 一律走 testCase.params，URL 保持纯路径
+      3. 去尾部斜杠（根路径 "/" 保留）
+      4. 保留 path 原始大小写——真实后端路径可能区分大小写（2026-08-11 定稿，
+         不统一小写；与现有 normalize_base_info 行为一致）
+      5. 路径参数 {param} 保留字面量（不做替换）
+
+    幂等: normalize_api_url(normalize_api_url(x)) == normalize_api_url(x)
+    """
+    if not isinstance(url, str) or not url.strip():
+        return url
+    from urllib.parse import urlparse
+    path = urlparse(url.strip()).path
+    if not path:
+        return url
+    return path.rstrip("/") or "/"
 
 
 @dataclass

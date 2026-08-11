@@ -77,6 +77,7 @@ COMMON_SERVICE_MODULE = settings.common_service_module
 MAX_RETRIES = settings.max_retries
 YAML_CONCURRENCY = settings.yaml_concurrency
 YAML_REPAIR_ROUNDS = settings.yaml_repair_rounds
+YAML_SINGLE_NODE = settings.yaml_single_node
 YAML_FAILURE_CIRCUIT_BREAKER = settings.yaml_failure_circuit_breaker
 LLM_MAX_TOKENS = settings.llm_max_tokens
 EXCEL_REPAIR_ATTEMPTS = settings.excel_repair_attempts

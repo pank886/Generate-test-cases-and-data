@@ -45,6 +45,10 @@ vector_store/
 
 # Phase C 生成过程产物
 _generation_errors.json
+_generation_error_details.log
+dependency_map.json
+_api_not_found_issues.json
+_post_validation_issues.json
 ~$*.xlsx
 
 # 数据工厂注册表编译器草稿（人工审核后合并，不入库）

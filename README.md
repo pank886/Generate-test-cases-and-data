@@ -47,15 +47,16 @@ Workflow（运行阶段）
   │     │     ├── 校验（ExcelPlanValidator：字段/前置引用/步骤对齐/断言格式，拦截原因按类型聚合）
   │     │     ├── 修复轮（LLM 修复失败行，入参=共享数据 + 错误用例 + 拦截方法提示）
   │     │     ├── 消解器（冲突前置克隆隔离）
-  │     │     └── 落盘三件套：test_plan.xlsx + translation_cache.json
-  │     │         + api_defs.json（接口定义快照，Phase C 数据来源，缺失即阻断确认）
+  │     │     └── 落盘：test_plan.xlsx + translation_cache.json
+  │     │         （api_defs.json 快照已取消 2026-08-11，Phase C 数据来源 = SQLite）
   │     └── thinking 失败（无 plan）→ requires_review 人工审查（不降级自生成）
   │
   ├── .py 文件生成（纯代码组装：fixture + run_blocks 结构，翻译缓存优先）
-  └── YAML 生成（两阶段：analyze_yaml_data thinking → format json_mode，单次输出）
-        ├── 规整层（确定性修正：method 小写/url 去域名/header 补全/断言合并/空字段剔除）
-        ├── 校验层（回炉类：占位符注册表/三选一/空列表/提取值类型，失败不写盘）
-        └── 修复循环：失败登记占位 → 轮末错误模式汇总 → 思考自查 → 重生成
+  └── YAML 生成（D4 锚定：dep_map case_api_sequences 按下标锚定 + SQLite 按需取源）
+        ├── 前置拦截：锚接口在 SQLite 查不到 → 跳过（skipped_api_missing + _api_not_found_issues.json）
+        ├── 单节点（YAML_SINGLE_NODE=True 默认）：thinking + json_object 一次调用生成 TestData
+        ├── 校验（数量/url/method 按锚比对 + pydantic 三选一/占位符/空字段）
+        └── 修复循环：失败进思考自查重生成（锚注入，只修错误位置）
             └── 超轮次仍失败 → _generation_errors.json + 计 failed（无占位假文件）
 ```
 
@@ -71,7 +72,8 @@ Workflow（运行阶段）
 - **Excel 测试计划** — 生成含 Allure 标签、模块划分、步骤描述的标准化测试计划
 - **自动校验修复** — Pydantic + 文件层双重校验 + 自动修复循环（最多 3 次）+ 人工审查兜底
 - **YAML 质量治理** — 规整/重生成两分法：确定性格式修正静默执行；语义性错误（占位符幻觉/三选一冲突/空输出）登记后集中送思考节点自查重生成，终态失败输出 `_generation_errors.json`，杜绝"假成功"
-- **数据真实性** — 接口定义快照 `api_defs.json` 随计划落盘，Phase C 数据缺失显式阻断，禁止假数据托底
+- **数据真实性** — Phase C 接口数据以 SQLite 为单一事实源（快照 `api_defs.json` 已取消 2026-08-11），数据缺失显式阻断（M8），禁止假数据托底
+- **接口按需取源** — Phase C 只喂轻量锚 + 详情（dep_map 锚定 + SQLite 按 url 精准取，D5 覆盖校验自动补漏）；接口缺失前置拦截跳过，杜绝 context 膨胀与空数据
 - **数据工厂注册表** — `data_factory/methods.yaml` 单一事实源（目录+大类结构），prompt 渲染 / 占位符校验 / 单元测试三处同源
 - **Python 测试脚本** — 生成 pytest + allure 测试类代码
 - **YAML 测试数据** — 结构化的请求/响应测试数据

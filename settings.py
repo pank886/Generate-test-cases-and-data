@@ -219,6 +219,13 @@ class Settings(BaseSettings):
         description="YAML 修复轮数。失败项集中送思考节点自查后重生成；0=不修复直接计失败",
     )
 
+    yaml_single_node: bool = Field(
+        default=True,
+        description="YAML 单节点生成开关：thinking + json_object 一次调用生成 TestData（省一半 LLM 调用），"
+                    "thinking 走 reasoning_content。2026-08-12 灰度通过（single 87/92 > two_stage 83/92），"
+                    "默认开启；置 False 可回退两段式",
+    )
+
     # -- Phase C 全局熔断 --
     yaml_failure_circuit_breaker: float = Field(
         default=0.5, ge=0.1, le=1.0,

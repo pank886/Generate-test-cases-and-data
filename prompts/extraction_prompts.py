@@ -279,7 +279,9 @@ def format_yaml_data_prompt() -> ChatPromptTemplate:
          "4. **validation 必须是数组** [...], 禁止写成对象 {{...}}\n"
          "5. api_name/url/method 与接口定义完全一致\n"
          "6. method 必须小写（post/get/put/delete）\n"
-         "7. url 只写路径，禁止带域名，禁止使用 ${{}} 动态占位符\n"
+         "7. url 必须与接口序列（锚）中的 url **逐字一致**（含 {{param}} 字面量）；"
+         "只写路径、禁域名、禁 query、禁 ${{}}；路径参数禁止替换成具体值"
+         "（具体值/query 走 testCase.params 或 json）\n"
          "8. **每个 baseInfo 必须有 header 字段**：POST/PUT/PATCH 写 Content-Type: application/json, GET 写空 {{}}\n"
          "9. 请求参数按 HTTP 方法选择：GET/DELETE → params, POST/PUT/PATCH → json\n"
          "10. 动态值使用 ${{函数名(参数)}}，函数必须来自上方清单\n"
@@ -310,40 +312,8 @@ def generate_dependency_map_prompt() -> ChatPromptTemplate:
     return ChatPromptTemplate.from_messages([
         ("system",
          "你是测试架构师。根据测试计划、接口定义和模块结构，生成依赖映射表。\n\n"
-         "### 输出 JSON 结构\n"
-         "必须输出以下结构的 JSON（一个字符都不能错）：\n\n"
-         "```json\n"
-         "{{\n"
-         '  "stories": [\n'
-         '    {{\n'
-         '      "story_name": "子模块中文名",\n'
-         '      "story_pre_api_sequence": ["步骤名:POST /api/xxx"],\n'
-         '      "case_api_sequences": {{\n'
-         '        "TC-001": ["步骤名:POST /api/xxx", "步骤名:GET /api/yyy"]\n'
-         '      }},\n'
-         '      "decision_map": {{\n'
-         '        "TC-001": {{\n'
-         '          "steps": [\n'
-         '            {{"api": "POST /api/xxx", "params": {{"name": "${{random_plates(1)}}"}}, '
-         '"assertions": [{{"eq": {{"$.retCode": 0}}}}]}},\n'
-         '            {{"api": "GET /api/yyy", "params": {{"pageNum": 1}}, '
-         '"assertions": [{{"eq": {{"$.retCode": 0}}}}]}}\n'
-         '          ]\n'
-         '        }}\n'
-         '      }},\n'
-         '      "internal_dependency": {{\n'
-         '        "TC-001": {{"output_var": "code", "extract_path": "$.data.code", "used_by": ["TC-002"]}},\n'
-         '        "TC-002": {{"output_var": null, "extract_path": null, "used_by": []}}\n'
-         '      }},\n'
-         '      "cross_module_dependency": {{\n'
-         '        "前置步骤名": {{"module": "依赖的外部模块名", "var": "需获取的变量名", '
-         '"api": "GET /api/xxx"}}\n'
-         '      }},\n'
-         '      "teardown_api_sequence": []\n'
-         '    }}\n'
-         '  ]\n'
-         '}}\n'
-         "```\n\n"
+         "### 输出 JSON 结构（严格按下方 json_schema 的字段与类型输出，一个都不能错）\n" 
+         "{json_schema}\n\n"
          "### 铁律\n"
          "1. story_name 与 Excel @allure.story 完全一致\n"
          "2. case_api_sequences 中每个 case_id 至少有一个 API 步骤\n"
@@ -352,8 +322,12 @@ def generate_dependency_map_prompt() -> ChatPromptTemplate:
          "5. 动态值使用 ${{函数名(参数)}}，函数必须来自上方数据工厂清单\n"
          "6. extract_path 必须以 $. 开头，从接口 returns 中选择字段\n"
          "7. used_by 引用的 case_id 必须在本 story 的 case_api_sequences 中存在\n"
-         "8. teardown 按数据流判断：下游消费本用例产物→不清理；有合法清理路径→填写；否则留空 []\n"
-         "9. 禁止 Markdown，只输出纯净 JSON"),
+         "8. **有共享前置的 story（其用例引用 PRE-xxx）必须输出非空 story_pre_api_sequence 与 teardown_api_sequence**"
+         "——setup/teardown 锚绝不允许为空（有前置必有其前置序列与清理序列）\n"
+         "9. 无共享前置的 story：story_pre_api_sequence / teardown_api_sequence 可留空 []\n"
+         "10. case_api_sequences / story_pre_api_sequence / teardown_api_sequence 每个元素格式:"
+         "'步骤名:METHOD /url'（如 '创建订单:POST /order/create'）；步骤名可省略，但 METHOD 与 /url 必须给出\n"
+         "11. 禁止 Markdown，只输出纯净 JSON"),
         ("human",
          "### 上下文备注\n{context_note}\n\n"
          "### 数据工厂方法（动态占位符只能从此清单选择）\n"
@@ -364,6 +338,49 @@ def generate_dependency_map_prompt() -> ChatPromptTemplate:
          "### 产品文档\n{product_docs}\n\n"
          "### 用户意图\n{user_context}\n\n"
          "请生成依赖映射表 JSON：")
+    ])
+
+
+def repair_dependency_map_prompt() -> ChatPromptTemplate:
+    """Phase C Step 0 补漏修复：只补全第一轮遗漏的用例/story 前置序列（D5）。
+
+    结构与 generate_dependency_map_prompt 一致；入参增加：
+      - repair_cases: 第一轮遗漏的用例行 JSON（待补数据）
+      - repair_stories: 有共享前置但 story_pre/teardown 为空的 story（story_name + preconditions）
+      - analysis: Phase B 模块分析（ModuleAnalysis，辅助接口匹配）
+    系统指令强调"只补漏、三表 key 一致、不重复已生成、story 级补 pre/teardown"。
+    """
+    return ChatPromptTemplate.from_messages([
+        ("system",
+         "你是测试架构师。第一轮生成的依赖映射遗漏了部分用例，或部分 story 的前置/清理序列为空，"
+         "请**只补全这些缺口**。\n\n"
+         "### 输出 JSON 结构（严格按下方 json_schema 的字段与类型输出，一个都不能错）\n"
+         "{json_schema}\n\n"
+         "### 补漏铁律\n"
+         "1. **只输出【待补用例 / 待补 story】的映射**（来自 repair_cases / repair_stories），不重复已生成的\n"
+         "2. 待补 case_id 必须在 case_api_sequences / decision_map / internal_dependency 三表同时出现（key 集合一致）\n"
+         "3. **待补 story（repair_stories）：必须输出非空 story_pre_api_sequence 与 teardown_api_sequence**"
+         "（其用例有共享前置 PRE-xxx，有前置必有其前置序列与清理序列，绝不允许留空）\n"
+         "4. story_name 与 Excel story 列 / 待补列表一致；若该 story 已在首轮存在，只输出该 story 中新增的 case 与缺失的 pre/teardown\n"
+         "5. decision_map 的 api 格式: 'METHOD /url'（如 'POST /meterDevice/add'）\n"
+         "6. 动态值使用 ${{函数名(参数)}}，函数必须来自数据工厂清单\n"
+         "7. extract_path 必须以 $. 开头，从接口 returns 中选择字段\n"
+         "8. used_by 引用的 case_id 必须存在\n"
+         "9. case_api_sequences / story_pre_api_sequence / teardown_api_sequence 每个元素格式:"
+         "'步骤名:METHOD /url'（如 '创建订单:POST /order/create'）；步骤名可省略，但 METHOD 与 /url 必须给出\n"
+         "10. 禁止 Markdown，只输出纯净 JSON"),
+        ("human",
+         "### Phase B 模块分析（辅助接口匹配，可直接参考）\n{analysis}\n\n"
+         "### 待补用例（第一轮遗漏，只补这些；若无则写 []）\n{repair_cases}\n\n"
+         "### 待补 story 的前置/清理序列（有共享前置但首轮留空；若无则写 []）\n{repair_stories}\n\n"
+         "### 数据工厂方法（动态占位符只能从此清单选择）\n"
+         "{data_factory_methods}\n\n"
+         "### 接口定义\n{all_apis_info}\n\n"
+         "### 模块树\n{module_tree}\n\n"
+         "### 产品文档\n{product_docs}\n\n"
+         "### 上下文备注\n{context_note}\n\n"
+         "### 用户意图\n{user_context}\n\n"
+         "请生成补漏依赖映射 JSON：")
     ])
 
 

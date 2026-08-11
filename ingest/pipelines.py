@@ -283,6 +283,11 @@ def process_api_doc_extract(file_path: str, default_module: str = None,
                 module = mod
             all_apis.extend(apis)
 
+    # ---- D1: 提取后统一规范化 url（白名单/合并去重/入库共用同形）----
+    from agent_components.api_annotations import normalize_api_url
+    for a in all_apis:
+        a["url"] = normalize_api_url(a.get("url", ""))
+
     # ---- 白名单校验：过滤 LLM 幻觉的接口 ----
     # 扫描原始文档，提取所有 **Path：** + **Method：** 对作为白名单。
     # LLM 可能因参数字段名（如 deviceStatus→编造 /device/info）或记忆污染
@@ -337,6 +342,11 @@ def commit_api_docs(file_path: str, module_name: str, apis: list[dict],
     import json as _json
     cb = progress_cb or (lambda p, m: None)
     logger.info(f"[Phase A] 入库 {len(apis)} 个接口文档")
+
+    # D1: 写入前统一规范化 url（SQLite api_url / file_name / doc_id / 检索文本共用同形）
+    from agent_components.api_annotations import normalize_api_url
+    for api in apis:
+        api["url"] = normalize_api_url(api.get("url", ""))
 
     db = get_chroma_db()
     file_name = os.path.basename(file_path)

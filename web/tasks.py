@@ -158,36 +158,151 @@ async def _process_file_bg(task_id: str, file_path: str, ext: str,
 # Phase C: 确认计划 → 生成 .py + .yaml
 # ========================================================================
 
-def _resolve_api_defs(excel_path: str, api_defs_json: str = "") -> str | None:
-    """解析 Phase C 所需的接口定义（规则 M8：缺失必须显式失败，禁止空定义续跑）。
+def _resolve_api_defs(excel_path: str) -> str | None:
+    """M8 门禁升级：SQLite 该模块 API 文档非空 → 投影轻量索引。
 
-    优先级:
-      1. 显式入参 api_defs_json（非空且非 "[]"）
-      2. excel 同级 api_defs.json —— Phase B 生成计划时落盘的接口定义快照
-    返回 None 表示缺失，调用方必须阻断任务，严禁以空值/假数据继续生成。
+    快照 api_defs.json 已取消（D3），显式入参已删（2026-08-11）。
+    模块名 = Excel feature 列（Phase B 写入的 _feature = confirmed_module）。
+
+    返回轻量索引 JSON `[{name, method, url}]`；SQLite 该模块无 API 文档 → None 阻断
+    （调用方必须显式失败，严禁空定义续跑）。
     """
-    if api_defs_json and api_defs_json.strip() and api_defs_json.strip() != "[]":
-        return api_defs_json
+    module = _read_excel_module(excel_path)
+    if not module:
+        logger.error("无法从 Excel feature 列解析模块名: %s", excel_path)
+        return None
 
-    snapshot = os.path.join(os.path.dirname(excel_path), "api_defs.json")
-    if os.path.exists(snapshot):
+    from database import get_session_ctx
+    from database.operations import BindingOps
+    with get_session_ctx() as session:
+        docs = BindingOps.get_bound_docs(session, module)
+        apis = [d for d in docs if d.doc_type == "api"]
+        if not apis:
+            logger.warning(
+                "M8 阻断：模块 [%s] 无 API 文档（SQLite 未绑定/为空），禁止空定义续跑",
+                module)
+            return None
+        index = [{"name": d.api_name or f"api_{i}",
+                  "method": d.api_method or "?",
+                  "url": d.api_url or ""}
+                 for i, d in enumerate(apis)]
+    logger.info("M8 通过：模块 [%s] 投影轻量索引 %d 个接口", module, len(index))
+    return _json.dumps(index, ensure_ascii=False)
+
+
+def _read_excel_module(excel_path: str) -> str:
+    """读取 Excel 首行 feature 列（列索引 1）作为模块名。
+
+    Phase B 写入时 feature 列 = _feature = confirmed_module（nodes.py:501-503）。
+    """
+    try:
+        from openpyxl import load_workbook
+        wb = load_workbook(excel_path)
         try:
-            with open(snapshot, "r", encoding="utf-8") as f:
-                content = f.read().strip()
-            if content and _json.loads(content):
-                return content
-            logger.warning("接口定义快照为空: %s", snapshot)
-        except (OSError, ValueError):
-            logger.error("接口定义快照读取失败: %s", snapshot, exc_info=True)
-    return None
+            ws = wb.active
+            for row in ws.iter_rows(min_row=2, values_only=True):
+                if not row or row[0] is None:
+                    continue
+                return str(row[1] or "").strip()
+        finally:
+            wb.close()
+    except Exception:
+        logger.error("读取 Excel feature 列失败: %s", excel_path, exc_info=True)
+    return ""
+
+
+def _find_missing_dep_map_cases(rows: list, dep_map: dict) -> list:
+    """返回 dep_map 遗漏的 Excel 用例行（case_id 不在 case_api_sequences，D5）。"""
+    covered = {
+        cid
+        for s in (dep_map or {}).get("stories", [])
+        for cid in (s.get("case_api_sequences") or {})
+    }
+    return [r for r in rows if r.get("case_id") and r["case_id"] not in covered]
+
+
+def _find_stories_missing_anchors(rows: list, dep_map: dict) -> list:
+    """返回有共享前置但 dep_map 里 story_pre/teardown 为空的 story（含前置文本，D5/A）。
+
+    返回 [{story_name, preconditions}]，供 repair_stories 定向补 story_pre_api_sequence
+    / teardown_api_sequence（有前置必有其前置序列与清理序列，绝不接受空数据）。
+    """
+    from collections import defaultdict
+    story_pre = defaultdict(set)
+    for r in rows:
+        pre = r.get("preconditions") or ""
+        if pre and pre != "无":
+            for pid in pre.split(","):
+                if pid.strip().startswith("PRE-"):
+                    story_pre[r.get("story")].add(pid.strip())
+    out = []
+    for s in (dep_map or {}).get("stories", []):
+        if not isinstance(s, dict):
+            continue
+        name = s.get("story_name")
+        if name in story_pre:
+            if not s.get("story_pre_api_sequence") or not s.get("teardown_api_sequence"):
+                out.append({"story_name": name,
+                            "preconditions": ", ".join(sorted(story_pre[name]))})
+    return out
+
+
+def _load_module_analysis(excel_path: str) -> str:
+    """读模块的 Phase B 分析（ModuleAnalysis）作为补漏修复上下文（D5）。"""
+    module = _read_excel_module(excel_path)
+    if not module:
+        return ""
+    try:
+        from database import get_session_ctx
+        from database.operations import ModuleOps, AnalysisOps
+        with get_session_ctx() as session:
+            mod = ModuleOps.get_by_name(session, module)
+            if not mod:
+                return ""
+            record = AnalysisOps.get_by_module_id(session, mod.id)
+            if not record:
+                return ""
+            return record.analysis_json or record.api_analysis or ""
+    except Exception:
+        logger.warning("读取模块分析失败（D5 补漏跳过分析）: %s", module, exc_info=True)
+        return ""
+
+
+def _merge_dep_map(existing: dict, repair: dict) -> dict:
+    """把补漏修复的 partial dep_map 合并进现有 dep_map（D5）。
+
+    按 story_name 对齐；case 级三表（case_api_sequences / decision_map /
+    internal_dependency）以 repair 覆盖/新增；story 级 story_pre_api_sequence /
+    teardown_api_sequence 在 repair 提供非空时覆盖（补漏 story 锚）。
+    """
+    merged = dict(existing or {})
+    stories = list(merged.get("stories") or [])
+    by_name = {s.get("story_name"): s for s in stories if isinstance(s, dict)}
+    for rs in (repair or {}).get("stories", []):
+        if not isinstance(rs, dict):
+            continue
+        name = rs.get("story_name")
+        if name in by_name:
+            base = by_name[name]
+            for key in ("case_api_sequences", "decision_map", "internal_dependency"):
+                if rs.get(key):
+                    base[key] = {**(base.get(key) or {}), **(rs[key])}
+            if rs.get("story_pre_api_sequence"):
+                base["story_pre_api_sequence"] = rs["story_pre_api_sequence"]
+            if rs.get("teardown_api_sequence"):
+                base["teardown_api_sequence"] = rs["teardown_api_sequence"]
+        else:
+            stories.append(rs)
+            by_name[name] = rs
+    merged["stories"] = stories
+    return merged
 
 
 async def _confirm_plan_bg(task_id: str, excel_path: str | None,
-                          api_defs_json: str = "", user_ctx: str = ""):
+                          user_ctx: str = ""):
     """后台执行确认计划 -> 生成 .py + .yaml。
 
-    api_defs_json / user_ctx 由 /confirm-plan 端点显式传入，
-    不再依赖全局 _last_api_defs / _last_user_input。
+    user_ctx 由 /confirm-plan 端点传入；接口索引从 SQLite 投影（_resolve_api_defs）。
     """
     import glob
     import config
@@ -220,15 +335,14 @@ async def _confirm_plan_bg(task_id: str, excel_path: str | None,
             return
 
         # 规则 M8：接口定义缺失必须显式阻断，禁止空定义盲写 YAML
-        resolved_defs = _resolve_api_defs(excel_path, api_defs_json)
-        if resolved_defs is None:
+        api_defs_json = _resolve_api_defs(excel_path)
+        if api_defs_json is None:
             await _update_task(
                 task_id, status="failed",
-                error="未找到接口定义（计划目录缺少 api_defs.json 或内容为空），"
-                      "请重新执行 Phase B 生成测试计划后再确认",
+                error="未找到接口定义（SQLite 该模块无 API 文档），"
+                      "请先完成 API 文档入库并绑定到模块，再重新确认计划",
             )
             return
-        api_defs_json = resolved_defs
 
         # ---- Phase C Step 0: 生成 dependency_map.json ----
         await _update_task(task_id, status="running", progress=15,
@@ -275,6 +389,7 @@ async def _confirm_plan_bg(task_id: str, excel_path: str | None,
             logger.info("   📄 dependency_map.json 已生成: %s", dep_map_path)
 
         # ---- Phase C Step 1: 加载 + 预校验 dep_map（失败不阻断） ----
+        dep_map = None
         try:
             if dep_map_path:
                 with open(dep_map_path, "r", encoding="utf-8") as f:
@@ -286,6 +401,45 @@ async def _confirm_plan_bg(task_id: str, excel_path: str | None,
                     logger.warning("   ⚠️ dependency_map.json 无有效 story，跳过")
         except Exception as e:
             logger.warning("   ⚠️ dependency_map.json 解析失败（非致命）: %s", e)
+
+        # ---- D5 覆盖校验 + 定向修复（dep_map 漏 case / 漏 story 锚 → 补漏，带 Phase B 分析）----
+        if dep_map:
+            try:
+                rows = _phase_b_components._read_excel_rows(excel_path)
+                missing_cases = _find_missing_dep_map_cases(rows, dep_map)
+                missing_stories = _find_stories_missing_anchors(rows, dep_map)
+                if missing_cases or missing_stories:
+                    logger.warning(
+                        "   ⚠️ dep_map 遗漏 %d 个用例 + %d 个 story 前置/清理锚"
+                        "（D5 定向修复）", len(missing_cases), len(missing_stories))
+                    if missing_cases:
+                        logger.warning("      漏用例: %s",
+                                       [r.get("case_id") for r in missing_cases])
+                    if missing_stories:
+                        logger.warning("      漏 story 锚: %s",
+                                       [s["story_name"] for s in missing_stories])
+                    analysis = _load_module_analysis(excel_path)
+                    repair_path = await asyncio.to_thread(
+                        _phase_b_components._generate_dependency_map,
+                        excel_path, output_dir, api_defs_json,
+                        module_tree_json, product_docs_json,
+                        "（Phase C Step 0 补漏修复）", user_ctx,
+                        repair_cases=missing_cases or None,
+                        repair_stories=missing_stories or None,
+                        analysis=analysis,
+                    )
+                    if repair_path:
+                        with open(repair_path, "r", encoding="utf-8") as f:
+                            repair_map = _json.load(f)
+                        dep_map = _merge_dep_map(dep_map, repair_map)
+                        with open(dep_map_path, "w", encoding="utf-8") as f:
+                            _json.dump(dep_map, f, ensure_ascii=False, indent=2)
+                        logger.info(
+                            "   ✅ D5 补漏合并完成: 现 %d 个 story",
+                            len(dep_map.get("stories", [])))
+            except Exception as e:
+                logger.warning(
+                    "   ⚠️ D5 覆盖校验/补漏修复失败（非致命，缺失项将跳过）: %s", e)
 
         await _update_task(task_id, status="running", progress=20,
                            message="正在生成 .py 测试文件...")
@@ -321,7 +475,7 @@ async def _confirm_plan_bg(task_id: str, excel_path: str | None,
         try:
             yaml_result = await asyncio.to_thread(
                 _phase_b_components._generate_all_yamls,
-                excel_path, api_defs_json, user_ctx,
+                excel_path, dep_map, user_ctx,
             )
         finally:
             _heartbeat_stop = True
@@ -334,6 +488,8 @@ async def _confirm_plan_bg(task_id: str, excel_path: str | None,
         msg = f".py: {py_result['py_file_name']}（{py_result['modules']}模块）"
         if yaml_result["total"] > 0:
             msg += f" | YAML: {yaml_result['success']}/{yaml_result['total']} 个"
+            if yaml_result.get("skipped_api_missing"):
+                msg += f"，跳过接口缺失 {yaml_result['skipped_api_missing']} 个"
             if yaml_result.get("repaired"):
                 msg += f"（含自查修复 {yaml_result['repaired']} 个）"
             if yaml_result.get("failed"):
@@ -349,6 +505,7 @@ async def _confirm_plan_bg(task_id: str, excel_path: str | None,
             "yaml_total": yaml_result["total"],
             "yaml_repaired": yaml_result.get("repaired", 0),
             "yaml_failed": yaml_result.get("failed", 0),
+            "yaml_skipped": yaml_result.get("skipped_api_missing", 0),
             "yaml_rounds": yaml_result.get("rounds", 0),
             "errors_file": yaml_result.get("errors_file"),
             "excel_path": excel_path,

@@ -20,11 +20,18 @@ class ExcelMixin:
     def _generate_dependency_map(self, excel_path: str, output_dir: str,
                                   api_defs_json: str, module_tree_json: str,
                                   product_docs_json: str, context_note: str,
-                                  user_ctx: str) -> str:
-        """Phase C Step 0: 生成 dependency_map.json。
+                                  user_ctx: str, repair_cases: list | None = None,
+                                  repair_stories: list | None = None,
+                                  analysis: str = "") -> str:
+        """Phase C Step 0: 生成 dependency_map.json（D5 支持补漏修复）。
 
         调用 LLM（thinking 模式）分析 Excel 测试计划 + 接口定义 + 模块树，
         输出结构化依赖映射表，经 Pydantic 校验后原子写入。
+
+        补漏模式（repair_cases / repair_stories 任一非空）：
+          用 repair_dependency_map_prompt，注入 analysis（Phase B 模块分析）辅助；
+          补 repair_cases 的 case 级三表，或补 repair_stories 的 story_pre/teardown；
+          输出 partial 供上层 merge。
 
         Args:
             excel_path: test_plan.xlsx 路径
@@ -34,20 +41,32 @@ class ExcelMixin:
             product_docs_json: 产品文档 JSON 字符串
             context_note: 上下文备注（注入 prompt）
             user_ctx: 用户原始意图/上下文
+            repair_cases: 补漏模式下待补的用例行列表（含 case_id），None=首次全量生成
+            repair_stories: 补漏模式下待补 pre/teardown 的 story 列表
+                            [{story_name, preconditions}]，None=首次全量生成
+            analysis: 补漏模式下注入的 Phase B 模块分析文本
 
         Returns:
             dependency_map.json 的绝对路径
         """
         from observability import log_phase_header, log_thinking
-        from prompts.extraction_prompts import generate_dependency_map_prompt
+        from prompts.extraction_prompts import (
+            generate_dependency_map_prompt, repair_dependency_map_prompt)
         from prompts.response_model import DependencyMap
 
-        log_phase_header("Phase C Step 0 — 生成依赖映射表")
-        logger.info("\n🗺️  生成 dependency_map.json ...")
+        is_repair = bool(repair_cases) or bool(repair_stories)
+        log_phase_header("Phase C Step 0 — 生成依赖映射表"
+                         + ("（补漏修复）" if is_repair else ""))
+        logger.info("\n🗺️  生成 dependency_map.json ..."
+                    + ("（补漏修复）" if is_repair else ""))
 
-        # 读取 Excel 用例行
+        # json_schema 注入（与 pydantic 模型同源，避免 prompt 骨架漂移）
+        json_schema_text = json.dumps(
+            DependencyMap.model_json_schema(), ensure_ascii=False, indent=2)
+
+        # 读取 Excel 用例行（补漏模式 repair 走 repair_cases/repair_stories 直传，不需过滤）
         rows = self._read_excel_rows(excel_path)
-        if not rows:
+        if not is_repair and not rows:
             raise ValueError("Excel 中无用例数据，无法生成 dependency_map")
 
         excel_rows_json = json.dumps([
@@ -57,17 +76,31 @@ class ExcelMixin:
 
         factory_methods_text = self._load_factory_methods()
 
-        prompt = generate_dependency_map_prompt()
+        prompt = (repair_dependency_map_prompt() if is_repair
+                  else generate_dependency_map_prompt())
         llm_kwargs = {"extra_body": {"thinking": {"type": "enabled"}}}
         bound_llm = self.llm.bind(**llm_kwargs)
 
         last_error = None
         for attempt in range(1 + config.YAML_REPAIR_ROUNDS):
             try:
-                # 空 content 走公共方法 _invoke_think（max_retries=0：外层已有重试循环，避免双重重试）
-                raw_text = self._invoke_think(
-                    bound_llm,
-                    prompt.format_messages(
+                if is_repair:
+                    _prompt_vars = dict(
+                        data_factory_methods=factory_methods_text,
+                        all_apis_info=api_defs_json,
+                        module_tree=module_tree_json,
+                        product_docs=product_docs_json,
+                        context_note=context_note,
+                        user_context=user_ctx,
+                        json_schema=json_schema_text,
+                        repair_cases=json.dumps(repair_cases or [],
+                                                ensure_ascii=False, indent=2),
+                        repair_stories=json.dumps(repair_stories or [],
+                                                  ensure_ascii=False, indent=2),
+                        analysis=analysis,
+                    )
+                else:
+                    _prompt_vars = dict(
                         data_factory_methods=factory_methods_text,
                         all_apis_info=api_defs_json,
                         excel_rows=excel_rows_json,
@@ -75,9 +108,15 @@ class ExcelMixin:
                         product_docs=product_docs_json,
                         context_note=context_note,
                         user_context=user_ctx,
-                    ),
+                        json_schema=json_schema_text,
+                    )
+                # 空 content 走公共方法 _invoke_think（max_retries=0：外层已有重试循环，避免双重重试）
+                raw_text = self._invoke_think(
+                    bound_llm,
+                    prompt.format_messages(**_prompt_vars),
                     max_retries=0,
-                    label="generate_dependency_map",
+                    label="generate_dependency_map_repair" if is_repair
+                          else "generate_dependency_map",
                 )
 
                 # 提取 JSON（LLM 可能在 JSON 外面包了 markdown 代码块）
@@ -90,10 +129,12 @@ class ExcelMixin:
                 parsed = json.loads(json_text)
                 dep_map = DependencyMap(**parsed)
 
-                log_thinking("generate_dependency_map",
-                             f"{len(dep_map.stories)} stories",
-                             json.dumps(parsed, ensure_ascii=False, indent=2)[:8000],
-                             prompt_label="generate_dependency_map_prompt")
+                log_thinking(
+                    "generate_dependency_map_repair" if is_repair else "generate_dependency_map",
+                    f"{len(dep_map.stories)} stories",
+                    json.dumps(parsed, ensure_ascii=False, indent=2)[:8000],
+                    prompt_label="repair_dependency_map_prompt" if is_repair
+                                 else "generate_dependency_map_prompt")
 
                 # 原子写入
                 dep_map_path = os.path.join(output_dir, "dependency_map.json")
@@ -107,7 +148,8 @@ class ExcelMixin:
                               f, ensure_ascii=False, indent=2)
                 os.replace(tmp_path, dep_map_path)
 
-                logger.info(f"   ✅ dependency_map.json 已生成: {len(dep_map.stories)} stories")
+                logger.info(f"   ✅ dependency_map.json 已生成: {len(dep_map.stories)} stories"
+                            + ("（补漏修复）" if is_repair else ""))
                 return dep_map_path
 
             except (json.JSONDecodeError, Exception) as e:

@@ -111,7 +111,8 @@ def _build_api_search_text(api: dict) -> str:
             返回值: {ret_name}{ret_type}; ..."
     """
     name = api.get("name", "")
-    url = api.get("url", "")
+    from agent_components.api_annotations import normalize_api_url
+    url = normalize_api_url(api.get("url", ""))
     method = api.get("method", "?").upper()
     desc = api.get("description", name)
 

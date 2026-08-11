@@ -106,6 +106,10 @@ def extract_apis_from_yapi_md(text: str) -> list[dict]:
 
         url_match = _re.search(r'\*\*Path：\*\*\s*(.+)', part)
         url = url_match.group(1).strip() if url_match else ""
+        # D1: 规范化 url（去域名/query/尾斜杠），保证与入库/检索/索引同形
+        if url:
+            from agent_components.api_annotations import normalize_api_url
+            url = normalize_api_url(url)
 
         method_match = _re.search(r'\*\*Method：\*\*\s*(.+)', part)
         method = method_match.group(1).strip().upper() if method_match else "?"

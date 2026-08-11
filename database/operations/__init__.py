@@ -14,6 +14,7 @@ from database.operations.bindings import BindingOps
 from database.operations.glossary import GlossaryOps
 from database.operations.analysis import AnalysisOps
 from database.operations.compensation import CompensationOps
+from database.operations.api_ops import ApiOps
 
 __all__ = ["DocOps", "ModuleOps", "BindingOps", "GlossaryOps", "AnalysisOps",
-           "CompensationOps"]
+           "CompensationOps", "ApiOps"]

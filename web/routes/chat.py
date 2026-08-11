@@ -10,7 +10,6 @@ router = APIRouter(tags=["chat"])
 
 @router.post("/confirm-plan")
 async def confirm_plan(excel_path: str = Form(None),
-                       api_defs_json: str = Form(""),
                        user_ctx: str = Form(""),
                        background_tasks: BackgroundTasks = None):
     """确认测试计划 → 立即返回 task_id，后台异步生成 .py + .yaml。"""
@@ -43,7 +42,7 @@ async def confirm_plan(excel_path: str = Form(None),
     task_id = await _create_task()
     from web.tasks import _confirm_plan_bg
     background_tasks.add_task(
-        _confirm_plan_bg, task_id, excel_path, api_defs_json, user_ctx,
+        _confirm_plan_bg, task_id, excel_path, user_ctx,
     )
     return {"success": True, "task_id": task_id,
             "message": "确认计划已提交，后台生成中"}

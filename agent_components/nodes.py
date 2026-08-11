@@ -28,7 +28,6 @@ from agent_components.graph_logging import (
 from agent_components.prompt_builder import prepare_plan_prompt_vars
 from prompts.response_model import (
     ProperResponse,
-    ApiDefinition,
     TestData,
     ExcelPlan,
     ExcelRow,
@@ -82,12 +81,11 @@ class ChatTestAgentGraph(RetrievalMixin, GenerationMixin):
         失败时由 graph builder 降级到旧两步流程。
         """
         from observability import log_phase_header
-        from prompts.response_model import ExcelPlanV2, ApiDefinition
+        from prompts.response_model import ExcelPlanV2
         from agent_components.retrievers import _build_full_api_defs_text
         from database import get_session_ctx
         from database.operations import ModuleOps, BindingOps
         from database.operations.analysis import AnalysisOps
-        from agent_components.api_annotations import ApiAnnotationRegistry
 
         log_phase_header("Phase B — thinking+json 一步生成 Excel 计划")
         logger.info("\n🧠 一步生成 Excel 测试计划（thinking + json_object）...")
@@ -125,18 +123,6 @@ class ChatTestAgentGraph(RetrievalMixin, GenerationMixin):
              for d in (state.get("api_definitions") or [])],
             indent=2, ensure_ascii=False)
 
-        # Phase C 快照用完整 API
-        api_full_for_snapshot = [
-            ApiDefinition(
-                name=d.get("name", "?"), url=d.get("url", ""),
-                method=d.get("method", "GET"), description=d.get("description", ""),
-                parameters=d.get("parameters", {}), returns=d.get("returns", {}),
-            ).model_dump()
-            for d in (state.get("api_definitions") or [])
-        ]
-        for api in api_full_for_snapshot:
-            ApiAnnotationRegistry.apply_all(api)
-
         # 关联模块
         related_text = ", ".join(state.get("related_modules", [])) or "无"
         user_ctx = state.get("original_input", "")
@@ -171,7 +157,6 @@ class ChatTestAgentGraph(RetrievalMixin, GenerationMixin):
         return {
             "excel_plan": plan,
             "plan_source": "thinking",
-            "api_full_for_snapshot": api_full_for_snapshot,
             "module_tree_json": module_tree,
         }
 
@@ -181,7 +166,6 @@ class ChatTestAgentGraph(RetrievalMixin, GenerationMixin):
 
         from prompts.extraction_prompts import repair_excel_plan_prompt
         from agent_components.validator import validate_excel_file
-        from prompts.response_model import ApiDefinition
         from agent_components.plan_validator import ExcelPlanValidator
 
         prompt = self.prompt_factory.generate_excel_plan_node()
@@ -192,19 +176,6 @@ class ChatTestAgentGraph(RetrievalMixin, GenerationMixin):
             for d in (state.get("api_definitions") or [])
         ]
         all_apis_json = json.dumps(api_summaries, indent=2, ensure_ascii=False)
-        # Phase C 快照：保留完整定义（parameters/returns 等），存为 api_defs.json
-        api_full_for_snapshot = [
-            ApiDefinition(
-                name=d.get("name", "?"), url=d.get("url", ""),
-                method=d.get("method", "GET"), description=d.get("description", ""),
-                parameters=d.get("parameters", {}), returns=d.get("returns", {}),
-            ).model_dump()
-            for d in (state.get("api_definitions") or [])
-        ]
-        # 接口异常标识自动检测
-        from agent_components.api_annotations import ApiAnnotationRegistry
-        for api in api_full_for_snapshot:
-            ApiAnnotationRegistry.apply_all(api)
         from database import get_session_ctx
         from database.operations import ModuleOps
         with get_session_ctx() as session:
@@ -236,8 +207,7 @@ class ChatTestAgentGraph(RetrievalMixin, GenerationMixin):
                     final_response="测试计划生成失败：生成环节未产出计划，请重试",
                 ),
             }
-        # thinking 已构造的快照/模块树优先，避免重复查询与不一致
-        api_full_for_snapshot = state.get("api_full_for_snapshot") or api_full_for_snapshot
+        # thinking 已取的模块树优先，避免重复查询与不一致
         module_tree_json = state.get("module_tree_json") or module_tree_json
 
         # URL 有效性校验用真实接口路径模板（含 {xxx} 路径参数），2026-08-03 建议 3
@@ -600,16 +570,7 @@ class ChatTestAgentGraph(RetrievalMixin, GenerationMixin):
                 ws.column_dimensions[get_column_letter(ci)].width = max(len(str(h)) + 2, min(mx + 2, 55))
         wb.save(excel_path); wb.close()
 
-        # 接口定义快照与 Excel 同目录落盘 —— Phase C 生成 YAML 的数据来源。
-        # 规则 M8：接口定义靠产物传递（快照随计划走），禁止依赖内存态跨阶段交接。
-        api_defs_path = os.path.join(output_dir, "api_defs.json")
-        try:
-            with open(api_defs_path, "w", encoding="utf-8") as f:
-                json.dump(api_full_for_snapshot, f, ensure_ascii=False, indent=2)
-            logger.info(f"   📄 接口定义快照已保存: {api_defs_path} ({len(api_full_for_snapshot)} 个接口)")
-        except OSError:
-            logger.error("接口定义快照写入失败（Phase C 确认时将按 M8 阻断）: %s",
-                         api_defs_path, exc_info=True)
+        # 快照 api_defs.json 已取消（D3）：Phase C 门禁/索引改从 SQLite 投影。
 
         fail_warn = f"（{len(failed_details)} 行未通过校验，需人工审查）" if failed_details else ""
         n_modules = len(set(tc.story for tc in valid_cases))
@@ -632,7 +593,7 @@ class ChatTestAgentGraph(RetrievalMixin, GenerationMixin):
         return {
             "excel_plan": plan, "excel_path": excel_path, "output_dir": output_dir,
             "response_obj": ProperResponse(
-                proper_thinking=[f"已提取 {len(api_full_for_snapshot)} 个接口，分析 {n_confirmed} 条用例"],
+                proper_thinking=[f"已提取 {len(state.get('api_definitions') or [])} 个接口，分析 {n_confirmed} 条用例"],
                 final_response=f"Excel 测试计划已生成：共 {n_confirmed} 条用例{fail_warn}",
                 worth_to_remember=False,
             ),
@@ -738,9 +699,10 @@ class ChatTestAgentGraph(RetrievalMixin, GenerationMixin):
         return load_factory_methods()
 
     def _invoke_think(self, bound_llm, messages, max_retries: int | None = None,
-                      label: str = "LLM") -> str:
+                      label: str = "LLM", reasoning_label: str | None = None) -> str:
         """通用 thinking 调用（空 content 复用输入重试），实现见 llm_client.py。"""
-        return invoke_think(bound_llm, messages, max_retries=max_retries, label=label)
+        return invoke_think(bound_llm, messages, max_retries=max_retries,
+                            label=label, reasoning_label=reasoning_label)
 
     def _invoke_structured(self, prompt, model_class,
                            max_retries: int = config.MAX_RETRIES,

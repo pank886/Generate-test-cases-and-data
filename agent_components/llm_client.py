@@ -13,7 +13,7 @@ from typing import Callable, Optional, Type
 from pydantic import BaseModel
 
 import config
-from observability import get_logger
+from observability import get_logger, log_thinking
 from agent_components.llm.deepseek import DeepSeekChatOpenAI
 
 logger = get_logger(__name__)
@@ -57,7 +57,7 @@ def load_factory_methods() -> str:
 
 
 def invoke_think(bound_llm, messages, max_retries: int | None = None,
-                 label: str = "LLM") -> str:
+                 label: str = "LLM", reasoning_label: str | None = None) -> str:
     """通用 thinking 调用：LLM 返回空 content 时复用同一输入有限重试。
 
     2026-08-03 P2：deepseek-v4-flash 偶发返回空 content（json.loads 报
@@ -74,6 +74,9 @@ def invoke_think(bound_llm, messages, max_retries: int | None = None,
         messages: 一次构造好的 prompt 消息列表（重试时原样复用，即"复用概要输入"）
         max_retries: 空响应重试次数，None 用 config.MAX_RETRIES
         label: 日志中的节点名
+        reasoning_label: 非 None 时采集 result.reasoning_content（单节点 thinking，
+            thinking+json_object 场景 thinking 不进 content）落 thinking_trace.log，
+            弥补单节点可观测性损失（2026-08-11）。
 
     Returns:
         非空响应文本
@@ -84,6 +87,11 @@ def invoke_think(bound_llm, messages, max_retries: int | None = None,
     retries = config.MAX_RETRIES if max_retries is None else max_retries
     for attempt in range(retries + 1):
         result = bound_llm.invoke(messages)
+        if reasoning_label:
+            _rc = getattr(result, "reasoning_content", None)
+            if _rc:
+                log_thinking(f"{reasoning_label}_thinking", label, str(_rc),
+                             prompt_label="reasoning_content")
         text = result.content if hasattr(result, "content") else str(result)
         if text and text.strip():
             return text
@@ -136,9 +144,12 @@ def invoke_structured(llm, prompt, model_class: Type[BaseModel], method_features
     if temperature is not None:
         _bind_kwargs["temperature"] = temperature
     _llm = llm.bind(**_bind_kwargs) if _bind_kwargs else llm
+    # json_mode：不绑 pydantic（避免 chain 内部先校验、跳过 pre_validate 注入 _annotations），
+    # 由下方 pre_validate + model_class(**result) 统一处理（2026-08-12 修复：{param} 标注注入失效）
+    _schema = None if method == "json_mode" else model_class
     # chain 在重试间不变，只需构建一次
     chain = prompt | _llm.with_structured_output(
-        model_class, method=method, **llm_kwargs
+        _schema, method=method, **llm_kwargs
     )
 
     for attempt in range(1 + max_retries):

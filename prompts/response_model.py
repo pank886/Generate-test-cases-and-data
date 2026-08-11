@@ -546,7 +546,7 @@ class StepData(BaseModel):
         """规范化 baseInfo（代码兜底 LLM 漂移）。
 
         1. method 必须小写
-        2. url 不含域名，LLM 输出完整 URL 时截取 path
+        2. url 规范化：去域名 + 去 query + 去尾斜杠，保留大小写（复用 normalize_api_url）
         3. header 缺失时注入 Content-Type（token/公共头由框架层常量注入，此处不生成）：
            - json/迁移后为 json 的请求体: application/json;charset=UTF-8
            - 文件上传（请求体含 file）/ 仅 params: 不注入（multipart 边界由客户端生成、
@@ -567,13 +567,19 @@ class StepData(BaseModel):
         if isinstance(method, str) and method != method.lower():
             base["method"] = method.lower()
 
-        # 2. url 去域名
+        # 2. url 规范化（复用 normalize_api_url：去域名 + 去 query + 去尾斜杠，保留大小写）
+        from agent_components.api_annotations import normalize_api_url
         url = base.get("url")
-        if isinstance(url, str) and url.startswith(("http://", "https://")):
-            from urllib.parse import urlparse
-            parsed = urlparse(url)
-            base["url"] = parsed.path + (f"?{parsed.query}" if parsed.query else "")
-            logger.warning("LLM url 含域名已截取 path: %s -> %s", url, base["url"])
+        if isinstance(url, str) and url.strip():
+            _norm = normalize_api_url(url)
+            if _norm != url:
+                if "?" in url:
+                    logger.warning(
+                        "LLM url 含 query 已去除（query 应放 testCase.params）: %s -> %s",
+                        url, _norm)
+                else:
+                    logger.warning("LLM url 已规范化: %s -> %s", url, _norm)
+            base["url"] = _norm
 
         # 3. header 注入（仅在有 json 类请求体且非上传时）
         if "header" not in base:
