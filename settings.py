@@ -142,7 +142,7 @@ class Settings(BaseSettings):
     )
 
     llm_max_tokens: int = Field(
-        default=65536, ge=1024, le=131072,
+        default=393216, ge=1024, le=393216,
         description="LLM API max_tokens。大 Excel 计划 JSON 输出可能超 8192 默认值导致截断，"
                     "此处显式设置并在每次 API 调用时 bind，防止 LangChain 链式 bind() 丢失该参数",
     )

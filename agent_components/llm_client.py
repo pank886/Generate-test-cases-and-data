@@ -94,12 +94,34 @@ def invoke_think(bound_llm, messages, max_retries: int | None = None,
                              prompt_label="reasoning_content")
         text = result.content if hasattr(result, "content") else str(result)
         if text and text.strip():
+            _log_reasoning_content(result, label)
             return text
         if attempt < retries:
             logger.warning(
                 "   ⚠️ %s 返回空 content（第 %d 次），复用同一输入重试第 %d 次",
                 label, attempt + 1, attempt + 2)
     raise RuntimeError(f"{label} 连续 {retries + 1} 次返回空 content，已终止")
+
+
+def _log_reasoning_content(result, label: str) -> None:
+    """记录 DeepSeek 思考模式返回的思考内容（reasoning_content）到 thinking_trace.log。
+
+    reasoning_content 由 DeepSeekChatOpenAI._create_chat_result 回补到
+    additional_kwargs；此处按节点标签记录，标注是哪个流程节点的思考。
+    无思考内容（thinking 关闭 / 模型未返回）时静默跳过。
+    """
+    try:
+        if hasattr(result, "generations"):
+            msg = result.generations[0].message  # ChatResult 路径
+        else:
+            msg = result  # AIMessage 直接返回路径
+        reasoning = msg.additional_kwargs.get("reasoning_content")
+    except (AttributeError, IndexError, TypeError):
+        return
+    if not reasoning:
+        return
+    from observability import log_thinking
+    log_thinking(f"{label} 思考内容", "", reasoning, prompt_label=label)
 
 
 def invoke_structured(llm, prompt, model_class: Type[BaseModel], method_features: dict,

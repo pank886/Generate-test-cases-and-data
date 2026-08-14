@@ -91,24 +91,36 @@ def _wait_task(client, task_id: str, timeout: float = 5.0) -> dict:
     raise AssertionError(f"任务 {task_id} 轮询超时（未达终态）")
 
 
+def _six(name, type_, required=False, value=""):
+    """六字段结构辅助构造。"""
+    return {"name": name, "type": type_, "required": required,
+            "default": "", "desc": "", "value": value}
+
+
 SAMPLE_APIS = [
     {
         "name": "登录", "url": "/api/login", "method": "POST",
         "description": "用户登录",
-        "parameters": {"username": "string", "password": "string"},
-        "returns": {"token": "string"},
+        "header": {"Content-Type": "application/json"},
+        "body": [_six("username", "string", True, "admin"),
+                 _six("password", "string", True)],
+        "return": [_six("token", "string")],
     },
     {
         "name": "获取用户信息", "url": "/api/user", "method": "GET",
         "description": "获取当前用户信息",
-        "parameters": {},
-        "returns": {"name": "string", "email": "string"},
+        "header": {"Content-Type": "application/json"},
+        "body": [],
+        "return": [_six("name", "string"), _six("email", "string")],
     },
     {
         "name": "注册", "url": "/api/register", "method": "POST",
         "description": "新用户注册",
-        "parameters": {"username": "string", "password": "string", "email": "string"},
-        "returns": {"id": "integer", "token": "string"},
+        "header": {"Content-Type": "application/json"},
+        "body": [_six("username", "string", True),
+                 _six("password", "string", True),
+                 _six("email", "string", True)],
+        "return": [_six("id", "integer"), _six("token", "string")],
     },
 ]
 
@@ -276,8 +288,11 @@ def _generate_batch_apis(count: int) -> list[dict]:
         {
             "name": f"api_{i}", "url": f"/api/batch/{i}", "method": "POST",
             "description": f"批量测试接口 {i}",
-            "parameters": {"id": "integer"},
-            "returns": {"success": "boolean"},
+            "header": {},
+            "body": [{"name": "id", "type": "integer", "required": False,
+                      "default": "", "desc": "", "value": ""}],
+            "return": [{"name": "success", "type": "boolean", "required": False,
+                        "default": "", "desc": "", "value": ""}],
         }
         for i in range(count)
     ]

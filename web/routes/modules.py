@@ -303,9 +303,9 @@ async def get_module_api_defs(module_name: str, doc_id: str = ""):
                     "url": d.api_url,
                     "method": d.api_method,
                     "description": d.api_description,
-                    "headers": _json.loads(d.api_headers or "[]"),
-                    "parameters": _json.loads(d.api_parameters or "[]"),
-                    "returns": _json.loads(d.api_returns or "[]"),
+                    "header": _json.loads(d.api_headers or "{}"),
+                    "body": _json.loads(d.api_parameters or "[]"),
+                    "return": _json.loads(d.api_returns or "[]"),
                     "annotations": _json.loads(d.api_annotations or "{}"),
                 }
                 result.append(api)
@@ -375,8 +375,8 @@ async def update_api_annotations(module_name: str, index: int, data: dict):
                              ("method", "api_method"), ("description", "api_description")]:
                 if key in full_update:
                     update_vals[col] = full_update[key]
-            for key, col in [("headers", "api_headers"), ("parameters", "api_parameters"),
-                             ("returns", "api_returns")]:
+            for key, col in [("header", "api_headers"), ("body", "api_parameters"),
+                             ("return", "api_returns")]:
                 if key in full_update:
                     update_vals[col] = _json.dumps(full_update[key], ensure_ascii=False)
 
@@ -389,9 +389,9 @@ async def update_api_annotations(module_name: str, index: int, data: dict):
             api = {
                 "name": doc.api_name, "url": doc.api_url,
                 "method": doc.api_method, "description": doc.api_description,
-                "headers": _json.loads(doc.api_headers or "[]"),
-                "parameters": _json.loads(doc.api_parameters or "[]"),
-                "returns": _json.loads(doc.api_returns or "[]"),
+                "header": _json.loads(doc.api_headers or "{}"),
+                "body": _json.loads(doc.api_parameters or "[]"),
+                "return": _json.loads(doc.api_returns or "[]"),
                 "annotations": _json.loads(doc.api_annotations or "{}"),
             }
             api["_search_text"] = _build_api_search_text(api)

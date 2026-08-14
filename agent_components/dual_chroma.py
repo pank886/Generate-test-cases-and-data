@@ -186,9 +186,9 @@ class DualChromaDB:
                             api = {
                                 "name": d.api_name, "url": d.api_url,
                                 "method": d.api_method, "description": d.api_description,
-                                "headers": _json.loads(d.api_headers or "[]"),
-                                "parameters": _json.loads(d.api_parameters or "[]"),
-                                "returns": _json.loads(d.api_returns or "[]"),
+                                "header": _json.loads(d.api_headers or "{}"),
+                                "body": _json.loads(d.api_parameters or "[]"),
+                                "return": _json.loads(d.api_returns or "[]"),
                                 "annotations": _json.loads(d.api_annotations or "{}"),
                             }
                             apis.append({

@@ -1,0 +1,46 @@
+总 YAML 文件数: 128
+空文件数: 0
+非空文件数: 128
+
+================================================================================
+统计汇总
+================================================================================
+  files_ok: 128
+  files_with_issues: 0
+  blocks: 279
+  cases: 330
+  missing_header: 0
+  missing_apiname: 0
+  missing_url: 0
+  missing_method: 0
+  no_baseinfo_testcase: 0
+  bad_assert_op: 0
+  url_brace: 0
+  url_dollar: 0
+  body_wrap: 0
+  params_in_baseinfo: 0
+  extract_no_dollar: 0
+  expr_unknown_func: 0
+  expr_unquoted: 0
+  expr_argcount: 0
+  expr_bad: 0
+  get_json: 0
+  post_params: 0
+  eq_dynamic_key: 0
+  db_structure: 0
+  db_string_sql: 0
+  db_forbidden: 0
+  export_eq_assert: 0
+  validation_not_list: 0
+  no_case_name: 0
+  empty_validation: 0
+  expr_quoted_ok: 35
+  expr_unquoted_ok: 70
+  files_using_quoted: 13
+
+================================================================================
+详细问题清单
+================================================================================
+
+结果已写入 E:\Generate-test-cases-and-data\logs\smartpower_check_result.json
+空文件: 0

@@ -87,9 +87,9 @@ def make_state():
                 apis.append({
                     "name": d.api_name, "url": d.api_url, "method": d.api_method,
                     "description": d.api_description or "",
-                    "parameters": json.loads(d.api_parameters or "[]"),
-                    "returns": json.loads(d.api_returns or "[]"),
-                    "headers": json.loads(d.api_headers or "[]"),
+                    "body": json.loads(d.api_parameters or "[]"),
+                    "return": json.loads(d.api_returns or "[]"),
+                    "header": json.loads(d.api_headers or "{}"),
                     "source": d.id,
                 })
 

@@ -29,17 +29,39 @@ class PyExportMixin:
 
     @staticmethod
     def _takeover_export_assertions(steps) -> None:
-        """导出接口断言接管（兜底）：is_export 标注的步骤强制 validation = contains status_code。
+        """通用断言规范化（写盘前兜底）。2026-08-13 泛化自导出接管。
 
-        2026-08-04 问题 3：prompt 已要求导出/下载/模板接口用 contains: {status_code: 200}，
-        此处为代码兜底——即使 LLM 输出 eq/ne 检查状态码，也在写盘前强制改为 contains。
-        独立方法便于单测。steps 为 StepData 列表。
+        三层防御之一（prompt 铁律为核心、此处代码兜底、生成后检测扫描）：
+          1. is_export 标注的步骤（2026-08-04 问题 3）：强制 validation =
+             contains: {status_code: 200}（保留原导出兜底行为）
+          2. 所有步骤 eq/ne 对 status_code 的断言改写为 contains（2026-08-12 问题 2）：
+             status_code 特殊处理只在 contains_assert；eq/ne 按 JSONPath 解析，
+             响应体无 status_code 字段必败
+          3. contains 裸字符串 → contains: {message: <字符串>}（2026-08-12 问题 4）：
+             框架 contains_assert 对 str 调用 .items() 抛 AttributeError，整方法崩溃
+        steps 为 StepData 列表，就地修改。
         """
         for step in steps:
             ann = step.baseInfo.get("_annotations", {})
-            if ann.get("is_export", {}).get("active"):
-                for tc in step.testCase:
+            for tc in step.testCase:
+                if ann.get("is_export", {}).get("active"):
                     tc.validation = [{"contains": {"status_code": 200}}]
+                    continue
+                normalized = []
+                for v in tc.validation:
+                    if not (isinstance(v, dict) and len(v) == 1):
+                        normalized.append(v)
+                        continue
+                    op, payload = next(iter(v.items()))
+                    if op in ("eq", "ne") and isinstance(payload, dict) \
+                            and any(str(k).lstrip("$.") == "status_code"
+                                    for k in payload):
+                        normalized.append({"contains": payload})
+                    elif op == "contains" and not isinstance(payload, dict):
+                        normalized.append({"contains": {"message": payload}})
+                    else:
+                        normalized.append(v)
+                tc.validation = normalized
 
     @classmethod
     def _parse_assertion(cls, expected_text: str) -> tuple[str, str]:
@@ -150,11 +172,11 @@ class PyExportMixin:
                         f'def setup_{class_slug}():\n'
                         f'    read = ReadYamlData()\n'
                         f'    base = RequestsBase()\n'
-                        f'    base.specification_yaml(get_testcase_yaml(\n'
-                        f'        \'{testcase_rel}/setup_data/setup_{class_slug}.yaml\'))\n'
+                        f'    base.run_blocks(\n'
+                        f'        \'{testcase_rel}/setup_data/setup_{class_slug}.yaml\')\n'
                         f'    yield\n'
-                        f'    base.specification_yaml(get_testcase_yaml(\n'
-                        f'        \'{testcase_rel}/setup_data/teardown_{class_slug}.yaml\'))\n'
+                        f'    base.run_blocks(\n'
+                        f'        \'{testcase_rel}/setup_data/teardown_{class_slug}.yaml\')\n'
                     )
                 else:
                     fixture_code = (

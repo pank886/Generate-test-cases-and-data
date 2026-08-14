@@ -223,3 +223,36 @@ class TestEdgeCases:
 
         result = adapter._create_chat_result(resp)
         assert "parsed" not in result.generations[0].message.additional_kwargs
+
+
+class TestReasoningContent:
+    """DeepSeek 思考模式的 reasoning_content 不被 langchain 转换丢弃。"""
+
+    def test_dict_path_restores_reasoning(self, adapter: DeepSeekChatOpenAI):
+        """dict 响应含 reasoning_content → 回补到 additional_kwargs（供 invoke_think 记录）。"""
+        resp = copy.deepcopy(STANDARD_RESPONSE)
+        resp["choices"][0]["message"]["content"] = '{"answer": 2}'
+        resp["choices"][0]["message"]["reasoning_content"] = "先思考，再输出 JSON。"
+
+        result = adapter._create_chat_result(resp)
+        assert result.generations[0].message.additional_kwargs.get(
+            "reasoning_content") == "先思考，再输出 JSON。"
+
+    def test_no_reasoning_no_key(self, adapter: DeepSeekChatOpenAI):
+        """无 reasoning_content → additional_kwargs 不新增键（静默跳过）。"""
+        resp = copy.deepcopy(STANDARD_RESPONSE)
+        resp["choices"][0]["message"]["content"] = "plain text"
+        del resp["choices"][0]["message"]["tool_calls"]
+
+        result = adapter._create_chat_result(resp)
+        assert "reasoning_content" not in result.generations[0].message.additional_kwargs
+
+    def test_empty_reasoning_no_key(self, adapter: DeepSeekChatOpenAI):
+        """reasoning_content 为空串/None → 不新增键。"""
+        resp = copy.deepcopy(STANDARD_RESPONSE)
+        resp["choices"][0]["message"]["content"] = "plain text"
+        del resp["choices"][0]["message"]["tool_calls"]
+        resp["choices"][0]["message"]["reasoning_content"] = None
+
+        result = adapter._create_chat_result(resp)
+        assert "reasoning_content" not in result.generations[0].message.additional_kwargs

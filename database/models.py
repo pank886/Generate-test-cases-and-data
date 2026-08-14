@@ -87,9 +87,9 @@ class Document(Base):
     api_url         = Column(String(500), default="")
     api_method      = Column(String(10), default="")
     api_description = Column(String(500), default="")
-    api_headers     = Column(Text, default="")       # JSON: [{name, type, required, description, default}]
-    api_parameters  = Column(Text, default="")       # JSON: [{name, type, required, description, default, children}]
-    api_returns     = Column(Text, default="")       # JSON: [{name, type, required, description, default, children}]
+    api_headers     = Column(Text, default="")       # JSON: 名→值映射，如 {"Content-Type": "application/json"}
+    api_parameters  = Column(Text, default="")       # JSON: [{name, type, required, default, desc, value}]
+    api_returns     = Column(Text, default="")       # JSON: [{name, type, required, default, desc, value}]
     api_annotations = Column(Text, default="")       # JSON: {key: {active, source, ...meta}}
     content_hash    = Column(String(64), default="")  # 文档级 SHA256 hash，感知内容变更
 

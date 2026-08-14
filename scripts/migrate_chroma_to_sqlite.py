@@ -93,9 +93,11 @@ def migrate_api_defs(dry_run: bool = False) -> int:
             doc.api_url = api.get("url", "")
             doc.api_method = api.get("method", "")
             doc.api_description = (api.get("description") or "")[:500]
-            doc.api_headers = json.dumps(api.get("headers") or [], ensure_ascii=False)
-            doc.api_parameters = json.dumps(api.get("parameters") or [], ensure_ascii=False)
-            doc.api_returns = json.dumps(api.get("returns") or [], ensure_ascii=False)
+            # 归一化为新结构（header 映射 + body/return 六字段数组），兼容旧格式源数据
+            api = _coerce_api_format(api)
+            doc.api_headers = json.dumps(api.get("header") or {}, ensure_ascii=False)
+            doc.api_parameters = json.dumps(api.get("body") or [], ensure_ascii=False)
+            doc.api_returns = json.dumps(api.get("return") or [], ensure_ascii=False)
             doc.api_annotations = json.dumps(api.get("annotations") or {}, ensure_ascii=False)
             doc.content_hash = content_hash
         count += 1
@@ -180,6 +182,7 @@ def rebuild_doc_search(dry_run: bool = False) -> int:
     from database import get_session_ctx
     from database.models import DocumentChunk, Document as DocModel
     from ingest_v2 import _build_doc_search_text, _build_api_search_text
+    from ingest.api_parser import _coerce_api_format
 
     chroma = get_chroma_db()
     count = 0
@@ -239,9 +242,9 @@ def rebuild_doc_search(dry_run: bool = False) -> int:
                 "url": rec.api_url or "",
                 "method": rec.api_method or "",
                 "description": rec.api_description or "",
-                "headers": json.loads(rec.api_headers) if rec.api_headers else [],
-                "parameters": json.loads(rec.api_parameters) if rec.api_parameters else [],
-                "returns": json.loads(rec.api_returns) if rec.api_returns else [],
+                "header": json.loads(rec.api_headers) if rec.api_headers else {},
+                "body": json.loads(rec.api_parameters) if rec.api_parameters else [],
+                "return": json.loads(rec.api_returns) if rec.api_returns else [],
                 "annotations": json.loads(rec.api_annotations) if rec.api_annotations else {},
             }
             search_text = _build_api_search_text(api_dict)

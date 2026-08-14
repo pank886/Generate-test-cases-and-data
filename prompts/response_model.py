@@ -136,23 +136,44 @@ class ProperResponse(BaseModel):
 # ============================================================
 
 class ApiDefinition(BaseModel):
-    """单个接口定义"""
+    """单个接口定义（新结构：header 名→值映射，body/return 六字段数组）"""
     name: str = Field(description="接口名称")
     url: str = Field(description="接口路径部分（不含域名和基础地址），如 /api/login")
     method: str = Field(description="HTTP方法: GET/POST/PUT/DELETE/PATCH")
     description: str = Field(description="接口功能描述")
-    headers: Union[List[Dict[str, Any]], Dict[str, Any]] = Field(
-        default_factory=list, description="请求头参数列表")
-    parameters: Union[List[Dict[str, Any]], Dict[str, Any]] = Field(
-        default_factory=list, description="请求参数列表")
+    header: Union[Dict[str, Any], List[Dict[str, Any]]] = Field(
+        default_factory=dict,
+        description="请求头名→值映射，如 {\"Content-Type\": \"application/json\"}",
+    )
+    body: Union[List[Dict[str, Any]], Dict[str, Any]] = Field(
+        default_factory=list,
+        description="请求体字段数组，每项含 name/type/required/default/desc/value",
+    )
     returns: Union[List[Dict[str, Any]], Dict[str, Any]] = Field(
-        default_factory=list, description="响应字段列表")
+        default_factory=list,
+        description="响应字段数组，每项含 name/type/required/default/desc/value",
+        serialization_alias="return",
+    )
 
+    @model_validator(mode="before")
     @classmethod
-    @field_validator("returns", mode="before")
-    def normalize_returns(cls, v, info: ValidationInfo):
-        """LLM 有时会把纯数组返回值输出为 list，新版 prompt 已要求输出数组，直接返回。"""
-        return v
+    def normalize_old_keys(cls, data):
+        """兼容旧 key：return/headers/parameters → returns/header/body；headers 列表转映射。"""
+        if not isinstance(data, dict):
+            return data
+        if "return" in data and "returns" not in data:
+            data["returns"] = data.pop("return")
+        if "headers" in data and "header" not in data:
+            data["header"] = data.pop("headers")
+        if "parameters" in data and "body" not in data:
+            data["body"] = data.pop("parameters")
+        if isinstance(data.get("header"), list):
+            hd = {}
+            for it in data["header"]:
+                if isinstance(it, dict) and it.get("name"):
+                    hd[it["name"]] = it.get("value", it.get("default", ""))
+            data["header"] = hd
+        return data
 
 
 # ============================================================
@@ -389,6 +410,39 @@ class TestCase(BaseModel):
         if len(result) != len(validation):
             data["validation"] = result
         return data
+
+    @model_validator(mode="after")
+    def validate_validation_element_is_dict(self) -> "TestCase":
+        """validation 元素必须是单运算符 dict，且 contains 操作数必须是 dict。
+
+        2026-08-12 问题 4：LLM 输出 contains: <裸字符串> 时，框架 contains_assert
+        对 str 调用 .items() 抛 AttributeError（非 AssertionError），run_blocks
+        不捕获，整个测试方法崩溃。此处约束两种形态（元素非 dict / contains
+        操作数非 dict）→ 裸字符串直接校验失败，进修复轮由 LLM 自查重生成。
+        """
+        for i, v in enumerate(self.validation):
+            if not isinstance(v, dict):
+                rule = "validation非dict"
+                msg = (
+                    f"validation[{i}] 不是 dict（{type(v).__name__}），当前值: {str(v)[:60]}。"
+                    "每条断言必须是 {eq|contains|ne: {字段: 期望}} 形式的 dict，"
+                    "禁止裸字符串/标量。例如 contains: {message: 成功} 而非 contains: 成功。"
+                )
+                ValidationInterceptor.record(rule, msg)
+                raise ValueError(msg)
+            if len(v) == 1:
+                op, operand = next(iter(v.items()))
+                if op in ("eq", "contains", "ne") and not isinstance(operand, dict):
+                    rule = "断言操作数非dict"
+                    msg = (
+                        f"validation[{i}] 运算符 '{op}' 的操作数不是 dict"
+                        f"（{type(operand).__name__}），当前值: {str(operand)[:60]}。"
+                        "操作数必须是 {字段: 期望} 形式的 dict，禁止裸字符串/标量。"
+                        f"例如 {op}: {{message: 成功}} 而非 {op}: 成功。"
+                    )
+                    ValidationInterceptor.record(rule, msg)
+                    raise ValueError(msg)
+        return self
 
     @model_validator(mode="after")
     def validate_no_neq_operator(self) -> "TestCase":

@@ -201,9 +201,9 @@ def _compensate_api_search_text(session, task):
             api = {
                 "name": doc.api_name, "url": doc.api_url, "method": doc.api_method,
                 "description": doc.api_description,
-                "headers": _json.loads(doc.api_headers or "[]"),
-                "parameters": _json.loads(doc.api_parameters or "[]"),
-                "returns": _json.loads(doc.api_returns or "[]"),
+                "header": _json.loads(doc.api_headers or "{}"),
+                "body": _json.loads(doc.api_parameters or "[]"),
+                "return": _json.loads(doc.api_returns or "[]"),
                 "annotations": _json.loads(doc.api_annotations or "{}"),
                 "_search_text": _build_api_search_text({}),
             }

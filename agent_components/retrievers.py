@@ -83,13 +83,10 @@ def _build_full_api_defs_text(api_defs: list[dict]) -> str:
 
 
 def _format_params(params: list, indent: int = 3) -> str:
-    """递归格式化参数列表为紧凑文本。
+    """递归格式化字段数组为紧凑文本（新六字段结构）。
 
-    每项: name(type, 必填/可选): desc
-
-    Args:
-        params: 参数列表
-        indent: 缩进 level，用于嵌套子字段前缀
+    每项: name(type, 必填/可选): value (desc)
+      - value 取自示例块，desc 为字段说明，二者皆空只渲染 name(type)
     """
     strs = []
     prefix = "  " * indent
@@ -99,12 +96,17 @@ def _format_params(params: list, indent: int = 3) -> str:
         name = p.get("name", "")
         ptype = p.get("type", "string")
         required = "必填" if p.get("required") else "可选"
-        desc = p.get("description", "")
-        if desc:
-            item = f"{prefix}{name}({ptype}, {required}): {desc}"
+        value = p.get("value", "")
+        desc = p.get("desc") or p.get("description") or ""
+        if value and desc:
+            detail = f": {value} ({desc})"
+        elif value:
+            detail = f": {value}"
+        elif desc:
+            detail = f": {desc}"
         else:
-            item = f"{prefix}{name}({ptype}, {required})"
-        strs.append(item)
+            detail = ""
+        strs.append(f"{prefix}{name}({ptype}, {required}){detail}")
         # 递归处理子字段
         children = p.get("children", [])
         if children:
@@ -122,8 +124,8 @@ def _fallback_api_text(api_defs: list[dict]) -> str:
         method = a.get("method", "GET")
         url = a.get("url", "")
         desc = a.get("description", "")
-        params = a.get("parameters", [])
-        returns = a.get("returns", [])
+        params = a.get("body", [])
+        returns = a.get("return", [])
         line = f"[{method}] {url} — {name}"
         if desc:
             line += f"\n  描述: {desc}"
@@ -133,6 +135,60 @@ def _fallback_api_text(api_defs: list[dict]) -> str:
             line += f"\n  返回值: {_format_params(returns)}"
         lines.append(line)
     return "\n\n".join(lines) if lines else "无"
+
+
+_HTTP_METHODS = {"GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"}
+
+
+def _parse_api_prefix(content: str) -> tuple[str, str, str]:
+    """从 API 自然语言检索文本前缀解析 (method, url, name)。
+
+    存储反转后 ChromaDB 存的是 ``_build_api_search_text`` 生成的检索文本，
+    格式: "{METHOD} {URL} {NAME}。{DESC}。..."（method 缺失时可能为
+    "{URL} {NAME}。..."）。返回 (method, url, name)，无法解析的字段为空串。
+    """
+    text = content.strip()
+    if not text:
+        return "", "", ""
+    tokens = text.split(" ", 2)
+    method, url, name = "", "", ""
+    # 方法: 首个 HTTP 方法 token（若存在）
+    if tokens[0].upper() in _HTTP_METHODS:
+        method = tokens[0].upper()
+        tokens = tokens[1:] if len(tokens) > 1 else []
+    # 跳过 method 占位符（_build_api_search_text 在 method 缺失时写 '?'）
+    if tokens and tokens[0] in ("?", "？"):
+        tokens = tokens[1:] if len(tokens) > 1 else []
+    # URL: 以 / 或 http 开头的 token
+    if tokens and (tokens[0].startswith("/") or tokens[0].startswith("http")):
+        url = tokens[0]
+        tokens = tokens[1:] if len(tokens) > 1 else []
+    # name: 剩余部分第一个句号前
+    if tokens:
+        name = tokens[0].split("。", 1)[0].strip()
+    return method, url, name
+
+
+def _dedup_api_defs(api_defs: list[dict]) -> list[dict]:
+    """接口去重：同 method+url 合并，保留最新版本。
+
+    method/url 缺失时（如检索文本解析失败）以 ``doc:<doc_id>`` 兜底，
+    保证不同 doc_id 的接口绝不塌缩成一条。
+    """
+    seen_api = {}
+    dup_count = 0
+    for a in api_defs:
+        key = f"{a.get('method', '')} {a.get('url', '')}".strip()
+        if not key:
+            key = f"doc:{a.get('source', a.get('_doc_id', ''))}"
+        if key in seen_api:
+            dup_count += 1
+        seen_api[key] = a  # 后出现的覆盖先出现的，保留最新版本
+    if dup_count:
+        logger.info(
+            f"   => 接口去重: 合并 {dup_count} 个重复，"
+            f"剩余 {len(seen_api)} 个唯一（去重前 {len(api_defs)} 个）")
+    return list(seen_api.values())
 
 
 class RetrievalMixin:
@@ -215,11 +271,34 @@ class RetrievalMixin:
                 apis = []
                 for r in results:
                     content = r.page_content
-                    try:
-                        api = json.loads(content) if content.strip().startswith("{") else {"raw": content}
-                    except json.JSONDecodeError:
-                        api = {"raw": content}
+                    api = None
+                    if content.strip().startswith("{"):
+                        try:
+                            api = json.loads(content)
+                        except json.JSONDecodeError:
+                            api = None
+                    if not isinstance(api, dict):
+                        # 存储反转后：ChromaDB 存自然语言检索文本（非 JSON）。
+                        # metadata 优先（旧 simple_summary 块带 api_method/api_url），
+                        # 缺失时从正文前缀解析 method/url/name（api_search_text 块）。
+                        api = {
+                            "name": r.metadata.get("api_name", ""),
+                            "method": r.metadata.get("api_method", ""),
+                            "url": r.metadata.get("api_url", ""),
+                            "raw": content,
+                        }
+                        if not api["method"] or not api["url"]:
+                            _m, _u, _n = _parse_api_prefix(content)
+                            if not api["method"]:
+                                api["method"] = _m
+                            if not api["url"]:
+                                api["url"] = _u
+                            if not api["name"]:
+                                api["name"] = _n
                     if isinstance(api, dict):
+                        # 归一化旧 JSON/元数据格式（局部导入避免与 ingest 包循环依赖）
+                        from ingest.api_parser import _coerce_api_format
+                        api = _coerce_api_format(api)
                         api.setdefault("source", r.metadata.get("doc_id", ""))
                         apis.append(api)
                 return apis
@@ -248,9 +327,9 @@ class RetrievalMixin:
                         api = {
                             "name": d.api_name, "url": d.api_url,
                             "method": d.api_method, "description": d.api_description,
-                            "headers": _json.loads(d.api_headers or "[]"),
-                            "parameters": _json.loads(d.api_parameters or "[]"),
-                            "returns": _json.loads(d.api_returns or "[]"),
+                            "header": _json.loads(d.api_headers or "{}"),
+                            "body": _json.loads(d.api_parameters or "[]"),
+                            "return": _json.loads(d.api_returns or "[]"),
                             "annotations": _json.loads(d.api_annotations or "{}"),
                             "source": d.id, "_compensated": True,
                         }
@@ -512,17 +591,9 @@ class RetrievalMixin:
                     api_defs.extend(apis)
                     logger.info(f"   + 接口: {mod} ({len(apis)} 个)")
 
-        # 接口去重（同一接口绑定到多个模块时只保留一份，后出现的覆盖先出现的）
-        seen_api = {}
-        dup_count = 0
-        for a in api_defs:
-            key = f"{a.get('method', '')} {a.get('url', '')}"
-            if key in seen_api:
-                dup_count += 1
-            seen_api[key] = a  # 后出现的覆盖先出现的，保留最新版本
-        if dup_count:
-            logger.info(f"   => 接口去重: 合并 {dup_count} 个重复，剩余 {len(seen_api)} 个唯一（去重前 {len(api_defs)} 个）")
-            api_defs = list(seen_api.values())
+        # 接口去重（同一接口绑定到多个模块时只保留一份，后出现的覆盖先出现的；
+        # method/url 缺失时按 doc_id 兜底，避免不同接口塌缩成一条）
+        api_defs = _dedup_api_defs(api_defs)
 
         logger.info(f"   => 汇总: {len(all_docs)} 文档片段, {len(api_defs)} 个接口")
         return {"product_docs": all_docs, "api_definitions": api_defs}

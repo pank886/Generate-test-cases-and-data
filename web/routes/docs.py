@@ -106,9 +106,9 @@ async def get_doc_apis(doc_id: str):
                     "url": doc.api_url or "",
                     "method": doc.api_method or "",
                     "description": doc.api_description or "",
-                    "headers": _json.loads(doc.api_headers) if doc.api_headers else [],
-                    "parameters": _json.loads(doc.api_parameters) if doc.api_parameters else [],
-                    "returns": _json.loads(doc.api_returns) if doc.api_returns else [],
+                    "header": _json.loads(doc.api_headers) if doc.api_headers else {},
+                    "body": _json.loads(doc.api_parameters) if doc.api_parameters else [],
+                    "return": _json.loads(doc.api_returns) if doc.api_returns else [],
                     "annotations": _json.loads(doc.api_annotations) if doc.api_annotations else {},
                 }, ensure_ascii=False),
             }

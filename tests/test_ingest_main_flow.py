@@ -325,8 +325,11 @@ class TestApiDocExtract:
             apis=[
                 ApiDefinition(
                     name="登录", url="/api/login", method="POST",
-                    description="用户登录", parameters={},
-                    returns={"token": "string"},
+                    description="用户登录", header={"Content-Type": "application/json"},
+                    body=[{"name": "username", "type": "string", "required": True,
+                           "default": "", "desc": "用户名", "value": "admin"}],
+                    returns=[{"name": "token", "type": "string", "required": False,
+                              "default": "", "desc": "", "value": ""}],
                 ),
             ],
         )
@@ -342,16 +345,18 @@ class TestApiDocExtract:
         """重复接口（method+url 相同）应合并。"""
         from ingest_v2 import process_api_doc_extract, _merge_api_defs
 
-        # _merge_api_defs 单元测试
-        existing = {"method": "GET", "url": "/api/user", "parameters": {"id": "int"},
-                     "description": "old"}
-        incoming = {"method": "GET", "url": "/api/user", "parameters": {"name": "str"},
-                     "description": "new longer description"}
+        # _merge_api_defs 单元测试（新结构 body/return 数组）
+        existing = {"method": "GET", "url": "/api/user",
+                    "body": [{"name": "id", "type": "int"}],
+                    "description": "old"}
+        incoming = {"method": "GET", "url": "/api/user",
+                    "body": [{"name": "name", "type": "str"}],
+                    "description": "new longer description"}
         merged = _merge_api_defs(existing, incoming)
 
-        # parameters 应合并（并集）
-        assert "id" in merged["parameters"]
-        assert "name" in merged["parameters"]
+        # body 应合并（并集）
+        merged_names = {f["name"] for f in merged["body"]}
+        assert {"id", "name"} <= merged_names
         # description 取更长的
         assert len(merged["description"]) == len("new longer description")
 
@@ -373,7 +378,7 @@ class TestCommitApiDocs:
 
         apis = [
             {"name": "登录", "url": "/api/login", "method": "POST",
-             "description": "登录", "parameters": {}, "returns": {}},
+             "description": "登录", "body": [], "return": []},
         ]
 
         result = commit_api_docs(temp_md_file, "用户管理", apis)
@@ -396,9 +401,9 @@ class TestCommitApiDocs:
 
         apis = [
             {"name": "登录", "url": "/api/login", "method": "POST",
-             "description": "登录", "parameters": {}, "returns": {}},
+             "description": "登录", "body": [], "return": []},
             {"name": "注册", "url": "/api/register", "method": "POST",
-             "description": "注册", "parameters": {}, "returns": {}},
+             "description": "注册", "body": [], "return": []},
         ]
 
         result = commit_api_docs(temp_md_file, "用户管理", apis)
@@ -424,7 +429,7 @@ class TestCommitApiDocs:
 
         try:
             apis = [{"name": "测试", "url": "/api/test", "method": "GET",
-                      "description": "test", "parameters": {}, "returns": {}}]
+                      "description": "test", "body": [], "return": []}]
             commit_api_docs(tmp_path, "测试模块", apis, delete_original=True)
             assert not os.path.exists(tmp_path), "原文件应被删除"
         finally:

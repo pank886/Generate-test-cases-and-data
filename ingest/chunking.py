@@ -118,20 +118,21 @@ def _build_api_search_text(api: dict) -> str:
 
     parts = [f"{method} {url} {name}。{desc}。"]
 
-    # 参数
-    params = api.get("parameters", [])
+    # 参数（新结构 body 六字段；兼容旧 key parameters）
+    params = api.get("body", api.get("parameters", []))
     if isinstance(params, list) and params:
         param_strs = []
         for p in params[:20]:  # 最多 20 个参数，防过长
             pn = p.get("name", "")
             pt = p.get("type", "string")
             pr = "必填" if p.get("required") else ""
-            pd = p.get("description", "")
-            param_strs.append(f"{pn}{pt}{pr}{pd}")
+            pd = p.get("desc") or p.get("description", "")
+            pv = p.get("value", "")
+            param_strs.append(f"{pn}{pt}{pr}{pd}{pv}")
         parts.append("参数: " + "; ".join(param_strs))
 
-    # 返回值
-    returns = api.get("returns", [])
+    # 返回值（新结构 return）
+    returns = api.get("return", api.get("returns", []))
     if isinstance(returns, list) and returns:
         ret_strs = [f"{r.get('name', '')}{r.get('type', '')}" for r in returns[:10]]
         parts.append("返回值: " + "; ".join(ret_strs))

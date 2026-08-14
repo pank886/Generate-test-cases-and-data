@@ -285,21 +285,26 @@ class TestRealApiMdExtraction:
                 f"无效method: {api.get('method')} name={api.get('name')}"
             )
 
-    def test_headers_is_list(self, real_md_path):
-        """headers 必须是数组格式。"""
+    def test_new_format_shapes(self, real_md_path):
+        """新结构：header 是 dict，body/return 是数组。"""
         from ingest_v2 import extract_apis_from_yapi_md, _extract_text
         full_text = _extract_text(real_md_path).strip()
         result = extract_apis_from_yapi_md(full_text)
+        six = {"name", "type", "required", "default", "desc", "value"}
         for api in result["apis"]:
-            assert isinstance(api["headers"], list), (
-                f"headers应为list: {api.get('name')}"
+            assert isinstance(api["header"], dict), (
+                f"header应为dict: {api.get('name')}"
             )
-            assert isinstance(api["parameters"], list), (
-                f"parameters应为list: {api.get('name')}"
+            assert isinstance(api["body"], list), (
+                f"body应为list: {api.get('name')}"
             )
-            assert isinstance(api["returns"], list), (
-                f"returns应为list: {api.get('name')}"
+            assert isinstance(api["return"], list), (
+                f"return应为list: {api.get('name')}"
             )
+            for f in api["body"] + api["return"]:
+                assert isinstance(f, dict) and six <= set(f), (
+                    f"字段缺六项: {f.get('name')} -> {sorted(set(f))}"
+                )
 
     # ── 2026-08 提取修复：desc HTML 残留 / Query·Body 参数 / 响应信封误塞 ──
     def _extract(self, real_md_path):
@@ -317,7 +322,7 @@ class TestRealApiMdExtraction:
         apis = self._extract(real_md_path)
         api = next((a for a in apis if a["url"] == "/electricBillEnterprise/import"), None)
         assert api, "缺少 /electricBillEnterprise/import"
-        names = [p["name"] for p in api["parameters"]]
+        names = [p["name"] for p in api["body"]]
         assert "file" in names, f"导入公摊面积应含 file 参数，实际: {names}"
 
     def test_query_params_extracted(self, real_md_path):
@@ -325,20 +330,77 @@ class TestRealApiMdExtraction:
         apis = self._extract(real_md_path)
         api = next((a for a in apis if a["url"] == "/shareBill/import/enterprise"), None)
         assert api, "缺少 /shareBill/import/enterprise"
-        names = {p["name"] for p in api["parameters"]}
+        names = {p["name"] for p in api["body"]}
         assert {"startTime", "endTime", "payType"} <= names, f"Query参数缺失: {sorted(names)}"
 
     def test_no_response_envelope_as_params(self, real_md_path):
-        """修复：不得把返回数据信封 retCode/msg/data/queue 误塞进 parameters。"""
+        """修复：不得把返回数据信封 retCode/msg/data/queue 误塞进 body。"""
         apis = self._extract(real_md_path)
         env = {"retCode", "msg", "data", "queue"}
         bad = [a["url"] for a in apis
-               if a["parameters"] and a["parameters"][0]["name"] in env]
-        assert not bad, f"响应信封误塞参数: {bad}"
+               if a["body"] and a["body"][0]["name"] in env]
+        assert not bad, f"响应信封误塞body: {bad}"
 
     def test_empty_param_api_stays_empty(self, real_md_path):
         """修复：参数区为空的接口不应 fallback 误取返回表（原被塞信封）。"""
         apis = self._extract(real_md_path)
         api = next((a for a in apis if a["url"] == "/electricMeter/updateAll"), None)
         assert api, "缺少 /electricMeter/updateAll"
-        assert api["parameters"] == [], f"空参数接口不应有参数: {api['parameters']}"
+        assert api["body"] == [], f"空参数接口不应有参数: {api['body']}"
+
+
+# ============================================================
+# 修复：必填列「非必须」被误判为必填（'必须' in '非必须' 子串 bug）
+# ============================================================
+
+class TestRequiredFlag:
+    """YApi 必填列判定：非必须不得标为必填。"""
+
+    @pytest.fixture
+    def real_md_path(self):
+        for path in (r"D:\ai_test\用电测试\api.md",
+                     r"D:\1-ceshi\md\用电\api.md"):
+            if os.path.exists(path):
+                return path
+        pytest.skip("测试文件不存在: 候选路径均缺失")
+
+    @staticmethod
+    def _extract(real_md_path):
+        from ingest_v2 import extract_apis_from_yapi_md, _extract_text
+        return extract_apis_from_yapi_md(_extract_text(real_md_path).strip())["apis"]
+
+    def test_is_required_negative_forms(self):
+        """「非必须/不必填/否/空」应判为非必填。"""
+        from ingest.api_parser import _is_required
+        for s in ("非必须", "非必填", "不必填", "否", "", None):
+            assert _is_required(s) is False, f"'{s}' 应判为非必填"
+
+    def test_is_required_positive_forms(self):
+        """「必须/必填/是/TRUE」应判为必填。"""
+        from ingest.api_parser import _is_required
+        for s in ("必须", "必填", "是", "TRUE", "true", "Yes", "1"):
+            assert _is_required(s) is True, f"'{s}' 应判为必填"
+
+    def test_getPage_all_optional_params(self, real_md_path):
+        """真实 api.md：/electricBillEnterprise/getPage 29 个参数全部「非必须」。"""
+        apis = self._extract(real_md_path)
+        api = next((a for a in apis if a["url"] == "/electricBillEnterprise/getPage"), None)
+        assert api, "缺少 /electricBillEnterprise/getPage"
+        req_params = [p["name"] for p in api["body"] if p["required"]]
+        assert len(api["body"]) == 29, f"参数数异常: {len(api['body'])}"
+        assert not req_params, f"29 个参数全部非必须，却标为必填: {req_params}"
+
+    def test_getPage_all_optional_returns(self, real_md_path):
+        """真实 api.md：/electricBillEnterprise/getPage 返回字段全部「非必须」。"""
+        apis = self._extract(real_md_path)
+        api = next((a for a in apis if a["url"] == "/electricBillEnterprise/getPage"), None)
+        req_returns = [r["name"] for r in api["return"] if r["required"]]
+        assert not req_returns, f"返回字段全部非必须，却标为必填: {req_returns}"
+
+    def test_content_type_header_present(self, real_md_path):
+        """真实 api.md：Header 含 Content-Type（新结构为 名→值 映射）。"""
+        apis = self._extract(real_md_path)
+        api = next((a for a in apis if a["url"] == "/electricBillEnterprise/getPage"), None)
+        assert "Content-Type" in api["header"], (
+            f"Content-Type 应在 header 映射中: {api['header']}"
+        )

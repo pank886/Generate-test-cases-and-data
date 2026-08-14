@@ -698,9 +698,9 @@ async def _analyze_module_scenarios_3step_bg(task_id: str, module_name: str):
                             "name": doc.api_name, "url": doc.api_url,
                             "method": doc.api_method,
                             "description": doc.api_description,
-                            "headers": _json.loads(doc.api_headers or "[]"),
-                            "parameters": _json.loads(doc.api_parameters or "[]"),
-                            "returns": _json.loads(doc.api_returns or "[]"),
+                            "header": _json.loads(doc.api_headers or "{}"),
+                            "body": _json.loads(doc.api_parameters or "[]"),
+                            "return": _json.loads(doc.api_returns or "[]"),
                         })
                 else:
                     chunks = session.query(DocumentChunk).filter_by(

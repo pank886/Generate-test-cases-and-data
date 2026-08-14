@@ -22,7 +22,12 @@ from ingest.storage import (
     _save_document_chunks,
     _delete_document_chunks,
 )
-from ingest.api_parser import _merge_api_defs, _extract_valid_api_paths, _split_text_by_headers
+from ingest.api_parser import (
+    _merge_api_defs,
+    _extract_valid_api_paths,
+    _split_text_by_headers,
+    _coerce_api_format,
+)
 from ingest.chunking import (
     _generate_batch_summaries,
     _build_api_search_text,
@@ -268,7 +273,10 @@ def process_api_doc_extract(file_path: str, default_module: str = None,
         )
         mod = result.module_name
         apis_raw = result.apis if hasattr(result, "apis") else []
-        apis = [a.model_dump() if hasattr(a, "model_dump") else a for a in apis_raw]
+        apis = [
+            _coerce_api_format(a.model_dump(by_alias=True) if hasattr(a, "model_dump") else a)
+            for a in apis_raw
+        ]
         with _lock:
             done[0] += 1
             pct = int(10 + (done[0] / total) * 70)
@@ -351,6 +359,8 @@ def commit_api_docs(file_path: str, module_name: str, apis: list[dict],
     db = get_chroma_db()
     file_name = os.path.basename(file_path)
     file_type = os.path.splitext(file_path)[1].lstrip(".")
+    # 归一化为新结构（幂等；兼容前端缓存的旧格式）
+    apis = [_coerce_api_format(a) for a in apis]
     doc_ids = []
 
     # ---- Phase 1: 批量写入 SQLite（同一事务，含 api_* 结构化列）----
@@ -382,9 +392,9 @@ def commit_api_docs(file_path: str, module_name: str, apis: list[dict],
             api_url=url,
             api_method=method.upper() if method else "?",
             api_description=api.get("description", api_name),
-            api_headers=_json.dumps(api.get("headers", []), ensure_ascii=False),
-            api_parameters=_json.dumps(api.get("parameters", []), ensure_ascii=False),
-            api_returns=_json.dumps(api.get("returns", []), ensure_ascii=False),
+            api_headers=_json.dumps(api.get("header", {}), ensure_ascii=False),
+            api_parameters=_json.dumps(api.get("body", []), ensure_ascii=False),
+            api_returns=_json.dumps(api.get("return", []), ensure_ascii=False),
             api_annotations=_json.dumps(api.get("annotations", {}), ensure_ascii=False),
         ))
 

@@ -82,22 +82,28 @@ class DeepSeekChatOpenAI(BaseCompatibleChatOpenAI):
         response: dict | openai.BaseModel,
         generation_info: dict | None = None,
     ) -> ChatResult:
+        # 提前提取思考内容（两种路径，转换后补回，供 invoke_think 记录）
+        reasoning = self._extract_reasoning_content(response)
+
         # ----- dict 路径：原地归一化后委托基类 -----
         if isinstance(response, dict):
             self.normalize_tool_calls(response)
-            return super()._create_chat_result(response, generation_info)
+            result = super()._create_chat_result(response, generation_info)
+        else:
+            # ----- Pydantic 模型路径 -----
+            resp_dict = response.model_dump(
+                exclude={"choices": {"__all__": {"message": {"parsed"}}}}
+            )
+            self.normalize_tool_calls(resp_dict)
 
-        # ----- Pydantic 模型路径 -----
-        resp_dict = response.model_dump(
-            exclude={"choices": {"__all__": {"message": {"parsed"}}}}
-        )
-        self.normalize_tool_calls(resp_dict)
+            # 委托（传 dict → 基类 guard → ChatOpenAI._create_chat_result）
+            result = super()._create_chat_result(resp_dict, generation_info)
 
-        # 委托（传 dict → 基类 guard → ChatOpenAI._create_chat_result）
-        result = super()._create_chat_result(resp_dict, generation_info)
+            # 回补 parsed / refusal（父类因传入 dict 跳过了此步骤）
+            self._restore_parsed_and_refusal(result, response)
 
-        # 回补 parsed / refusal（父类因传入 dict 跳过了此步骤）
-        self._restore_parsed_and_refusal(result, response)
+        # 回补思考内容（langchain 转换会丢弃 reasoning_content）
+        self._restore_reasoning_content(result, reasoning)
 
         return result
 
@@ -136,3 +142,37 @@ class DeepSeekChatOpenAI(BaseCompatibleChatOpenAI):
 
         if hasattr(msg, "refusal") and msg.refusal is not None:
             result.generations[0].message.additional_kwargs["refusal"] = msg.refusal
+
+    @staticmethod
+    def _extract_reasoning_content(
+        response: dict | openai.BaseModel,
+    ) -> Any:
+        """从原始响应提取 reasoning_content（DeepSeek 思考模式的思考文本）。
+
+        langchain 转换会丢弃该字段，故在 _create_chat_result 转换前先取出，
+        转换后由 _restore_reasoning_content 回补到 additional_kwargs。
+        """
+        try:
+            if isinstance(response, openai.BaseModel):
+                msg = response.choices[0].message  # type: ignore[attr-defined]
+                if hasattr(msg, "reasoning_content"):
+                    return msg.reasoning_content
+            elif isinstance(response, dict):
+                choices = response.get("choices") or []
+                if choices:
+                    msg = choices[0].get("message", {})
+                    return msg.get("reasoning_content")
+        except (AttributeError, IndexError, TypeError):
+            pass
+        return None
+
+    @staticmethod
+    def _restore_reasoning_content(result: ChatResult, reasoning: Any) -> None:
+        """将 reasoning_content 回补到 result 消息的 additional_kwargs。
+
+        invoke_think 从 additional_kwargs 读取并记录到 thinking_trace.log。
+        无思考内容时静默跳过。
+        """
+        if not reasoning or not result.generations:
+            return
+        result.generations[0].message.additional_kwargs["reasoning_content"] = reasoning

@@ -42,36 +42,36 @@ def api_def_extract_prompt() -> ChatPromptTemplate:
          "### 提取规则\n"
          "1. 文本中只包含一个接口，提取它。\n"
          "2. 每个接口必须包含以下字段：\n"
-         '   - name: 接口名称（从文档中的"接口描述"或接口标题提取）\n'
+         '   - name: 接口名称（从文档中的"接口名称/接口描述"或接口标题提取）\n'
          '   - description: 接口功能描述（一句话概括）\n'
          "   - method: 大写的 GET/POST/PUT/DELETE/PATCH\n"
          "   - url: 只提取路径部分，不含域名\n"
-         "   - headers: 请求头参数列表，格式为数组\n"
-         "   - parameters: 请求参数列表（Body + Query），格式为数组\n"
-         "   - returns: 响应字段列表，格式为数组\n\n"
-         "### 参数/返回值的数组元素格式\n"
-         "每个参数/返回值元素为 JSON 对象，包含以下字段：\n"
-         '   - name: 字段名（必填）\n'
-         '   - type: 数据类型（必填），如 string/integer/number/boolean/object/array\n'
-         '   - required: 是否必填（boolean，必填）\n'
-         '   - description: 字段说明/备注（string，无则填空字符串""）\n'
-         '   - default: 默认值（string 或 null，无则填 null）\n'
-         "   - children: 嵌套子字段，仅在 type=object 或 type=array 时有值，格式同本数组。无嵌套则省略该字段。\n\n"
+         "   - header: 请求头对象（名→值映射），如 {\"Content-Type\": \"application/json\"}\n"
+         "   - body: 请求体字段数组（Body + Query 合并）\n"
+         "   - return: 响应字段数组\n\n"
+         "### 字段数组元素格式（body/return 每个元素恰好 6 个字段）\n"
+         '   - name: 字段名（必填，来自参数表「名称」列）\n'
+         '   - type: 数据类型（必填，来自「类型」列），如 string/integer/number/boolean/object/array\n'
+         '   - required: 是否必填（boolean，来自「是否必须」列）\n'
+         '   - default: 默认值（string，来自「默认值」列，无则填空字符串""）\n'
+         '   - desc: 字段说明/备注（string，来自「备注」列，无则填空字符串""）\n'
+         '   - value: 请求示例/返回示例代码块中该字段的值（string；示例中没有该字段则填空字符串""）\n\n'
          "### 输出格式\n"
          "输出一个 JSON 对象，包含 apis 数组和 module_name 字符串。\n"
          "apis 数组中每个元素是一个接口对象，包含以下字段：\n"
          "  name(string), description(string), method(string), url(string),\n"
-         "  headers(array), parameters(array), returns(array)\n"
-         "每个数组元素的字段：name(string), type(string), required(boolean),\n"
-         "  description(string), default(string|null), children(array,可选)\n\n"
+         "  header(object), body(array), return(array)\n"
+         "body/return 每个数组元素恰含：name(string), type(string), required(boolean),\n"
+         "  default(string), desc(string), value(string)\n\n"
          "⚠️ 重要约束：\n"
-         '  - headers/parameters/returns 三个字段**必须是数组**，无数据时填空数组 []，绝对不能填 {{}}\n'
-         "  - 文档中的 HTML 表格列（名称/类型/是否必须/默认值/备注）逐列提取，一一对应填入 name/type/required/default/description\n"
-         "  - 文档中标注\"必须\"→required:true，\"非必须\"→required:false\n"
-         "  - 嵌套的子字段用 children 数组表示，保持层级结构\n"
-         "  - 不遗漏任何参数，不合并不同层级的参数\n"
+         '  - header 必须是对象（名→值映射），无请求头时填空对象 {{}}\n'
+         "  - body/return 必须是数组，无数据时填空数组 []，绝对不能填 {}\n"
+         "  - 字段数组每个元素必须是 6 个字段，一个不少（无值填空字符串\"\"）\n"
+         "  - value 只从文档的「请求示例/返回示例」代码块中提取，示例没有该字段则 value 为\"\"，绝不把默认值/说明填进 value\n"
+         "  - 文档中标注\"必须\"→required:true，\"非必须\"或未注明→required:false\n"
+         "  - 不遗漏任何参数；嵌套子字段保持层级\n"
          "  - 不包含 Markdown。"),
-        ("human", "### 接口文档内容\n{doc_text}\n\n请提取所有接口定义，参数列表必须完整（包含嵌套子字段）：")
+        ("human", "### 接口文档内容\n{doc_text}\n\n请提取所有接口定义，参数列表必须完整：")
     ])
 
 
@@ -170,6 +170,8 @@ def analyze_yaml_data_prompt() -> ChatPromptTemplate:
          "- **db 断言禁止**：若「数据库表结构信息」为空，禁止生成 db 断言（无表结构无法写正确 SQL），改用 eq/contains/ne\n"
          "- **导出/下载/模板接口**（URL 含 export/import/template/download/upload 或接口标注 is_export）：返回二进制流，"
          "断言必须用 `contains: {{status_code: 200}}`，禁止 eq/ne 检查状态码\n"
+         "- **对 `status_code` 的断言必须用 `contains: {{status_code: X}}`，禁止 eq/ne**（不限于导出接口；导出接口维持 contains: {{status_code: 200}}）\n"
+         "- **`contains` 的值必须是字典对象**（`{{字段: 期望}}` 或 `{{$.JSONPath: 期望}}`），禁止裸字符串/标量\n"
          "- extract 从接口返回值中提取数据（JSONPath），供下游步骤用 ${{get_extract_data(key)}} 引用。"
          "input_extract 极少使用，不要把它当数据暂存。禁止填入 PRE 编号或固定字面量\n"
          "- extract/validation 的 JSONPath 必须以 $. 开头（如 $.data.id）\n"
@@ -210,6 +212,8 @@ def repair_yaml_data_prompt() -> ChatPromptTemplate:
          "- json/params/data 三选一，依据接口定义确定正确的请求方式\n"
          "- **若「数据库表结构信息」为空，禁止 db 断言**，改用 eq/contains/ne\n"
          "- **导出/下载/模板接口**（URL 含 export/import/template/download/upload）：断言用 contains: {{status_code: 200}}，禁止 eq/ne 检查状态码\n"
+         "- **对 `status_code` 的断言必须用 `contains: {{status_code: X}}`，禁止 eq/ne**（不限于导出接口）\n"
+         "- **`contains` 的值必须是字典对象**（`{{字段: 期望}}` 或 `{{$.JSONPath: 期望}}`），禁止裸字符串\n"
          "- 修正时保持原有正确部分不动，只改错误部分"),
         ("human",
          "{post_check_issues}"
@@ -289,10 +293,11 @@ def format_yaml_data_prompt() -> ChatPromptTemplate:
          "12. validation 数组不能为空，每步至少一条断言（如 {{eq: {{retCode: 0}}}}）\n"
          "13. 断言运算符只用 [eq, contains, ne, db] 四种，不等于是 ne 不是 neq\n"
          "14. **若「数据库表结构信息」为空，禁止 db 断言**（无表结构无法写正确 SQL），改用 eq/contains/ne\n"
-         "15. **导出/下载/模板接口**（URL 含 export/import/template/download/upload 或标注 is_export）："
-         "返回二进制流，断言必须用 contains: {{status_code: 200}}，禁止 eq/ne 检查状态码\n"
+         "15. **对 `status_code` 的断言必须用 contains: {{status_code: X}}，禁止 eq/ne**（适用于所有接口，"
+         "不限于导出；导出/下载/模板接口返回二进制流，维持 contains: {{status_code: 200}}）\n"
          "16. JSONPath 必须以 $. 开头（如 $.data.code）\n"
-         "17. 禁止 Markdown，只输出纯净 JSON"),
+         "17. 禁止 Markdown，只输出纯净 JSON\n"
+         "18. **`contains` 的值必须是字典对象**（`{{字段: 期望}}` 或 `{{$.JSONPath: 期望}}`），禁止裸字符串/标量"),
         ("human",
          "### 数据分析\n{data_analysis}\n\n"
          "### 接口定义\n{api_definitions}\n\n"

@@ -50,6 +50,20 @@ METHOD_FEATURES = {
     "free_text": {"supports_thinking": True},
 }
 
+
+def _quality_gate_decision(n_pass: int, n_total: int, regen_attempted: bool) -> str | None:
+    """质量门禁决策：首轮通过率 < 50% 时的处置。
+
+    Returns:
+        "regen" —— 首轮不达标，触发全量重新生成（真实重跑 thinking 节点）
+        "abort" —— 重试后仍不达标，终止生成并报错
+        None    —— 通过（达标或无需判断）
+    """
+    if n_total <= 0 or n_pass >= n_total / 2:
+        return None
+    return "abort" if regen_attempted else "regen"
+
+
 class ChatTestAgentGraph(RetrievalMixin, GenerationMixin):
     """智能测试助手——LangGraph 节点方法的容器类
 
@@ -73,12 +87,16 @@ class ChatTestAgentGraph(RetrievalMixin, GenerationMixin):
 
     # ==================== 图内节点方法 ====================
 
-    def _generate_excel_plan_thinking(self, state: State):
+    def _generate_excel_plan_thinking(self, state: State, gen_warning: str = ""):
         """【新】thinking+json_mode 一步生成 Excel 计划。
 
         合并原 analyze_test_points_raw + generate_excel_plan 两步：
         thinking 分析 → json_object 直接输出 ExcelPlanV2。
         失败时由 graph builder 降级到旧两步流程。
+
+        Args:
+            gen_warning: 质量门禁重试时的系统警告文本（注入 prompt 开头，
+                首轮为空串，保持正常生成提示词不变）。
         """
         from observability import log_phase_header
         from prompts.response_model import ExcelPlanV2
@@ -86,6 +104,7 @@ class ChatTestAgentGraph(RetrievalMixin, GenerationMixin):
         from database import get_session_ctx
         from database.operations import ModuleOps, BindingOps
         from database.operations.analysis import AnalysisOps
+        from agent_components.api_annotations import ApiAnnotationRegistry
 
         log_phase_header("Phase B — thinking+json 一步生成 Excel 计划")
         logger.info("\n🧠 一步生成 Excel 测试计划（thinking + json_object）...")
@@ -123,6 +142,21 @@ class ChatTestAgentGraph(RetrievalMixin, GenerationMixin):
              for d in (state.get("api_definitions") or [])],
             indent=2, ensure_ascii=False)
 
+        # Phase C 快照用完整 API（新结构：header 映射 + body/return 六字段数组）
+        api_full_for_snapshot = [
+            {
+                "name": d.get("name", "?"), "url": d.get("url", ""),
+                "method": d.get("method", "GET"), "description": d.get("description", ""),
+                "header": d.get("header", {}),
+                "body": d.get("body", d.get("parameters", [])),
+                "return": d.get("return", d.get("returns", [])),
+                "annotations": {},
+            }
+            for d in (state.get("api_definitions") or [])
+        ]
+        for api in api_full_for_snapshot:
+            ApiAnnotationRegistry.apply_all(api)
+
         # 关联模块
         related_text = ", ".join(state.get("related_modules", [])) or "无"
         user_ctx = state.get("original_input", "")
@@ -146,8 +180,13 @@ class ChatTestAgentGraph(RetrievalMixin, GenerationMixin):
             related_docs=related_text,
             user_context=user_ctx,
             db_schema=config.DB_SCHEMA,  # 数据库表结构（占位，为空禁 [db]，2026-08-04 问题 2）
+            gen_warning=gen_warning,  # 质量门禁重试注入警告；首轮空串保持提示词不变
         )
         _text = self._invoke_think(_think_llm, _messages, label="generate_plan_thinking")
+        # 2026-08-12 修复：一步生成节点自 4a61792 起漏写 thinking 日志，恢复 thinking_trace.log 记录
+        from observability import log_thinking
+        log_thinking("generate_plan_thinking", state.get("original_input", ""), _text,
+                     prompt_label="generate_excel_plan_thinking")
 
         # ── 4. 解析 ──
         plan = ExcelPlanV2.model_validate(json.loads(_text))
@@ -157,6 +196,7 @@ class ChatTestAgentGraph(RetrievalMixin, GenerationMixin):
         return {
             "excel_plan": plan,
             "plan_source": "thinking",
+            "api_full_for_snapshot": api_full_for_snapshot,
             "module_tree_json": module_tree,
         }
 
@@ -176,6 +216,22 @@ class ChatTestAgentGraph(RetrievalMixin, GenerationMixin):
             for d in (state.get("api_definitions") or [])
         ]
         all_apis_json = json.dumps(api_summaries, indent=2, ensure_ascii=False)
+        # Phase C 快照：保留完整定义（新结构 header/body/return），存为 api_defs.json
+        api_full_for_snapshot = [
+            {
+                "name": d.get("name", "?"), "url": d.get("url", ""),
+                "method": d.get("method", "GET"), "description": d.get("description", ""),
+                "header": d.get("header", {}),
+                "body": d.get("body", d.get("parameters", [])),
+                "return": d.get("return", d.get("returns", [])),
+                "annotations": {},
+            }
+            for d in (state.get("api_definitions") or [])
+        ]
+        # 接口异常标识自动检测
+        from agent_components.api_annotations import ApiAnnotationRegistry
+        for api in api_full_for_snapshot:
+            ApiAnnotationRegistry.apply_all(api)
         from database import get_session_ctx
         from database.operations import ModuleOps
         with get_session_ctx() as session:
@@ -207,7 +263,8 @@ class ChatTestAgentGraph(RetrievalMixin, GenerationMixin):
                     final_response="测试计划生成失败：生成环节未产出计划，请重试",
                 ),
             }
-        # thinking 已取的模块树优先，避免重复查询与不一致
+        # thinking 已构造的快照/模块树优先，避免重复查询与不一致
+        api_full_for_snapshot = state.get("api_full_for_snapshot") or api_full_for_snapshot
         module_tree_json = state.get("module_tree_json") or module_tree_json
 
         # URL 有效性校验用真实接口路径模板（含 {xxx} 路径参数），2026-08-03 建议 3
@@ -223,27 +280,28 @@ class ChatTestAgentGraph(RetrievalMixin, GenerationMixin):
         all_confirmed: list = []
         all_shared_pres: list = []  # 首轮共享前置，重试时复用
         failed_ids: set = set()  # 失败行 TC ID 集合，重试时只接受这些 ID 的修复
-        _gen_attempt = 1          # 全量生成次数（含质量不达标重试）
-        _gen_warning = ""         # 质量不达标时的警告信息
+        _gen_attempt = 1          # 生成轮次（1=首轮，2=质量门禁全量重试轮）
+        _gen_warning = ""         # 质量不达标时的警告信息（注入重生成 prompt）
 
         for attempt in range(config.EXCEL_REPAIR_ATTEMPTS):
             if attempt == 0 or _gen_warning:
-                # === 首轮 / 质量不达标重试 ===
+                # === 首轮 / 质量门禁全量重试 ===
                 if attempt == 0:
                     # 消费上游 thinking 生成的 plan（纯处理，不生成）
                     plan = incoming_plan
                     incoming_plan = None  # 仅首轮消费
                 else:
-                    # 质量不达标需重新生成 plan —— 方案3 无自生成能力，交人工审查
-                    return {
-                        "excel_plan": None, "excel_path": "", "output_dir": output_dir,
-                        "requires_review": True,
-                        "error_info": [f"生成质量未达标（第{_gen_attempt}次），且无自生成兜底，交人工审查"],
-                        "response_obj": ProperResponse(
-                            proper_thinking=[], worth_to_remember=False,
-                            final_response="测试计划生成质量未达标，需人工审查",
-                        ),
-                    }
+                    # 质量门禁重试轮：真实全量重生成（thinking 节点，注入警告），非局部修复
+                    logger.warning(
+                        f"   ⚠️ 质量门禁：首轮通过率 < 50%，触发第 {_gen_attempt} 次全量重新生成...")
+                    try:
+                        plan = self._generate_excel_plan_thinking(
+                            state, gen_warning=_gen_warning)["excel_plan"]
+                    except Exception as e:
+                        logger.error("   ❌ 质量门禁重试：全量重新生成异常: %s", e, exc_info=True)
+                        raise RuntimeError(
+                            f"Excel 生成质量门禁重试失败：全量重新生成异常（{e}），已终止") from e
+                    _gen_warning = ""  # 已消费；重试轮之后仍失败走局部修复轮
                 all_shared_pres = plan.shared_preconditions
 
                 # 首轮校验全部用例（校验收敛：ExcelPlanValidator，含 9 类错误聚合 + URL 有效性 + db 拦截）
@@ -253,32 +311,31 @@ class ChatTestAgentGraph(RetrievalMixin, GenerationMixin):
                 _new_failed = _vr.failed_details
                 all_confirmed = _vr.all_confirmed
 
-                # 质量门禁：首轮通过率 < 50% 时重新全量生成（非修复）
+                # 质量门禁：首轮通过率 < 50% → 全量重新生成一次；
+                # 重试后仍 < 50% → 记录日志，终止生成并报错
                 n_total = len(plan.test_cases)
                 n_pass = len(all_confirmed)
-                if n_total > 0 and n_pass < n_total / 2 and _gen_attempt < 3:
+                _gate = _quality_gate_decision(n_pass, n_total, regen_attempted=(_gen_attempt >= 2))
+                if _gate == "regen":
                     _gen_attempt += 1
                     logger.warning(
                         f"   ⚠️ 质量门禁：首轮通过率 {n_pass}/{n_total} < 50%，"
-                        f"触发第 {_gen_attempt} 次全量重新生成"
+                        f"触发全量重新生成"
                     )
                     _gen_warning = (
-                        f"⚠️ 【系统警告：生成质量未达标，触发强制重试】\n"
-                        f"这是你的第 {_gen_attempt} 次生成尝试。上一轮 {n_total} 条用例中仅有 {n_pass} 条通过校验，"
-                        f"通过率 {n_pass}/{n_total}，未达到 100% 的格式要求。\n"
-                        "所有用例的步骤与预期必须 100% 精确对齐，不允许任何不对齐的情况。\n\n"
-                        "在本次生成中，你必须：\n"
-                        "1. 严格回顾并遵守上述所有格式规则，绝对不要偏离。\n"
-                        "2. 仔细检查步骤（Steps）和预期（Expected）的数量，必须精确一一对应。\n"
-                        "3. 参考上方提供的 ✅ 正确示例 和 ❌ 错误示例 进行自我校验。\n"
+                        f"### ⚠️ 系统警告：上一轮生成质量未达标，本轮请重新生成\n"
+                        f"上一轮 {n_total} 条用例中仅有 {n_pass} 条通过校验，"
+                        f"通过率 {n_pass}/{n_total}，未达到 50% 的最低要求，"
+                        "说明存在较多格式或字段不合规的问题。\n"
+                        "请重新审视并严格遵循上述所有格式规则，确保本轮生成的用例全部合规。\n\n"
                     )
                     failed_details = []
                     continue
-                if n_total > 0 and n_pass < n_total / 2 and _gen_attempt >= 3:
+                if _gate == "abort":
+                    logger.error(
+                        f"   ❌ 质量门禁：全量重试后通过率仍 {n_pass}/{n_total} < 50%，终止生成")
                     raise RuntimeError(
-                        f"Excel 生成质量不达标：连续 {_gen_attempt} 次全量生成通过率 < 50%"
-                        f"（本次 {n_pass}/{n_total}），已终止"
-                    )
+                        f"Excel 生成质量不达标：全量重试后通过率仍 {n_pass}/{n_total} < 50%，已终止")
 
                 # 记录失败行 ID（重试时只有匹配这些 ID 的修复才被接受）
                 failed_ids = {f[1].get("id", "") for f in _new_failed}
@@ -570,7 +627,16 @@ class ChatTestAgentGraph(RetrievalMixin, GenerationMixin):
                 ws.column_dimensions[get_column_letter(ci)].width = max(len(str(h)) + 2, min(mx + 2, 55))
         wb.save(excel_path); wb.close()
 
-        # 快照 api_defs.json 已取消（D3）：Phase C 门禁/索引改从 SQLite 投影。
+        # 接口定义快照与 Excel 同目录落盘 —— Phase C 生成 YAML 的数据来源。
+        # 规则 M8：接口定义靠产物传递（快照随计划走），禁止依赖内存态跨阶段交接。
+        api_defs_path = os.path.join(output_dir, "api_defs.json")
+        try:
+            with open(api_defs_path, "w", encoding="utf-8") as f:
+                json.dump(api_full_for_snapshot, f, ensure_ascii=False, indent=2)
+            logger.info(f"   📄 接口定义快照已保存: {api_defs_path} ({len(api_full_for_snapshot)} 个接口)")
+        except OSError:
+            logger.error("接口定义快照写入失败（Phase C 确认时将按 M8 阻断）: %s",
+                         api_defs_path, exc_info=True)
 
         fail_warn = f"（{len(failed_details)} 行未通过校验，需人工审查）" if failed_details else ""
         n_modules = len(set(tc.story for tc in valid_cases))
@@ -593,7 +659,7 @@ class ChatTestAgentGraph(RetrievalMixin, GenerationMixin):
         return {
             "excel_plan": plan, "excel_path": excel_path, "output_dir": output_dir,
             "response_obj": ProperResponse(
-                proper_thinking=[f"已提取 {len(state.get('api_definitions') or [])} 个接口，分析 {n_confirmed} 条用例"],
+                proper_thinking=[f"已提取 {len(api_full_for_snapshot)} 个接口，分析 {n_confirmed} 条用例"],
                 final_response=f"Excel 测试计划已生成：共 {n_confirmed} 条用例{fail_warn}",
                 worth_to_remember=False,
             ),
@@ -699,10 +765,9 @@ class ChatTestAgentGraph(RetrievalMixin, GenerationMixin):
         return load_factory_methods()
 
     def _invoke_think(self, bound_llm, messages, max_retries: int | None = None,
-                      label: str = "LLM", reasoning_label: str | None = None) -> str:
+                      label: str = "LLM") -> str:
         """通用 thinking 调用（空 content 复用输入重试），实现见 llm_client.py。"""
-        return invoke_think(bound_llm, messages, max_retries=max_retries,
-                            label=label, reasoning_label=reasoning_label)
+        return invoke_think(bound_llm, messages, max_retries=max_retries, label=label)
 
     def _invoke_structured(self, prompt, model_class,
                            max_retries: int = config.MAX_RETRIES,
