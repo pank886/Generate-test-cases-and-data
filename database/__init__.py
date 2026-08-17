@@ -84,6 +84,10 @@ def _migrate_db():
             ("api_annotations", "TEXT DEFAULT ''"),
             ("content_hash", "TEXT DEFAULT ''"),
         ])
+        # glossary 表新增 kind 列（2026-08-17 Axure 页面块：required/filter/explanation）
+        _ensure_columns(conn, "glossary", [
+            ("kind", "TEXT DEFAULT 'required'"),
+        ])
         conn.commit()
     finally:
         conn.close()

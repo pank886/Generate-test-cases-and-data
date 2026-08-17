@@ -13,6 +13,7 @@ nav a:hover,nav a.active{color:#fff;border-bottom-color:#fff}
 .btn{display:inline-flex;align-items:center;gap:4px;background:var(--primary);color:#fff;border:none;padding:7px 16px;border-radius:4px;cursor:pointer;font-size:13px;transition:.15s}
 .btn:hover{background:#1557b0}.btn:disabled{background:#ccc;cursor:not-allowed}
 .btn-sm{padding:3px 10px;font-size:11px}
+.btn-xs{padding:0 5px;font-size:11px;background:transparent;color:var(--primary);border:none;cursor:pointer}
 .btn-outline{background:#fff;color:var(--primary);border:1px solid var(--primary)}.btn-outline:hover{background:var(--primary-bg)}
 .btn-success{background:var(--success)}.btn-success:hover{background:#2d9249}
 .btn-danger{background:var(--danger)}.btn-danger:hover{background:#a50e0e}
@@ -70,7 +71,28 @@ nav a:hover,nav a.active{color:#fff;border-bottom-color:#fff}
 .glossary-item{padding:6px 0;border-bottom:1px solid #f0f0f0;font-size:12px}
 .glossary-item .term-name{font-weight:600;color:var(--primary)}
 .glossary-item .term-def{color:var(--text-dim);margin-top:2px}
+.glossary-item .term-note{color:var(--text-dim);margin-top:1px;font-size:11px;opacity:.75}
 .glossary-item .remove{float:right;color:var(--danger);cursor:pointer}
+/* Axure 必填字段：每页一个块，块名=页面名 */
+.glossary-page-title{font-weight:700;color:var(--primary);margin:10px 0 4px;padding:5px 8px;background:#f6f8fb;border-left:3px solid var(--primary);border-radius:3px}
+.glossary-page-title:first-child{margin-top:0}
+
+/* ── Axure 页面块四段（①目录 ②必填 ③筛选 ④说明 🖼图片）── */
+.axure-block{border:1px solid #eee;border-radius:6px;margin:8px 0;padding:8px 10px;background:#fff}
+.axure-block-title{font-weight:700;color:var(--primary);font-size:13px;padding:4px 0;border-bottom:1px solid #f0f0f0;margin-bottom:6px;display:flex;align-items:center;gap:4px}
+.axure-section{margin:6px 0}
+.axure-section-head{font-size:11px;color:var(--text-dim);margin-bottom:4px;font-weight:600}
+.axure-chip{display:inline-block;background:var(--primary-bg);color:var(--primary);border-radius:3px;padding:1px 6px;margin:2px 4px 2px 0;font-size:11px}
+.axure-filter{display:flex;align-items:baseline;gap:6px;margin:2px 0;font-size:11px}
+.axure-opt{color:var(--text-dim);word-break:break-all}
+.axure-explain{font-size:11px;color:#444;line-height:1.7;white-space:pre-wrap;background:#fafbfc;border-radius:4px;padding:6px 8px;max-height:180px;overflow-y:auto}
+.axure-page-img{max-width:100%;max-height:220px;border:1px solid #eee;border-radius:4px;margin:4px 4px 4px 0;cursor:zoom-in}
+
+/* ── 术语 kind 小标签（模块聚合视图）── */
+.kind-tag{display:inline-block;font-size:10px;padding:0 5px;border-radius:3px;vertical-align:1px;margin-left:4px}
+.kind-required{background:#fff1f0;color:#d9001b}
+.kind-filter{background:#e6f7ff;color:#096dd9}
+.kind-explanation{background:#f6ffed;color:#389e0d}
 .new-term-row{margin-top:8px}.new-term-line{margin-bottom:4px}.new-term-line input,.new-term-line textarea{width:100%;padding:5px 8px;border:1px solid var(--border);border-radius:4px;font-size:11px;font-family:inherit;box-sizing:border-box}.new-term-line textarea{resize:vertical;min-height:48px;overflow-y:auto}
 .search-box input{width:100%;padding:7px 10px;border:1px solid var(--border);border-radius:4px;font-size:12px;margin-bottom:10px}
 .scroll-list{scrollbar-width:thin;scrollbar-color:var(--border) transparent}
@@ -87,6 +109,12 @@ nav a:hover,nav a.active{color:#fff;border-bottom-color:#fff}
 .doc-assoc-item:last-child{border-bottom:none}
 .doc-assoc-item .name{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .doc-assoc-item .actions{display:flex;gap:4px;flex-shrink:0}
+.doc-assoc-item.has-pages{flex-direction:column;align-items:stretch;gap:6px}
+.axure-pages{border-left:2px solid var(--primary-bg);padding-left:8px;margin-left:2px}
+.axure-page-row{display:flex;flex-wrap:wrap;align-items:center;gap:4px;font-size:11px;margin:2px 0}
+.axure-page-name{color:var(--primary);font-weight:600;margin-right:4px}
+.axure-page-req{display:inline-flex;flex-wrap:wrap;align-items:center}
+.axure-page-empty{color:var(--text-dim);opacity:.7}
 
 /* 文档行展开的 API 列表 */
 .api-doc-detail{margin:0 0 6px 16px;padding:6px 8px;background:#fafbfc;border:1px solid var(--border);border-radius:4px;font-size:12px}

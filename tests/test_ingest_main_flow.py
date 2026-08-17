@@ -565,6 +565,46 @@ class TestAxureIngest:
         assert fake_db.add_product_doc_chunks.called
         assert mock_parser.cleanup.called
 
+    @patch("ingest.pipelines.get_chroma_db")
+    @patch("agent_components.axure_parser.AxureParser")
+    def test_axure_flow_reingest_idempotent(self, mock_parser_class, mock_get_db,
+                                            in_memory_sqlite, tmp_path):
+        """重复导入同一 zip：document_chunks 不重复堆积（先清旧块再写新块）。"""
+        from ingest_v2 import process_axure_zip
+        from database import get_session_ctx
+        from database.models import DocumentChunk
+
+        mock_parser = MagicMock()
+        mock_parser_class.return_value = mock_parser
+        mock_parser.parse.return_value = {
+            "project_name": "健身房管理",
+            "pages": [{"name": "首页", "url": "home.html", "children": []}],
+            "page_details": {"home.html": {"page_name": "首页", "ui_text": "hi"}},
+        }
+        mock_parser.to_product_doc_chunks.return_value = [
+            {"content": "## 页面: 首页\n欢迎", "page_name": "首页"},
+        ]
+        fake_db = MagicMock()
+        mock_get_db.return_value = fake_db
+
+        with patch("ingest.pipelines.ChatTestAgentGraph") as mock_graph_class:
+            mock_graph = MagicMock()
+            mock_graph_class.return_value = mock_graph
+            from prompts.response_model import DocModuleExtract
+            mock_graph._invoke_structured.return_value = DocModuleExtract(
+                module_name="健身房管理", related_modules=["会员管理"],
+                business_summary="健身房管理", tags=["核心功能"],
+            )
+            zip_path = tmp_path / "re.axure.zip"
+            zip_path.write_text("fake")
+            r1 = process_axure_zip(str(zip_path))
+            r2 = process_axure_zip(str(zip_path))
+
+        assert r1["doc_id"] == r2["doc_id"]
+        with get_session_ctx() as s:
+            n = s.query(DocumentChunk).filter_by(doc_id=r1["doc_id"]).count()
+        assert n == 1, f"重复导入后应只剩 1 条 chunk，实际 {n}"
+
 
 # ══════════════════════════════════════════════════════════════════════
 #  9. Docx 图片目录隔离（process_product_doc 中的 _img_dir）

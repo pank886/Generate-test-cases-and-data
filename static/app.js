@@ -114,6 +114,10 @@ document.addEventListener('click', function(e) {
   const docTermDelBtn = target.closest('.js-delete-term-doc');
   if (docTermDelBtn) { deleteDocGlossaryTerm(parseInt(docTermDelBtn.dataset.termId)); return; }
 
+  // 块标题重命名（Axure 页面块 ①目录）
+  const renameBlockBtn = target.closest('.js-rename-block');
+  if (renameBlockBtn) { promptRenameBlock(renameBlockBtn.dataset.block); return; }
+
   // 术语删除（模块视图）
   const termDelBtn = target.closest('.js-delete-term');
   if (termDelBtn) { deleteGlossaryTerm(parseInt(termDelBtn.dataset.termId)); return; }
@@ -565,7 +569,20 @@ async function loadUnassociatedDocs() {
     let bodyHtml = Object.keys(grouped).map((dt, i) => {
       const items = grouped[dt].map(d => {
         const icon = icons[dt] || '📄';
-        return '<div class="doc-assoc-item"><span class="name">' + icon + ' ' + esc(d.file_name || d.doc_id || '') + '</span>'
+        // axure：可关联文件条目 = 页面块（标题=页面名/块名 + 内容=必填字段）
+        let pagesHtml = '';
+        if (dt === 'axure' && d.pages && d.pages.length) {
+          pagesHtml = '<div class="axure-pages">' + d.pages.map(p => {
+            const chips = (p.required_fields || []).map(f => '<span class="axure-chip">' + esc(f) + '</span>').join('');
+            return '<div class="axure-page-row"><span class="axure-page-name">' + esc(p.title) + '</span>'
+              + (chips ? '<span class="axure-page-req">' + chips + '</span>'
+                 : '<span class="axure-page-empty">无必填字段</span>')
+              + '</div>';
+          }).join('') + '</div>';
+        }
+        return '<div class="doc-assoc-item' + (pagesHtml ? ' has-pages' : '') + '">'
+          + '<span class="name">' + icon + ' ' + esc(d.file_name || d.doc_id || '') + '</span>'
+          + pagesHtml
           + '<span class="actions"><button class="btn btn-sm btn-outline js-doc-bind" data-doc-id="' + esc(d.doc_id) + '" data-doc-type="' + esc(dt) + '">关联</button></span></div>';
       }).join('');
       return '<div class="unassoc-group' + (i === 0 ? '' : ' hidden') + '" id="unassoc-' + dt + '">' + items + '</div>';
@@ -588,6 +605,7 @@ var _docChunks = [], _docChunkIdx = 0;
 // ── 文档详情 Tab 状态 ──
 var _docDetailTab = {};  // docId → 'chunks' | 'analysis'
 var _docAnalysisCache = {};  // docId → analysis object
+var _activeDocType = '';  // 当前详情面板文档类型（product=术语表 / axure=必填字段）
 
 async function toggleDocChunkDetail(docId, docType) {
   var detailEl = document.getElementById('doc-chunk-detail-' + docId);
@@ -595,7 +613,7 @@ async function toggleDocChunkDetail(docId, docType) {
     detailEl.remove();
     var btn = document.querySelector('.js-doc-detail[data-doc-id="' + docId + '"]');
     if (btn) btn.textContent = '详情';
-    if (docType === 'product') { document.getElementById('glossary-content').classList.add('hidden'); }
+    if (docType === 'product' || docType === 'axure') { document.getElementById('glossary-content').classList.add('hidden'); }
     delete _docDetailTab[docId];
     return;
   }
@@ -613,9 +631,13 @@ async function toggleDocChunkDetail(docId, docType) {
     return;
   }
   if (btn) btn.textContent = '收起';
-  if (docType === 'product') {
+  if (docType === 'product' || docType === 'axure') {
     showGlossaryPanel();
     document.getElementById('glossary-content').classList.remove('hidden');
+    // 面板标题：产品文档=术语表 / Axure=页面结构（数据同源 glossary，仅展示分组不同）
+    document.getElementById('glossary-title').textContent =
+      docType === 'axure' ? '⭐ 页面结构' : '📝 术语表';
+    _activeDocType = docType;
     loadDocGlossary(docId);
   }
   var rowEl = document.querySelector('.js-doc-detail[data-doc-id="' + docId + '"]').closest('.doc-assoc-item');
@@ -715,8 +737,88 @@ async function loadDocGlossary(docId) {
     const d = await r.json();
     const terms = d.terms || [];
     const el = document.getElementById('glossary-terms');
-    if (!terms.length) { el.innerHTML = '<div class="empty-hint">该文档暂无术语</div>'; return; }
-    el.innerHTML = terms.map(t => '<div class="glossary-item"><span class="remove js-delete-term-doc" data-term-id="' + t.id + '">✕</span><div class="term-name">' + esc(t.term) + '</div><div class="term-def">' + esc(t.definition || '') + '</div></div>').join('');
+    const emptyMsg = (_activeDocType === 'axure') ? '该原型暂无页面结构' : '该文档暂无术语';
+    if (!terms.length) { el.innerHTML = '<div class="empty-hint">' + emptyMsg + '</div>'; return; }
+
+    if (_activeDocType === 'axure') {
+      // Axure 页面块四段：按 notes（块标题 ①目录）分组，每块渲染 ②必填/③筛选/④说明/🖼图片
+      let images = [];
+      try {
+        const ir = await fetch('/api/docs/' + encodeURIComponent(docId) + '/page-images');
+        const id = await ir.json();
+        images = id.images || [];
+      } catch (e) {}
+      const imgByPath = {};
+      images.forEach(im => { (imgByPath[im.page_path] = imgByPath[im.page_path] || []).push(im); });
+
+      const groups = {};
+      terms.forEach(t => {
+        const key = (t.notes || '').trim();
+        if (!groups[key]) groups[key] = { required: [], filter: [], explanation: [] };
+        const bucket = (t.kind === 'filter') ? groups[key].filter
+          : (t.kind === 'explanation') ? groups[key].explanation : groups[key].required;
+        bucket.push(t);
+      });
+      el.innerHTML = Object.keys(groups).map(key => {
+        const g = groups[key];
+        const imgs = imgByPath[key] || [];
+        const html = ['<div class="axure-block">'];
+        html.push('<div class="axure-block-title">' + esc(key)
+          + ' <button class="js-rename-block btn btn-xs" data-block="' + esc(key) + '" title="重命名块标题">✏️</button></div>');
+        // ② 必填字段
+        if (g.required.length) {
+          const seenR = {}; const uniq = g.required.filter(t => seenR[t.term] ? false : (seenR[t.term] = 1));
+          html.push('<div class="axure-section"><div class="axure-section-head">📋 必填字段</div>'
+            + uniq.map(t => '<span class="axure-chip">' + esc(t.term) + '</span>').join('') + '</div>');
+        }
+        // ③ 筛选项（字段名 + 选项值）
+        if (g.filter.length) {
+          const seenF = {}; const uniq = g.filter.filter(t => seenF[t.term] ? false : (seenF[t.term] = 1));
+          html.push('<div class="axure-section"><div class="axure-section-head">🔽 筛选项</div>'
+            + uniq.map(t => '<div class="axure-filter"><span class="axure-chip">' + esc(t.term) + '</span>'
+              + (t.definition ? '<span class="axure-opt">' + esc(t.definition) + '</span>' : '') + '</div>').join('')
+            + '</div>');
+        }
+        // ④ 页面说明（整体复制）
+        if (g.explanation.length) {
+          html.push('<div class="axure-section"><div class="axure-section-head">📄 页面说明</div>'
+            + g.explanation.map(t => '<div class="axure-explain">' + esc(t.definition) + '</div>').join('')
+            + '</div>');
+        }
+        // 🖼 页面图片（兜底内嵌图）
+        if (imgs.length) {
+          html.push('<div class="axure-section"><div class="axure-section-head">🖼 页面图片</div>'
+            + imgs.map(im => '<img class="axure-page-img" loading="lazy" src="/api/docs/' + encodeURIComponent(docId)
+              + '/page-images/file/' + encodeURIComponent(im.image_path) + '" alt="' + esc(im.page_path) + '">').join('')
+            + '</div>');
+        }
+        html.push('</div>');
+        return html.join('');
+      }).join('');
+    } else {
+      // 产品文档：按 notes 分组，扁平列表（与原来一致）
+      const groups = {};
+      terms.forEach(t => {
+        const key = (t.notes || '').trim();
+        if (!groups[key]) groups[key] = [];
+        groups[key].push(t);
+      });
+      el.innerHTML = Object.keys(groups).map(key => {
+        const seen = {};
+        const unique = groups[key].filter(t => {
+          if (seen[t.term]) return false;
+          seen[t.term] = true;
+          return true;
+        });
+        return (key ? '<div class="glossary-page-title">' + esc(key) + '</div>' : '')
+          + unique.map(t =>
+            '<div class="glossary-item"><span class="remove js-delete-term-doc" data-term-id="' + t.id + '">✕</span>'
+            + '<div class="term-name">' + esc(t.term) + '</div>'
+            + (t.definition ? '<div class="term-def">' + esc(t.definition) + '</div>' : '')
+            + (t.notes ? '<div class="term-note">' + esc(t.notes) + '</div>' : '')
+            + '</div>').join('');
+      }).join('');
+    }
   } catch (e) { document.getElementById('glossary-terms').innerHTML = '<div class="empty-hint">加载失败</div>'; }
 }
 function renderCurrentChunk() {
@@ -885,12 +987,21 @@ async function showModuleAuditModal(result, fileName) {
 // ===== 术语表管理 =====
 async function loadGlossary(modName) {
   showGlossaryPanel();
+  // 模块术语表标题复位：避免打开过 axure 详情后残留「⭐ 页面结构」
+  document.getElementById('glossary-title').textContent = '📝 术语表';
   try {
     const r = await fetch('/api/modules/' + encodeURIComponent(modName) + '/glossary'); const d = await r.json();
     const terms = d.terms || [];
     const el = document.getElementById('glossary-terms');
     if (!terms.length) { el.innerHTML = '<div class="empty-hint">暂无术语</div>'; return; }
-    el.innerHTML = terms.map(t => '<div class="glossary-item"><span class="remove js-delete-term" data-term-id="' + t.id + '">✕</span><div class="term-name">' + esc(t.term) + '</div><div class="term-def">' + esc(t.definition || '') + '</div></div>').join('');
+    el.innerHTML = terms.map(t => {
+      const kindLabel = { required: '必填', filter: '筛选', explanation: '说明' }[t.kind] || '';
+      return '<div class="glossary-item"><span class="remove js-delete-term" data-term-id="' + t.id + '">✕</span>'
+        + '<div class="term-name">' + esc(t.term)
+        + (kindLabel ? ' <span class="kind-tag kind-' + esc(t.kind) + '">' + kindLabel + '</span>' : '')
+        + '</div><div class="term-def">' + esc(t.definition || '') + '</div>'
+        + (t.notes ? '<div class="term-note">' + esc(t.notes) + '</div>' : '') + '</div>';
+    }).join('');
   } catch (e) { document.getElementById('glossary-terms').innerHTML = '<div class="empty-hint">加载失败</div>'; }
 }
 async function addGlossaryTerm() {
@@ -910,6 +1021,22 @@ async function deleteDocGlossaryTerm(termId) {
     const d = await r.json();
     if (d.success) { loadDocGlossary(selectedDocId); toast('✅ 已删除'); } else toast('❌ ' + d.message);
   } catch (e) { console.error(e); toast('❌ 删除失败'); }
+}
+
+// 重命名 Axure 页面块标题（①目录，入库后可编辑）
+async function promptRenameBlock(oldTitle) {
+  const newTitle = prompt('重命名块标题（①目录）：\n' + oldTitle, oldTitle);
+  if (!newTitle || newTitle.trim() === oldTitle) return;
+  if (!selectedDocId) return;
+  try {
+    const r = await fetch('/api/docs/' + encodeURIComponent(selectedDocId) + '/glossary/block-title', {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ old_title: oldTitle, new_title: newTitle.trim() })
+    });
+    const d = await r.json();
+    if (d.success) { toast('✅ ' + d.message); loadDocGlossary(selectedDocId); }
+    else toast('❌ ' + d.message);
+  } catch (e) { console.error(e); toast('❌ 重命名失败'); }
 }
 
 async function deleteGlossaryTerm(termId) {

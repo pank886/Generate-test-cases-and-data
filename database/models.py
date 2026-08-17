@@ -159,6 +159,8 @@ class GlossaryTerm(Base):
     term = Column(String(200), nullable=False)
     definition = Column(Text, default="")
     notes = Column(Text, default="")
+    # kind: required=必填字段 / filter=筛选项 / explanation=页面说明（Axure 页面块四段）
+    kind = Column(String(20), default="required")
     source_doc = Column(String(200), default="")  # 来源文档标识
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 
@@ -166,6 +168,25 @@ class GlossaryTerm(Base):
 
     def __repr__(self):
         return f"<GlossaryTerm {self.term}>"
+
+
+class PageImage(Base):
+    """Axure 页面快照图（Edge 无头渲染，主页面块 🖼 展示）。
+
+    后续多模态识别可从图片补提取必填/字段。文档删除时级联删除。
+    """
+    __tablename__ = "page_images"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    doc_id = Column(String(200), ForeignKey("documents.id", ondelete="CASCADE"),
+                    nullable=False, index=True)
+    page_path = Column(String(300), nullable=False)   # 块路径（如 电表管理）
+    page_url = Column(String(300), default="")        # 页面 URL（如 电表管理.html）
+    image_path = Column(String(500), default="")      # 相对 data/page_images 的 PNG 路径
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+
+    def __repr__(self):
+        return f"<PageImage {self.page_path}>"
 
 
 # ========================================================================

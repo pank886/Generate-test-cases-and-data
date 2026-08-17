@@ -1,6 +1,8 @@
 """五大流程入口编排（product / api / axure）。"""
 
 import os
+import re
+from pathlib import Path
 
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
@@ -538,8 +540,81 @@ def process_axure_zip(file_path: str, module_name: str = None, progress_cb=None)
             c.get("page_name", "") if isinstance(c, dict) else _extract_page_name(c)
             for c in chunks
         ]
+        # 幂等：重导同一 zip 前先清空旧块，避免 document_chunks 重复堆积
+        #   （旧实现直接 append，重复导入 225 行 vs 应有 85 行）
+        _delete_document_chunks(doc_id)
         for i, content in enumerate(chunk_texts):
             _save_single_chunk(doc_id, i, content, page_name=chunk_pages[i])
+
+        # 5a2. 页面块 → 术语表（复用 glossary 展示；kind=required/filter/explanation）
+        # notes 用 page_path（RP9 树含父级，如 企业预付费管理/企业公摊生成），区分同名页
+        glossary_terms = []
+        for url, detail in page_details.items():
+            page_path = detail.get("page_path") or detail.get("page_name") or url
+            # ② 必填字段
+            for rf in detail.get("required_fields", []):
+                field = (rf.get("field") or "").strip()
+                if field:
+                    glossary_terms.append({
+                        "term": field,
+                        "definition": "必填",
+                        "kind": "required",
+                        "notes": page_path,
+                    })
+            # ③ 筛选项（definition = 选项以 \ 分隔）
+            for f in detail.get("filters", []):
+                field = (f.get("field") or "").strip()
+                options = [o for o in f.get("options", []) if o]
+                if field and options:
+                    glossary_terms.append({
+                        "term": field,
+                        "definition": "\\".join(options),
+                        "kind": "filter",
+                        "notes": page_path,
+                    })
+            # ④ 页面说明（整体复制，保留原结构）
+            expl = (detail.get("page_explanation") or "").strip()
+            if expl:
+                glossary_terms.append({
+                    "term": page_path,
+                    "definition": expl,
+                    "kind": "explanation",
+                    "notes": page_path,
+                })
+            # 弹窗子块 → 术语（notes=块标题，含弹窗名，如 电表管理/添加）
+            for d in detail.get("dialogs", []):
+                d_title = d.get("title") or f"{page_path}/{d.get('state', '')}"
+                for rf in d.get("required_fields", []):
+                    field = (rf.get("field") or "").strip()
+                    if field:
+                        glossary_terms.append({
+                            "term": field,
+                            "definition": "必填",
+                            "kind": "required",
+                            "notes": d_title,
+                        })
+                for f in d.get("filters", []):
+                    field = (f.get("field") or "").strip()
+                    options = [o for o in f.get("options", []) if o]
+                    if field and options:
+                        glossary_terms.append({
+                            "term": field,
+                            "definition": "\\".join(options),
+                            "kind": "filter",
+                            "notes": d_title,
+                        })
+                d_expl = (d.get("explanation") or "").strip()
+                if d_expl:
+                    glossary_terms.append({
+                        "term": d_title,
+                        "definition": d_expl,
+                        "kind": "explanation",
+                        "notes": d_title,
+                    })
+        if glossary_terms:
+            from collections import Counter
+            _kind_counts = ", ".join(f"{k}={v}" for k, v in Counter(t["kind"] for t in glossary_terms).items())
+            logger.info(f"   => 页面块术语: {len(glossary_terms)} 条（{_kind_counts} / {len(page_details)} 页）")
 
         # 5b. 写入 documents 元数据
         _save_to_sqlite(
@@ -549,6 +624,7 @@ def process_axure_zip(file_path: str, module_name: str = None, progress_cb=None)
             doc_type="axure",
             chunk_count=len(chunk_texts),
             module_name=module,
+            glossary_terms=glossary_terms,
         )
         logger.info(f"   [SQLite] document_chunks + documents 入库完成 (doc_id={doc_id})")
 
@@ -582,7 +658,140 @@ def process_axure_zip(file_path: str, module_name: str = None, progress_cb=None)
             _delete_document_chunks(doc_id)
             raise
 
+        # 8. 兜底页面内嵌图片：仅无可提取内容且 HTML 内有 <img> 的页面复制图片
+        #    （文件本身无图片 → 置空，不生成记录；失败静默降级不阻断入库）
+        cb(92, "提取页面内嵌图片...")
+        try:
+            _img_n = _save_embedded_page_images(doc_id, page_details, file_path)
+            if _img_n:
+                logger.info(f"   [图片] 兜底页面内嵌图片入库 {_img_n} 张（data/page_images/{doc_id}/）")
+        except Exception as e:
+            logger.warning("   [图片] 页面内嵌图片处理失败（静默降级）: %s", e, exc_info=True)
+
         cb(95, "入库完成")
         return {"doc_id": doc_id, "module_name": module, "chunks": len(chunks)}
     finally:
         parser.cleanup()
+
+
+def _page_has_extractable_content(detail: dict) -> bool:
+    """页面是否有可提取文本内容（②必填 / ③筛选 / ④说明 任一非空）。
+
+    页面内嵌图片仅作兜底：页面无可提取内容时才展示页面本身的图片。
+    """
+    return bool(detail.get("required_fields") or detail.get("filters")
+                or (detail.get("page_explanation") or "").strip())
+
+
+def _locate_embedded_image(root: Path, src: str) -> Path | None:
+    """在解压目录中定位 zip 内图片文件（src 相对项目根，后缀匹配）。
+
+    找不到返回 None。
+    """
+    src_norm = src.replace("\\", "/").lstrip("/")
+    for p in root.rglob("*"):
+        if p.is_file() and p.as_posix().replace("\\", "/").endswith(src_norm):
+            return p
+    return None
+
+
+def _save_embedded_page_images(doc_id: str, page_details: dict, zip_path: str) -> int:
+    """兜底提取页面内嵌图片：仅**无可提取内容**的页面，复制其 HTML 内 <img> 图片。
+
+    存储：{config.PAGE_IMAGES_DIR}/{doc_id}/{图片名}（原名，重名加序号）。
+    重导时先删该 doc_id 旧图与旧记录，再复制新图。
+    文件本身无图片 → 置空，不生成任何记录。
+    失败静默降级（仅记日志），不阻断入库。返回成功复制图片数。
+    """
+    import shutil
+    import tempfile
+    import zipfile
+    from pathlib import Path
+    from urllib.parse import unquote
+
+    from database import get_session_ctx
+    from database.models import PageImage
+
+    # 仅需兜底图片：无可提取内容（②③④ 全空）且 HTML 内嵌图片非空的页面
+    targets = []
+    for url, d in page_details.items():
+        if not _page_has_extractable_content(d) and d.get("embedded_images"):
+            targets.append((url, d))
+    if not targets:
+        return 0
+
+    out_dir = os.path.join(config.PAGE_IMAGES_DIR, doc_id)
+    os.makedirs(out_dir, exist_ok=True)
+
+    # 幂等清理：删除旧记录与旧图（重导覆盖）
+    try:
+        with get_session_ctx() as session:
+            for rec in session.query(PageImage).filter_by(doc_id=doc_id).all():
+                session.delete(rec)
+            session.commit()
+    except Exception as e:
+        logger.warning("   [图片] 清理旧 page_images 失败: %s", e)
+    for f in os.listdir(out_dir):
+        p = os.path.join(out_dir, f)
+        if os.path.isfile(p):
+            try:
+                os.remove(p)
+            except OSError:
+                pass
+
+    tmp = tempfile.mkdtemp(prefix="axure_img_")
+    saved = 0
+    try:
+        with zipfile.ZipFile(zip_path, "r") as zf:
+            zf.extractall(tmp)
+        root = Path(tmp)
+
+        from agent_components.axure_parser import AxureParser
+        records = []
+        for url, detail in targets:
+            html_path = AxureParser._find_page_html_impl(root, unquote(url))
+            if html_path is None:
+                logger.warning("   [图片] 未找到页面 HTML: %s", unquote(url))
+                continue
+            page_path = detail.get("page_path") or detail.get("page_name") or url
+            used_names = set()
+            for src in detail.get("embedded_images", []):
+                img_file = _locate_embedded_image(root, src)
+                if img_file is None:
+                    logger.warning("   [图片] 图片未找到: %s", src)
+                    continue
+                # 原名写入，重名追加序号
+                base = Path(src).name or "image"
+                fname, ext = os.path.splitext(base)
+                candidate = base
+                idx = 1
+                while candidate in used_names:
+                    candidate = f"{fname}_{idx}{ext}"
+                    idx += 1
+                used_names.add(candidate)
+                dest = os.path.join(out_dir, candidate)
+                try:
+                    shutil.copyfile(img_file, dest)
+                except OSError as e:
+                    logger.warning("   [图片] 复制失败 %s: %s", src, e)
+                    continue
+                records.append({
+                    "doc_id": doc_id,
+                    "page_path": page_path,
+                    "page_url": url,
+                    # DB 存相对 PAGE_IMAGES_DIR 的路径，API 层拼接还原
+                    "image_path": f"{doc_id}/{candidate}",
+                })
+                saved += 1
+
+        if records:
+            with get_session_ctx() as session:
+                for r in records:
+                    session.add(PageImage(**r))
+                session.commit()
+        return saved
+    except Exception as e:
+        logger.warning("   [图片] 页面内嵌图片处理失败（静默降级）: %s", e)
+        return saved
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)

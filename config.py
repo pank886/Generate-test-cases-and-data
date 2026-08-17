@@ -71,6 +71,11 @@ else:
 LOG_DIR = _resolve_path(settings.log_dir)
 LOG_LEVEL = settings.log_level
 
+# ====== Axure 解析器 ======
+AXURE_FORM_MARKERS = settings.axure_form_markers
+# Axure 页面内嵌图片兜底存储根目录（{PAGE_IMAGES_DIR}/{doc_id}/{图片名}）
+PAGE_IMAGES_DIR = os.path.join(BASE_DIR, "data", "page_images")
+
 # ====== 节点可调参数（供各节点读取，替换硬编码） ======
 RETRIEVAL_K = settings.retrieval_k
 COMMON_SERVICE_MODULE = settings.common_service_module

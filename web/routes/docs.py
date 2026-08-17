@@ -13,19 +13,56 @@ router = APIRouter(prefix="/api/docs", tags=["docs"])
 
 @router.get("/unassociated")
 async def get_unassociated_docs():
-    """获取所有未关联模块的文档。"""
+    """获取所有未关联模块的文档。
+
+    axure 文档额外返回 pages：[{title, required_fields}]——每个页面块
+    （主块 + 隐藏面板块）一条，title=块标题（页面名/块名），
+    required_fields=该块的必填字段（缺项留空），供可关联文件展示。
+    """
     try:
         with get_session_ctx() as session:
             docs = DocOps.get_unassociated_docs(session)
-            return {"success": True, "docs": [
-                {"doc_id": d.id, "module": "", "type": d.doc_type,
-                 "doc_type": d.doc_type,
-                 "chunks": d.chunk_count, "file_name": d.file_name}
-                for d in docs
-            ]}
+            result = []
+            for d in docs:
+                entry = {"doc_id": d.id, "module": "", "type": d.doc_type,
+                         "doc_type": d.doc_type,
+                         "chunks": d.chunk_count, "file_name": d.file_name}
+                if d.doc_type == "axure":
+                    entry["pages"] = _axure_pages_from_glossary(session, d.id)
+                result.append(entry)
+            return {"success": True, "docs": result}
     except Exception as e:
         return JSONResponse(status_code=500,
                             content={"success": False, "message": str(e)})
+
+
+def _axure_pages_from_glossary(session, doc_id: str) -> list[dict]:
+    """从 glossary 术语聚合 axure 页面块列表。
+
+    术语 notes = 块标题（主块=页面路径，面板块=页面路径/块名）。按 notes
+    首次出现顺序枚举所有块；每块的必填字段取 kind=required 且 notes 相同的
+    术语（按 term 去重）。块无必填时 required_fields 为空（缺项留空）。
+    """
+    from collections import OrderedDict
+    from database.models import GlossaryTerm
+
+    blocks: OrderedDict[str, dict] = OrderedDict()
+    terms = (
+        session.query(GlossaryTerm)
+        .filter(GlossaryTerm.doc_id == doc_id)
+        .order_by(GlossaryTerm.created_at)
+        .all()
+    )
+    for t in terms:
+        notes = (t.notes or "").strip()
+        if notes:
+            blocks.setdefault(notes, {"title": notes, "required_fields": []})
+    for t in terms:
+        notes = (t.notes or "").strip()
+        block = blocks.get(notes)
+        if block and t.kind == "required" and t.term not in block["required_fields"]:
+            block["required_fields"].append(t.term)
+    return list(blocks.values())
 
 
 @router.post("/disassociate")
@@ -125,7 +162,8 @@ async def get_doc_glossary(doc_id: str):
         terms = GlossaryOps.get_terms(session, doc_id)
         # 在 session 关闭前取出所有属性，避免惰性加载
         result = [
-            {"term": t.term, "definition": t.definition, "notes": t.notes or ""}
+            {"term": t.term, "definition": t.definition, "notes": t.notes or "",
+             "kind": t.kind or "required"}
             for t in terms
         ]
     return {"success": True, "terms": result}
@@ -161,6 +199,68 @@ async def delete_doc_glossary(doc_id: str, term_id: str):
     except Exception as e:
         return JSONResponse(status_code=500,
                             content={"success": False, "message": str(e)})
+
+
+@router.put("/{doc_id}/glossary/block-title")
+async def rename_block_title(doc_id: str, data: dict):
+    """重命名页面块标题（①目录）。更新该块全部术语的 notes + 对应 document_chunks.page_name。
+
+    body: {"old_title": "电表管理/历史电量", "new_title": "电表管理/查看（弹窗）"}
+    """
+    old_title = (data.get("old_title") or "").strip()
+    new_title = (data.get("new_title") or "").strip()
+    if not old_title or not new_title:
+        return JSONResponse(status_code=400,
+                            content={"success": False, "message": "旧/新块标题不能为空"})
+    try:
+        from database.models import DocumentChunk
+        with get_session_ctx() as session:
+            changed = 0
+            for t in GlossaryOps.get_terms(session, doc_id):
+                if t.notes == old_title:
+                    t.notes = new_title
+                    changed += 1
+            # 同步文档块 page_name（块标题 = ①目录）
+            for c in session.query(DocumentChunk).filter_by(
+                    doc_id=doc_id, page_name=old_title).all():
+                c.page_name = new_title
+            session.commit()
+            return {"success": True,
+                    "message": f"已重命名: {old_title} → {new_title}（{changed} 条术语）"}
+    except Exception as e:
+        return JSONResponse(status_code=500,
+                            content={"success": False, "message": str(e)})
+
+
+@router.get("/{doc_id}/page-images")
+async def get_doc_page_images(doc_id: str):
+    """获取文档页面兜底图片列表（无可提取内容页面的内嵌图）。"""
+    from database.models import PageImage
+    with get_session_ctx() as session:
+        result = [
+            {"page_path": r.page_path, "page_url": r.page_url, "image_path": r.image_path}
+            for r in session.query(PageImage).filter_by(doc_id=doc_id).all()
+        ]
+    return {"success": True, "images": result}
+
+
+@router.get("/{doc_id}/page-images/file/{image_path:path}")
+async def get_page_image_file(doc_id: str, image_path: str):
+    """服务页面兜底图片文件（仅限 PAGE_IMAGES_DIR 内，防路径遍历）。"""
+    import os as _os
+    import config as _config
+    from fastapi.responses import FileResponse
+    base = _os.path.abspath(_config.PAGE_IMAGES_DIR)
+    safe_rel = image_path.replace("\\", "/").lstrip("/")
+    abs_path = _os.path.abspath(_os.path.join(base, safe_rel))
+    try:
+        _safe = _os.path.commonpath([abs_path, base]) == base
+    except ValueError:
+        _safe = False
+    if not _safe or not _os.path.isfile(abs_path):
+        return JSONResponse(status_code=404,
+                            content={"success": False, "message": "图片不存在"})
+    return FileResponse(abs_path)
 
 
 @router.get("/{doc_id}/related-docs")

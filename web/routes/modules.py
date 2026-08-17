@@ -130,7 +130,8 @@ async def merge_modules(data: dict):
 # ── 术语表 ──
 
 def _term_to_dict(t) -> dict:
-    return {"term": t.term, "definition": t.definition, "notes": t.notes or ""}
+    return {"term": t.term, "definition": t.definition, "notes": t.notes or "",
+            "kind": t.kind or "required"}
 
 
 @router.get("/{module_name}/glossary")

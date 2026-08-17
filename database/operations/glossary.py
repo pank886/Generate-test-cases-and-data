@@ -17,6 +17,7 @@ class GlossaryOps:
         term: str,
         definition: str = "",
         notes: str = "",
+        kind: str = "required",
         source_doc: str = "",
     ) -> GlossaryTerm:
         """添加术语。自动提取的传 source_doc=文件名，手动追加传空。"""
@@ -25,6 +26,7 @@ class GlossaryOps:
             term=term,
             definition=definition,
             notes=notes,
+            kind=kind,
             source_doc=source_doc,
         )
         session.add(gt)
@@ -78,7 +80,7 @@ class GlossaryOps:
     ):
         """批量替换文档的术语（先删旧术语，再插入新术语）。
 
-        terms: [{"term": ..., "definition": ..., "notes": ...}, ...]
+        terms: [{"term": ..., "definition": ..., "notes": ..., "kind": ...}, ...]
         """
         if source_doc:
             session.query(GlossaryTerm).filter(
@@ -96,6 +98,7 @@ class GlossaryOps:
                 term=t.get("term", t.get("name", "?")),
                 definition=t.get("definition", ""),
                 notes=t.get("notes", ""),
+                kind=t.get("kind", "required"),
                 source_doc=source_doc or t.get("source_doc", ""),
             ))
 
