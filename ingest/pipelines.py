@@ -696,12 +696,12 @@ def _locate_embedded_image(root: Path, src: str) -> Path | None:
 
 
 def _save_embedded_page_images(doc_id: str, page_details: dict, zip_path: str) -> int:
-    """兜底提取页面内嵌图片：仅**无可提取内容**的页面，复制其 HTML 内 <img> 图片。
+    """兜底提取页面内嵌图片：仅**无可提取内容**的页面，其 HTML 内 <img> 原图字节直存 SQLite。
 
-    存储：{config.PAGE_IMAGES_DIR}/{doc_id}/{图片名}（原名，重名加序号）。
-    重导时先删该 doc_id 旧图与旧记录，再复制新图。
+    存储：PageImage.image_data 存原图字节（多模态可直接取图分析），image_path 仅存原文件名。
+    重导时先删该 doc_id 旧记录与旧图文件，再写入新记录。
     文件本身无图片 → 置空，不生成任何记录。
-    失败静默降级（仅记日志），不阻断入库。返回成功复制图片数。
+    失败静默降级（仅记日志），不阻断入库。返回成功保存图片数。
     """
     import shutil
     import tempfile
@@ -769,18 +769,22 @@ def _save_embedded_page_images(doc_id: str, page_details: dict, zip_path: str) -
                     candidate = f"{fname}_{idx}{ext}"
                     idx += 1
                 used_names.add(candidate)
-                dest = os.path.join(out_dir, candidate)
+                # 原图字节直存 SQLite（多模态可直接取字节分析补提字段）
                 try:
-                    shutil.copyfile(img_file, dest)
+                    image_bytes = img_file.read_bytes()
                 except OSError as e:
-                    logger.warning("   [图片] 复制失败 %s: %s", src, e)
+                    logger.warning("   [图片] 读取字节失败 %s: %s", img_file, e)
+                    continue
+                if not image_bytes:
+                    logger.warning("   [图片] 空文件跳过 %s", img_file)
                     continue
                 records.append({
                     "doc_id": doc_id,
                     "page_path": page_path,
                     "page_url": url,
-                    # DB 存相对 PAGE_IMAGES_DIR 的路径，API 层拼接还原
-                    "image_path": f"{doc_id}/{candidate}",
+                    # image_path 仅作原文件名（重名去重 / 展示 alt），字节在 image_data
+                    "image_path": candidate,
+                    "image_data": image_bytes,
                 })
                 saved += 1
 

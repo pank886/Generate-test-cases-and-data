@@ -171,18 +171,24 @@ async def get_doc_glossary(doc_id: str):
 
 @router.post("/{doc_id}/glossary")
 async def add_doc_glossary(doc_id: str, data: dict):
-    """添加文档术语（幂等：同名先删后插）。"""
+    """添加文档术语（幂等：同名同组先删后插）。
+
+    axure 页面块：前端以 notes=页面标题、kind=required、definition=必填 添加必填字段术语，
+    组内去重、跨组同名互不影响。
+    """
     term = data.get("term", "").strip()
     definition = data.get("definition", "").strip()
+    notes = (data.get("notes") or "").strip()
+    kind = (data.get("kind") or "required").strip()
     if not term:
         return JSONResponse(status_code=400,
-                            content={"success": False, "message": "术语名不能为空"})
+                            content={"success": False, "message": "页面名/术语名不能为空"})
     try:
         with get_session_ctx() as session:
             for t in GlossaryOps.get_terms(session, doc_id):
-                if t.term == term:
+                if t.term == term and (t.notes or "").strip() == notes:
                     GlossaryOps.delete_term(session, t.id)
-            GlossaryOps.add_term(session, doc_id, term, definition)
+            GlossaryOps.add_term(session, doc_id, term, definition, notes=notes, kind=kind)
             return {"success": True, "message": f"已保存: {term}"}
     except Exception as e:
         return JSONResponse(status_code=500,
@@ -246,10 +252,28 @@ async def get_doc_page_images(doc_id: str):
 
 @router.get("/{doc_id}/page-images/file/{image_path:path}")
 async def get_page_image_file(doc_id: str, image_path: str):
-    """服务页面兜底图片文件（仅限 PAGE_IMAGES_DIR 内，防路径遍历）。"""
+    """服务页面兜底图片：优先 image_data BLOB（2026-08-18 后入库），旧数据回退磁盘文件。
+
+    image_path 对新数据=原文件名（如 u37.png），对旧数据=相对 PAGE_IMAGES_DIR 路径。
+    """
     import os as _os
     import config as _config
-    from fastapi.responses import FileResponse
+    from fastapi.responses import FileResponse, Response
+    from database.models import PageImage
+
+    # 新数据：image_data BLOB 直接返回字节
+    with get_session_ctx() as session:
+        rec = session.query(PageImage).filter_by(
+            doc_id=doc_id, image_path=image_path).first()
+        if rec and rec.image_data:
+            ext = _os.path.splitext(rec.image_path or "")[1].lower()
+            media = {
+                ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+                ".gif": "image/gif", ".svg": "image/svg+xml", ".webp": "image/webp",
+            }.get(ext, "application/octet-stream")
+            return Response(content=rec.image_data, media_type=media)
+
+    # 旧数据回退：磁盘文件（仅限 PAGE_IMAGES_DIR 内，防路径遍历）
     base = _os.path.abspath(_config.PAGE_IMAGES_DIR)
     safe_rel = image_path.replace("\\", "/").lstrip("/")
     abs_path = _os.path.abspath(_os.path.join(base, safe_rel))

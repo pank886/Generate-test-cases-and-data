@@ -1017,340 +1017,61 @@ class TestYamlRepairLoop:
     #     原 test_circuit_breaker_triggers_on_mass_failure 测试的对象已不存在，故删除。
 
 
-class TestAnchorHelpers:
-    """D4 锚定辅助：api_sequence 解析 + 数量/url 按锚校验。"""
-
-    def test_parse_api_sequence(self):
-        from agent_components.generators.yaml_gen import _parse_api_sequence
-        assert _parse_api_sequence(
-            ["创建订单:POST /order/create", "查询:GET /order/{id}"]) == [
-            ("创建订单", "POST", "/order/create"),
-            ("查询", "GET", "/order/{id}"),
-        ]
-
-    def test_parse_api_sequence_no_name(self):
-        """json_schema 后 LLM 可能输出无"步骤名:"前缀的格式（2026-08-12）。"""
-        from agent_components.generators.yaml_gen import _parse_api_sequence
-        assert _parse_api_sequence(["POST /electricMeter/add"]) == [
-            ("", "POST", "/electricMeter/add")]
-        assert _parse_api_sequence(["GET /payConfig/detail/{code}"]) == [
-            ("", "GET", "/payConfig/detail/{code}")]
-
-    def test_parse_empty(self):
-        from agent_components.generators.yaml_gen import _parse_api_sequence
-        assert _parse_api_sequence([]) == []
-
-    def test_validate_pass(self):
-        from agent_components.generators.yaml_gen import _validate_against_anchor
-        from types import SimpleNamespace
-        steps = [
-            SimpleNamespace(baseInfo={"url": "/order/create", "method": "post"}),
-            SimpleNamespace(baseInfo={"url": "/order/{id}", "method": "get"}),
-        ]
-        entries = [("创建订单", "POST", "/order/create"), ("查询", "GET", "/order/{id}")]
-        _validate_against_anchor(steps, entries)  # 不抛
-
-    def test_validate_method_mismatch(self):
-        from agent_components.generators.yaml_gen import _validate_against_anchor
-        from types import SimpleNamespace
-        steps = [SimpleNamespace(baseInfo={"url": "/a", "method": "post"})]
-        entries = [("a", "GET", "/a")]
-        with pytest.raises(ValueError):
-            _validate_against_anchor(steps, entries)
-
-    def test_validate_count_mismatch(self):
-        from agent_components.generators.yaml_gen import _validate_against_anchor
-        from types import SimpleNamespace
-        steps = [SimpleNamespace(baseInfo={"url": "/a"})]
-        entries = [("a", "GET", "/a"), ("b", "GET", "/b")]
-        with pytest.raises(ValueError):
-            _validate_against_anchor(steps, entries)
-
-    def test_validate_url_mismatch(self):
-        from agent_components.generators.yaml_gen import _validate_against_anchor
-        from types import SimpleNamespace
-        steps = [SimpleNamespace(baseInfo={"url": "/wrong"})]
-        entries = [("a", "GET", "/a")]
-        with pytest.raises(ValueError):
-            _validate_against_anchor(steps, entries)
-
-    def test_validate_normalizes_url(self):
-        """查询 url 带域名/尾斜杠 → 规范化后仍与锚一致（method 也一致）。"""
-        from agent_components.generators.yaml_gen import _validate_against_anchor
-        from types import SimpleNamespace
-        steps = [SimpleNamespace(baseInfo={"url": "http://host/a/", "method": "get"})]
-        entries = [("a", "GET", "/a")]
-        _validate_against_anchor(steps, entries)  # 不抛
-
-
 # ============================================================
 # M8 — Phase C 接口定义解析与缺失阻断（web/tasks._resolve_api_defs）
 # ============================================================
 
 from web.tasks import _resolve_api_defs
-from database import get_session_ctx
-
-
-@pytest.fixture
-def in_memory_sqlite(tmp_path):
-    """SQLite 文件数据库（非内存），自动建表（Step 4 门禁测试用）。"""
-    import database
-    import database.models  # noqa: F401
-    database._ENGINE = None
-    database._SESSION_LOCAL = None
-
-    db_path = str(tmp_path / "test.db")
-    database._ENGINE = database.create_engine(f"sqlite:///{db_path}", echo=False)
-    database.Base.metadata.create_all(bind=database._ENGINE)
-
-    from sqlalchemy.orm import sessionmaker
-    database._SESSION_LOCAL = sessionmaker(
-        autocommit=False, autoflush=False, bind=database._ENGINE,
-    )
-    yield
-    database._ENGINE.dispose()
-    database._ENGINE = None
-    database._SESSION_LOCAL = None
 
 
 class TestResolveApiDefs:
-    """M8 门禁：SQLite 模块 API 文档非空 → 轻量索引；空 → None 阻断。"""
+    """接口定义优先级: 显式入参 > SQL(documents 表) 全部接口详情 > None(阻断)。
+
+    2026-08-18 改：Phase C 不再用 Phase B 快照（ChromaDB 检索缺 body/return，
+    导致 YAML 生成字段瞎编 meterName/meterNo），直接用 SQL 读全部接口详情。
+    """
 
     @staticmethod
-    def _make_excel(tmp_path, module_name="测试模块"):
-        from openpyxl import Workbook
-        p = tmp_path / "test_plan.xlsx"
-        wb = Workbook()
-        ws = wb.active
-        # 第 1 行表头（_read_excel_module 从 min_row=2 读数据行）
-        ws.append(["项目", "模块名", "story", "title", "danyuan",
-                   "TC-001", "前置", "步骤", "预期"])
-        # 第 2 行数据：feature 列（index 1）= 模块名
-        ws.append(["项目A", module_name, "子模块", "用例1", "danyuan",
-                   "TC-001", "无", "执行步骤", "预期结果"])
-        wb.save(p)
-        return str(p)
-
-    @staticmethod
-    def _add_api(session, doc_id, url, method, module):
-        from database.models import Document
-        from database.operations import BindingOps
-        session.add(Document(
-            id=doc_id, file_name=f"{method} {url}", file_type="md",
-            doc_type="api", chunk_count=1, status="pending",
-            api_name=f"api_{doc_id}", api_url=url, api_method=method.upper(),
-        ))
-        BindingOps.bind(session, "module", module, "api", doc_id)
-
-    def test_index_projected_from_sqlite(self, tmp_path, in_memory_sqlite):
-        excel = self._make_excel(tmp_path, "计费模块")
-        with get_session_ctx() as session:
-            self._add_api(session, "a1", "/order/create", "POST", "计费模块")
-            self._add_api(session, "a2", "/order/list", "GET", "计费模块")
-            session.commit()
-        # 索引从 SQLite 投影（D3 取消快照/入参）
-        resolved = _resolve_api_defs(excel)
-        assert resolved is not None
-        idx = json.loads(resolved)
-        assert {a["url"] for a in idx} == {"/order/create", "/order/list"}
-        assert {a["method"] for a in idx} == {"POST", "GET"}
-
-    def test_other_module_docs_excluded(self, tmp_path, in_memory_sqlite):
-        excel = self._make_excel(tmp_path, "计费模块")
-        with get_session_ctx() as session:
-            self._add_api(session, "a1", "/order/create", "POST", "计费模块")
-            self._add_api(session, "a2", "/park/list", "GET", "园区模块")
-            session.commit()
-        idx = json.loads(_resolve_api_defs(excel))
-        assert {a["url"] for a in idx} == {"/order/create"}
-
-    def test_no_api_docs_returns_none(self, tmp_path, in_memory_sqlite):
-        excel = self._make_excel(tmp_path, "计费模块")
-        assert _resolve_api_defs(excel) is None
-
-    def test_unreadable_excel_returns_none(self, tmp_path):
+    def _excel(tmp_path) -> str:
         p = tmp_path / "test_plan.xlsx"
         p.write_text("dummy", encoding="utf-8")
-        assert _resolve_api_defs(str(p)) is None
+        return str(p)
 
+    def test_param_takes_priority(self, tmp_path):
+        """显式入参信任原样，不查 SQL。"""
+        excel = self._excel(tmp_path)
+        assert _resolve_api_defs(excel, '[{"url": "/from_param"}]') == '[{"url": "/from_param"}]'
 
-class TestDepMapCoverageAndMerge:
-    """D5：覆盖校验 + 补漏 merge。"""
+    def test_empty_param_reads_all_api_details_from_sql(self):
+        """空入参 → SQL 读全部接口详情（body 六字段完整，字段名真实）。"""
+        resolved = _resolve_api_defs("/nonexistent/test_plan.xlsx", "")
+        assert resolved
+        apis = json.loads(resolved)
+        assert len(apis) >= 60  # 全部接口
+        add = next((a for a in apis if a.get("url") == "/electricMeter/add"), None)
+        assert add is not None
+        body = add.get("body", [])
+        assert len(body) >= 60  # body 字段齐全
+        names = {f.get("name") for f in body}
+        assert {"name", "code", "meterDeviceType", "meterTypeCode"} <= names
+        assert len(add.get("return", [])) >= 1
 
-    def test_find_missing_cases(self):
-        from web.tasks import _find_missing_dep_map_cases
-        rows = [
-            {"case_id": "TC-001", "steps": "a"},
-            {"case_id": "TC-002", "steps": "b"},
-            {"case_id": "TC-003", "steps": "c"},
-        ]
-        dep_map = {"stories": [{
-            "story_name": "S", "case_api_sequences": {"TC-001": ["x"]}}]}
-        missing = _find_missing_dep_map_cases(rows, dep_map)
-        assert {r["case_id"] for r in missing} == {"TC-002", "TC-003"}
+    def test_empty_list_param_treated_as_missing(self):
+        """入参 "[]"（_build_response 的空占位）不算有效定义，继续读 SQL。"""
+        resolved = _resolve_api_defs("", "[]")
+        assert resolved and "/electricMeter/add" in resolved
 
-    def test_find_missing_none(self):
-        from web.tasks import _find_missing_dep_map_cases
-        rows = [{"case_id": "TC-001", "steps": "a"}]
-        dep_map = {"stories": [{
-            "story_name": "S", "case_api_sequences": {"TC-001": ["x"]}}]}
-        assert _find_missing_dep_map_cases(rows, dep_map) == []
+    def test_annotations_included_from_sql(self):
+        """annotations 从 SQL 列带出（has_path_params / is_export）。"""
+        resolved = _resolve_api_defs("", "")
+        apis = json.loads(resolved)
+        pp = next(a for a in apis if a.get("url") == "/electricMeter/getEle/{code}")
+        assert pp["annotations"]["has_path_params"]["active"] is True
+        imp = next(a for a in apis if a.get("url") == "/electricMeter/importTemplate")
+        assert imp["annotations"]["is_export"]["active"] is True
 
-    def test_merge_adds_new_case_to_existing_story(self):
-        from web.tasks import _merge_dep_map
-        existing = {"stories": [{
-            "story_name": "S",
-            "case_api_sequences": {"TC-001": ["x"]},
-            "decision_map": {"TC-001": {"steps": []}},
-            "internal_dependency": {"TC-001": {"used_by": []}},
-        }]}
-        repair = {"stories": [{
-            "story_name": "S",
-            "case_api_sequences": {"TC-002": ["y"]},
-            "decision_map": {"TC-002": {"steps": []}},
-            "internal_dependency": {"TC-002": {"used_by": []}},
-        }]}
-        merged = _merge_dep_map(existing, repair)
-        stories = merged["stories"]
-        assert len(stories) == 1
-        s = stories[0]
-        assert set(s["case_api_sequences"]) == {"TC-001", "TC-002"}
-        assert set(s["decision_map"]) == {"TC-001", "TC-002"}
-        assert set(s["internal_dependency"]) == {"TC-001", "TC-002"}
-
-    def test_merge_repair_overwrites_same_case(self):
-        from web.tasks import _merge_dep_map
-        existing = {"stories": [{
-            "story_name": "S",
-            "case_api_sequences": {"TC-001": ["old"]},
-            "decision_map": {"TC-001": {"steps": ["old"]}},
-            "internal_dependency": {},
-        }]}
-        repair = {"stories": [{
-            "story_name": "S",
-            "case_api_sequences": {"TC-001": ["new"]},
-            "decision_map": {"TC-001": {"steps": ["new"]}},
-            "internal_dependency": {},
-        }]}
-        merged = _merge_dep_map(existing, repair)
-        s = merged["stories"][0]
-        assert s["case_api_sequences"]["TC-001"] == ["new"]
-        assert s["decision_map"]["TC-001"]["steps"] == ["new"]
-
-    def test_merge_new_story_appended(self):
-        from web.tasks import _merge_dep_map
-        existing = {"stories": [{"story_name": "A", "case_api_sequences": {"TC-1": ["x"]}}]}
-        repair = {"stories": [{"story_name": "B", "case_api_sequences": {"TC-2": ["y"]}}]}
-        merged = _merge_dep_map(existing, repair)
-        assert len(merged["stories"]) == 2
-        assert {s["story_name"] for s in merged["stories"]} == {"A", "B"}
-
-    def test_find_stories_missing_anchors(self):
-        from web.tasks import _find_stories_missing_anchors
-        rows = [
-            {"story": "S1", "case_id": "TC-001", "preconditions": "PRE-001"},
-            {"story": "S2", "case_id": "TC-002", "preconditions": "无"},
-        ]
-        dep_map = {"stories": [
-            {"story_name": "S1", "story_pre_api_sequence": [],
-             "teardown_api_sequence": [], "case_api_sequences": {"TC-001": ["x"]}},
-            {"story_name": "S2", "story_pre_api_sequence": ["登录:POST /login"],
-             "teardown_api_sequence": [], "case_api_sequences": {"TC-002": ["y"]}},
-        ]}
-        missing = _find_stories_missing_anchors(rows, dep_map)
-        assert [s["story_name"] for s in missing] == ["S1"]
-        assert "PRE-001" in missing[0]["preconditions"]
-
-    def test_merge_story_anchor(self):
-        from web.tasks import _merge_dep_map
-        existing = {"stories": [{
-            "story_name": "S1", "story_pre_api_sequence": [],
-            "teardown_api_sequence": [], "case_api_sequences": {"TC-001": ["x"]},
-        }]}
-        repair = {"stories": [{
-            "story_name": "S1", "story_pre_api_sequence": ["登录:POST /login"],
-            "teardown_api_sequence": ["清理:DELETE /clean"],
-        }]}
-        merged = _merge_dep_map(existing, repair)
-        s = merged["stories"][0]
-        assert s["story_pre_api_sequence"] == ["登录:POST /login"]
-        assert s["teardown_api_sequence"] == ["清理:DELETE /clean"]
-        assert s["case_api_sequences"] == {"TC-001": ["x"]}
-
-    def test_repair_prompt_formats(self):
-        """repair_dependency_map_prompt 能带 repair_cases + repair_stories + analysis + json_schema。"""
-        from prompts.extraction_prompts import repair_dependency_map_prompt
-        msgs = repair_dependency_map_prompt().format_messages(
-            analysis="模块分析",
-            repair_cases='[{"case_id": "TC-003"}]',
-            repair_stories='[{"story_name": "S1", "preconditions": "PRE-001"}]',
-            json_schema="{}",
-            data_factory_methods="fn",
-            all_apis_info="[]",
-            module_tree="[]",
-            product_docs="[]",
-            context_note="补漏",
-            user_context="ctx",
-        )
-        text = "".join(m.content for m in msgs)
-        assert "TC-003" in text
-        assert "S1" in text
-        assert "补漏" in text
-
-
-class TestSingleNodeReasoning:
-    """第四节：invoke_think reasoning_content 采集 + gen_func 签名契约。"""
-
-    def test_invoke_think_captures_reasoning_content(self, monkeypatch):
-        import agent_components.llm_client as llm_client
-
-        captured = []
-        monkeypatch.setattr(
-            llm_client, "log_thinking",
-            lambda node, user, output, prompt_label="": captured.append((node, output)))
-
-        class FakeResult:
-            content = '{"data": []}'
-            reasoning_content = "思考过程..."
-
-        class FakeLLM:
-            def invoke(self, messages):
-                return FakeResult()
-
-        text = llm_client.invoke_think(
-            FakeLLM(), [{"role": "user", "content": "hi"}],
-            label="generate_yaml_data", reasoning_label="generate_yaml_data")
-        assert text == '{"data": []}'
-        assert captured and captured[0][0] == "generate_yaml_data_thinking"
-        assert captured[0][1] == "思考过程..."
-
-    def test_invoke_think_without_reasoning_no_capture(self, monkeypatch):
-        import agent_components.llm_client as llm_client
-
-        captured = []
-        monkeypatch.setattr(
-            llm_client, "log_thinking",
-            lambda node, user, output, prompt_label="": captured.append(node))
-
-        class FakeResult:
-            content = "ok"
-
-        class FakeLLM:
-            def invoke(self, messages):
-                return FakeResult()
-
-        text = llm_client.invoke_think(FakeLLM(), [], label="L")
-        assert text == "ok"
-        assert captured == []
-
-    def test_analysis_guide_exists(self):
-        from agent_components.generators.yaml_gen import YAML_ANALYSIS_GUIDE
-        assert YAML_ANALYSIS_GUIDE
-        assert "接口匹配" in YAML_ANALYSIS_GUIDE
-
-    def test_single_signature_matches_gen_func_contract(self):
-        import inspect
-        from agent_components.generators.yaml_gen import YamlMixin
-        p1 = list(inspect.signature(YamlMixin._generate_one_yaml).parameters)
-        p2 = list(inspect.signature(YamlMixin._generate_one_yaml_single).parameters)
-        assert p1 == p2
+    def test_no_api_docs_returns_none(self, tmp_path, monkeypatch):
+        """SQL 无接口定义 → None 阻断（M8：宁可失败，不带残缺数据续跑）。"""
+        import web.tasks as _tasks
+        monkeypatch.setattr(_tasks, "_load_all_api_defs", lambda: [])
+        assert _resolve_api_defs(self._excel(tmp_path), "") is None

@@ -498,6 +498,24 @@ function showGlossaryPanel() {
   document.getElementById('related-modules-rt').classList.add('hidden');
   document.getElementById('glossary-content').classList.remove('hidden');
 }
+function _setGlossaryPanelLabels(mode) {
+  // axure 详情：搜索/新增表单去术语化（页面语义）；默认：术语表语义
+  var search = document.getElementById('glossary-search');
+  var input = document.getElementById('new-term-input');
+  var def = document.getElementById('new-term-def');
+  var btn = document.querySelector('.new-term-row .btn');
+  if (mode === 'axure') {
+    if (search) search.placeholder = '🔍 搜索页面...';
+    if (input) input.placeholder = '页面名';
+    if (def) def.placeholder = '必填字段（逗号分隔，可空）';
+    if (btn) btn.textContent = '+ 添加页面';
+  } else {
+    if (search) search.placeholder = '🔍 搜索术语...';
+    if (input) input.placeholder = '术语名（最长32字）';
+    if (def) def.placeholder = '解释说明（最长256字）';
+    if (btn) btn.textContent = '+ 添加术语';
+  }
+}
 async function createModule() {
   let inp = document.getElementById('new-module-input'), name = inp.value.trim();
   if (!name) { name = prompt('模块名称:'); if (!name) return; }
@@ -602,10 +620,9 @@ function showDocDetail(docId, docType) {
 
 var _docChunks = [], _docChunkIdx = 0;
 
-// ── 文档详情 Tab 状态 ──
-var _docDetailTab = {};  // docId → 'chunks' | 'analysis'
-var _docAnalysisCache = {};  // docId → analysis object
-var _activeDocType = '';  // 当前详情面板文档类型（product=术语表 / axure=必填字段）
+// ── 文档详情状态 ──
+var _docPageImages = {};   // page_name → [image_path, ...]（仅有图片页在提取原文渲染原图）
+var _activeDocType = '';  // 当前详情面板文档类型（product=术语表 / axure=页面结构）
 
 async function toggleDocChunkDetail(docId, docType) {
   var detailEl = document.getElementById('doc-chunk-detail-' + docId);
@@ -614,7 +631,6 @@ async function toggleDocChunkDetail(docId, docType) {
     var btn = document.querySelector('.js-doc-detail[data-doc-id="' + docId + '"]');
     if (btn) btn.textContent = '详情';
     if (docType === 'product' || docType === 'axure') { document.getElementById('glossary-content').classList.add('hidden'); }
-    delete _docDetailTab[docId];
     return;
   }
   var btn = document.querySelector('.js-doc-detail[data-doc-id="' + docId + '"]');
@@ -630,6 +646,16 @@ async function toggleDocChunkDetail(docId, docType) {
     if (btn) btn.textContent = '详情';
     return;
   }
+  // 加载页面图片（仅有图片页在「提取原文」里渲染原图，替代无用文本）
+  _docPageImages = {};
+  try {
+    var ir = await fetch('/api/docs/' + encodeURIComponent(docId) + '/page-images');
+    var id = await ir.json();
+    (id.images || []).forEach(function(im) {
+      var k = (im.page_path || '').trim();
+      if (k) { (_docPageImages[k] = _docPageImages[k] || []).push(im.image_path); }
+    });
+  } catch (e) { /* 静默：无图片不影响提取原文 */ }
   if (btn) btn.textContent = '收起';
   if (docType === 'product' || docType === 'axure') {
     showGlossaryPanel();
@@ -638,83 +664,24 @@ async function toggleDocChunkDetail(docId, docType) {
     document.getElementById('glossary-title').textContent =
       docType === 'axure' ? '⭐ 页面结构' : '📝 术语表';
     _activeDocType = docType;
+    _setGlossaryPanelLabels(docType === 'axure' ? 'axure' : 'default');
     loadDocGlossary(docId);
   }
   var rowEl = document.querySelector('.js-doc-detail[data-doc-id="' + docId + '"]').closest('.doc-assoc-item');
   if (!rowEl) return;
-  _docDetailTab[docId] = 'chunks';
-  // 只有 product / axure 显示分析 tab，API 文档只展示提取原文
-  var showAnalysis = docType === 'product' || docType === 'axure';
+  // 详情面板仅保留「提取原文」（= 页面四段结构，④ 已含原文）；分析结果统一在中栏底部展示
   var html = '<div class="api-doc-detail" id="doc-chunk-detail-' + docId + '">'
-    + _renderDocDetailTabs(docId, docType, showAnalysis)
+    + _renderDocDetailTabs(docId, docType)
     + '</div>';
   rowEl.insertAdjacentHTML('afterend', html);
-  if (showAnalysis) _loadDocAnalysis(docId);
 }
 
-function _renderDocDetailTabs(docId, docType, showAnalysis) {
-  var activeTab = _docDetailTab[docId] || 'chunks';
-  function tabClass(t) { return 'doc-detail-tab' + (activeTab === t ? ' active' : ''); }
-  var tabs = '<div class="doc-detail-tabs">'
-    + '<button class="' + tabClass('chunks') + '" onclick="event.stopPropagation();_switchDocDetailTab(\'' + docId + '\',\'' + docType + '\',\'chunks\')">📄 提取原文</button>';
-  if (showAnalysis) {
-    tabs += '<button class="' + tabClass('analysis') + '" onclick="event.stopPropagation();_switchDocDetailTab(\'' + docId + '\',\'' + docType + '\',\'analysis\')">📊 分析结果</button>';
-  }
-  tabs += '</div>'
-    + '<div id="doc-detail-content-' + docId + '">' + renderChunkDetail(docId, docType) + '</div>'
+function _renderDocDetailTabs(docId, docType) {
+  return '<div id="doc-detail-content-' + docId + '">' + renderChunkDetail(docId, docType) + '</div>'
     + '<div style="text-align:right;margin-top:6px"><button class="btn btn-sm btn-outline" onclick="event.stopPropagation();toggleDocChunkDetail(\'' + docId + '\',\'' + docType + '\')">▲ 收起</button></div>';
-  return tabs;
-}
-
-function _switchDocDetailTab(docId, docType, tab) {
-  _docDetailTab[docId] = tab;
-  var container = document.getElementById('doc-chunk-detail-' + docId);
-  if (!container) return;
-  container.innerHTML = _renderDocDetailTabs(docId, docType, true);
-}
-
-async function _loadDocAnalysis(docId) {
-  if (_docAnalysisCache[docId] || !selectedModuleName) return;
-  try {
-    var r = await fetch('/api/modules/' + encodeURIComponent(selectedModuleName) + '/analysis');
-    var d = await r.json();
-    if (d.success && d.analysis) _docAnalysisCache[docId] = d.analysis;
-  } catch (e) { /* 静默失败，tab 切换时再重试 */ }
 }
 
 function renderChunkDetail(docId, docType) {
-  var activeTab = _docDetailTab[docId] || 'chunks';
-
-  // ── 分析结果 tab ──
-  if (activeTab === 'analysis') {
-    var analysis = _docAnalysisCache[docId];
-    // 按文档类型只展示相关部分
-    var hasContent = analysis && (
-      (docType === 'product' && analysis.scenario_analysis) ||
-      (docType === 'axure' && (analysis.ui_flow_analysis || analysis.scenario_analysis))
-    );
-    if (!hasContent) {
-      return '<div style="padding:32px;text-align:center;color:var(--text-dim)">'
-        + '<div style="font-size:48px;margin-bottom:12px">📭</div>'
-        + '<div>暂无分析结果</div>'
-        + '<div style="font-size:11px;margin-top:4px">请先在模块详情中点击「分析测试场景」</div>'
-        + '</div>';
-    }
-    var h = '';
-    if (analysis.scenario_analysis) {
-      h += '<div style="margin-bottom:10px"><b>📋 测试场景分析</b>'
-        + '<pre style="white-space:pre-wrap;line-height:1.7;margin:4px 0 0;font-size:12px;max-height:250px;overflow-y:auto">'
-        + esc(analysis.scenario_analysis) + '</pre></div>';
-    }
-    if (analysis.ui_flow_analysis) {
-      h += '<div style="margin-bottom:10px"><b>🖥️ 页面交互逻辑</b>'
-        + '<pre style="white-space:pre-wrap;line-height:1.7;margin:4px 0 0;font-size:12px;max-height:250px;overflow-y:auto">'
-        + esc(analysis.ui_flow_analysis) + '</pre></div>';
-    }
-    return h;
-  }
-
-  // ── 提取原文 tab ──
   var c = _docChunks[_docChunkIdx];
   if (!c) return '<div class="empty-hint">无内容</div>';
   var total = _docChunks.length;
@@ -724,6 +691,18 @@ function renderChunkDetail(docId, docType) {
     + '<button class="btn btn-sm btn-outline" onclick="event.stopPropagation();_docChunkIdx=Math.min(' + (total - 1) + ',_docChunkIdx+1);refreshChunkDetail(\'' + docId + '\',\'' + docType + '\')">下一个 ▶</button>'
     + (c.api_name ? ' <span style="color:var(--primary)">' + esc(c.api_name) + '</span>' : '')
     + '</div>';
+
+  // 仅有图片页面：chunk 无 ### 四段 body 且 page_images 有图 → 渲染原图替代无用文本
+  var imgs = _docPageImages[c.page_name] || [];
+  if (imgs.length > 0 && (c.content || '').indexOf('###') === -1) {
+    return nav
+      + '<div style="font-size:12px;color:var(--text-dim);margin:6px 0">🖼 页面原图（无可提取字段）</div>'
+      + imgs.map(function(p) {
+          return '<img class="chunk-img" loading="lazy" src="/api/docs/' + encodeURIComponent(docId)
+            + '/page-images/file/' + encodeURIComponent(p) + '" alt="' + esc(c.page_name) + '">';
+        }).join('');
+  }
+
   return nav + '<pre style="white-space:pre-wrap;line-height:1.7;margin:8px 0 0;font-size:12px;max-height:300px;overflow-y:auto">' + esc(c.content || '') + '</pre>';
 }
 
@@ -741,58 +720,27 @@ async function loadDocGlossary(docId) {
     if (!terms.length) { el.innerHTML = '<div class="empty-hint">' + emptyMsg + '</div>'; return; }
 
     if (_activeDocType === 'axure') {
-      // Axure 页面块四段：按 notes（块标题 ①目录）分组，每块渲染 ②必填/③筛选/④说明/🖼图片
-      let images = [];
-      try {
-        const ir = await fetch('/api/docs/' + encodeURIComponent(docId) + '/page-images');
-        const id = await ir.json();
-        images = id.images || [];
-      } catch (e) {}
-      const imgByPath = {};
-      images.forEach(im => { (imgByPath[im.page_path] = imgByPath[im.page_path] || []).push(im); });
-
+      // Axure 页面结构：按 notes（页面标题/块标题）分组，每块 = 标题 + 必填字段（术语表形式）。
+      // ③筛选/④说明/🖼图片段去掉——中栏「提取原文」四段结构已含原文，图片也走中栏渲染。
       const groups = {};
       terms.forEach(t => {
         const key = (t.notes || '').trim();
-        if (!groups[key]) groups[key] = { required: [], filter: [], explanation: [] };
-        const bucket = (t.kind === 'filter') ? groups[key].filter
-          : (t.kind === 'explanation') ? groups[key].explanation : groups[key].required;
-        bucket.push(t);
+        if (!groups[key]) groups[key] = [];
+        groups[key].push(t);
       });
       el.innerHTML = Object.keys(groups).map(key => {
-        const g = groups[key];
-        const imgs = imgByPath[key] || [];
-        const html = ['<div class="axure-block">'];
-        html.push('<div class="axure-block-title">' + esc(key)
-          + ' <button class="js-rename-block btn btn-xs" data-block="' + esc(key) + '" title="重命名块标题">✏️</button></div>');
-        // ② 必填字段
-        if (g.required.length) {
-          const seenR = {}; const uniq = g.required.filter(t => seenR[t.term] ? false : (seenR[t.term] = 1));
-          html.push('<div class="axure-section"><div class="axure-section-head">📋 必填字段</div>'
-            + uniq.map(t => '<span class="axure-chip">' + esc(t.term) + '</span>').join('') + '</div>');
+        const seen = {};
+        const reqs = groups[key].filter(t => t.kind === 'required')
+          .filter(t => seen[t.term] ? false : (seen[t.term] = 1));
+        const html = ['<div class="glossary-page-title">' + esc(key)
+          + ' <button class="js-rename-block btn btn-xs" data-block="' + esc(key) + '" title="重命名块标题">✏️</button></div>'];
+        if (reqs.length) {
+          reqs.forEach(t => {
+            html.push('<div class="glossary-item"><div class="term-name">' + esc(t.term) + '</div></div>');
+          });
+        } else {
+          html.push('<div class="axure-page-empty">无必填字段</div>');
         }
-        // ③ 筛选项（字段名 + 选项值）
-        if (g.filter.length) {
-          const seenF = {}; const uniq = g.filter.filter(t => seenF[t.term] ? false : (seenF[t.term] = 1));
-          html.push('<div class="axure-section"><div class="axure-section-head">🔽 筛选项</div>'
-            + uniq.map(t => '<div class="axure-filter"><span class="axure-chip">' + esc(t.term) + '</span>'
-              + (t.definition ? '<span class="axure-opt">' + esc(t.definition) + '</span>' : '') + '</div>').join('')
-            + '</div>');
-        }
-        // ④ 页面说明（整体复制）
-        if (g.explanation.length) {
-          html.push('<div class="axure-section"><div class="axure-section-head">📄 页面说明</div>'
-            + g.explanation.map(t => '<div class="axure-explain">' + esc(t.definition) + '</div>').join('')
-            + '</div>');
-        }
-        // 🖼 页面图片（兜底内嵌图）
-        if (imgs.length) {
-          html.push('<div class="axure-section"><div class="axure-section-head">🖼 页面图片</div>'
-            + imgs.map(im => '<img class="axure-page-img" loading="lazy" src="/api/docs/' + encodeURIComponent(docId)
-              + '/page-images/file/' + encodeURIComponent(im.image_path) + '" alt="' + esc(im.page_path) + '">').join('')
-            + '</div>');
-        }
-        html.push('</div>');
         return html.join('');
       }).join('');
     } else {
@@ -989,6 +937,7 @@ async function loadGlossary(modName) {
   showGlossaryPanel();
   // 模块术语表标题复位：避免打开过 axure 详情后残留「⭐ 页面结构」
   document.getElementById('glossary-title').textContent = '📝 术语表';
+  _setGlossaryPanelLabels('default');
   try {
     const r = await fetch('/api/modules/' + encodeURIComponent(modName) + '/glossary'); const d = await r.json();
     const terms = d.terms || [];
@@ -1005,12 +954,42 @@ async function loadGlossary(modName) {
   } catch (e) { document.getElementById('glossary-terms').innerHTML = '<div class="empty-hint">加载失败</div>'; }
 }
 async function addGlossaryTerm() {
-  if (!selectedModuleName) { toast('请先选择模块'); return; }
-  const term = document.getElementById('new-term-input').value.trim();
+  const input = document.getElementById('new-term-input').value.trim();
   const def = document.getElementById('new-term-def').value.trim();
-  if (!term) return;
+  if (!input) return;
+  // ── axure 文档详情：新增页面块（页面名 + 必填字段，逗号/顿号分隔）──
+  if (_activeDocType === 'axure' && selectedDocId) {
+    const pageTitle = input;
+    const fields = def.split(/[,，、\n]/).map(s => s.trim()).filter(Boolean);
+    let ok = 0;
+    try {
+      if (!fields.length) {
+        // 无必填字段 → 建一个空页面块（kind=explanation 占位，展示为「无必填字段」）
+        const r = await fetch('/api/docs/' + encodeURIComponent(selectedDocId) + '/glossary', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ term: pageTitle, definition: '', notes: pageTitle, kind: 'explanation' })
+        });
+        const d = await r.json(); if (d.success) ok = 1;
+      } else {
+        for (const f of fields) {
+          const r = await fetch('/api/docs/' + encodeURIComponent(selectedDocId) + '/glossary', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ term: f, definition: '必填', notes: pageTitle, kind: 'required' })
+          });
+          const d = await r.json(); if (d.success) ok++;
+        }
+      }
+      document.getElementById('new-term-input').value = '';
+      document.getElementById('new-term-def').value = '';
+      loadDocGlossary(selectedDocId);
+      toast(ok ? ('✅ 页面已添加: ' + pageTitle + '（' + ok + ' 个必填字段）') : '✅ 页面已添加: ' + pageTitle);
+    } catch (e) { console.error(e); toast('❌ 添加页面失败'); }
+    return;
+  }
+  // ── 模块视图：新增术语 ──
+  if (!selectedModuleName) { toast('请先选择模块'); return; }
   try {
-    const r = await fetch('/api/modules/' + encodeURIComponent(selectedModuleName) + '/glossary', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ term, definition: def }) });
+    const r = await fetch('/api/modules/' + encodeURIComponent(selectedModuleName) + '/glossary', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ term: input, definition: def }) });
     const d = await r.json(); if (d.success) { document.getElementById('new-term-input').value = ''; document.getElementById('new-term-def').value = ''; loadGlossary(selectedModuleName); toast('✅ 术语已添加'); } else toast('❌ ' + d.message);
   } catch (e) { console.error(e); toast('❌ 添加失败'); }
 }

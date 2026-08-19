@@ -378,3 +378,44 @@ page_details[url]["page_explanation"] # 主页面 ④（排除导航+弹窗）
 - `tests/test_regression_axure_parser.py`：`TestExplanationExclusion` 改 html 字符串入参；新增 `TestTopBarTrim`（pre-nav+post-nav 剔除、无导航全保留、nav_top 异常降级）；新增 `TestPanelMerge`（每面板 1 块、多状态合并 ②③④、内容标题）。
 - `python -m pytest tests/test_regression_axure_parser.py tests/test_ingest_main_flow.py` → **51 + 20 全绿**。
 - 真实 zip 端到端：`parse()` 块结构 = 每页主块 + 每面板块（企业余额 → `[企业余额, 企业余额/账户明细]` 等），弹窗必填完整（新增电表 16 项）。
+
+---
+
+# v4 重构：关联前后展示一致 / 术语表式分组 / 分析去重复 / axure 文案去术语化 / 图片 BLOB 直存（2026-08-18）
+
+## v4.1 用户 5 条反馈
+
+1. **关联前后展示一致**：未关联时展示的「页面名+必填字段」内容，关联后点详情也要同步展示。
+2. **术语表式分组**：一个「页面标题 + 必填字段」为一组，按术语表形式展示；右侧现在渲染的四段结构（①目录②必填③筛选④说明🖼）丢掉——中栏「提取原文」四段结构（②必填③筛选④说明=原文⑤交互）已含原文。
+3. **分析结果去重复**：只在中栏最底部 `#analysis-result` 统一展示；详情面板「📊 分析结果」tab 删除，仅留「📄 提取原文」。
+4. **axure 文案去术语化**：右栏搜索框、新增表单、按钮改页面语义（🔍 搜索页面 / 页面名+必填字段 / + 添加页面）。
+5. **仅有图片页面**：原图字节直存 SQLite（BLOB），不再存 `## 页面: X\n路径: Y.html` 无用文本（多模态可直接取字节分析）。
+
+## v4.2 实施完成（2026-08-18，已验证）
+
+### 数据/模型
+- `database/models.py`：`PageImage` 增加 `image_data = Column(LargeBinary)` 原图字节；`image_path` 改为仅存原文件名。
+- `database/__init__.py`：`_migrate_db()` 对 page_images 补 `image_data BLOB` 列（SQLite ALTER ADD COLUMN）。
+
+### 解析器（`agent_components/axure_parser.py`）
+- `to_product_doc_chunks`：页面无 ②③④（必填/筛选/说明）且有 `embedded_images` → chunk 内容仅 `## 页面: {page_path}`（去掉 `\n路径: {url}` 无用文本），前端据「无 ### 段 + page_images 有图」渲染原图。
+
+### 入库（`ingest/pipelines.py`）
+- `_save_embedded_page_images`：读 `<img>` 原图字节写入 `PageImage.image_data`（BLOB 直存 SQL），不再复制磁盘文件；`image_path` 只存原文件名。
+
+### 后端（`web/routes/docs.py`）
+- `GET /{doc_id}/page-images/file/{image_path}`：优先返回 `image_data` BLOB（按扩展名推断 MIME），旧数据回退磁盘文件。
+- `POST /{doc_id}/glossary`：接受 `notes` + `kind`（axure 添加页面块：term=字段、notes=页面标题、kind=required），幂等删除按「同名+同组」匹配（跨组同名互不影响）。
+
+### 前端（`static/app.js` / `static/style.css`）
+- `loadDocGlossary` axure 分支：每块 = `glossary-page-title`（页面标题 + ✏️ 重命名）+ 每必填字段一行（术语表形式）；无必填显示「无必填字段」。删除 ①目录②必填chips③筛选④说明🖼图片 四段结构。
+- `toggleDocChunkDetail` / `renderChunkDetail`：删除 📊 分析结果 tab 与 `_loadDocAnalysis`/`_docAnalysisCache`/`_switchDocDetailTab`；仅保留 📄 提取原文。提取原文对「仅图片页」（chunk 无 ### 段且 page_images 有图）渲染原图替代无用文本。
+- `_setGlossaryPanelLabels(mode)`：axure 详情 → 搜索框「🔍 搜索页面...」、输入「页面名 / 必填字段（逗号分隔，可空）」、按钮「+ 添加页面」；模块视图复位术语表文案。
+- `addGlossaryTerm`：axure 文档详情分支 → 解析页面名 + 必填字段（逗号/顿号/换行分隔），POST notes+kind；空必填 → 建占位块（kind=explanation）。
+- `static/style.css`：新增 `.chunk-img`（提取原文图片渲染）。
+
+### 测试（v4.2 全部通过）
+- `tests/test_regression_axure_parser.py`：新增 `TestChunksMainPlusDialogs::test_image_only_page_chunk_omits_path_line`（仅图页面 chunk 无路径行、无 body 段；有字段页面保留完整头+必填段）。
+- 真实 zip 端到端：`企业充值记录` chunk = `## 页面: 企业预付费管理/企业充值记录`（无路径行）；`_save_embedded_page_images` BLOB 直存（u37.png 1415B / u2101.png 91639B，PNG 魔数 OK）。
+- API 端到端（TestClient）：POST 页面块 notes+kind 幂等；`/unassociated` 返回 `pages:[{title, required_fields}]`；BLOB 图片 `image/png` 200 返回。
+- 全量：585 + 2(key_flows) + 20(ingest) + 52(parser) 通过。

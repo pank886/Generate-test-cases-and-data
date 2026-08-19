@@ -370,6 +370,8 @@ class ChatTestAgentGraph(RetrievalMixin, GenerationMixin):
                 repair_prompt = repair_excel_plan_prompt()
                 plan = self._invoke_structured(repair_prompt, ExcelPlanV2,
                     method="json_mode",
+                    json_schema=json.dumps(
+                        ExcelPlanV2.model_json_schema(), ensure_ascii=False, indent=2),
                     failed_test_cases=failed_tc_text,
                     block_reasons=_block_reasons_text,
                     module_tree=_shared_vars["module_tree"],

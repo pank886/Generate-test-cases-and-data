@@ -606,3 +606,33 @@ class TestChunksMainPlusDialogs:
         names = {c["page_name"] for c in chunks}
         assert "p1" in names
         assert "p1/添加" in names
+
+    def test_image_only_page_chunk_omits_path_line(self, tmp_path):
+        """仅有图片页面：chunk 无「路径:」无用文本，仅保留页面标签（前端据此渲染原图）。"""
+        import zipfile
+        zip_path = tmp_path / "mini_img.zip"
+        with zipfile.ZipFile(zip_path, "w") as zf:
+            zf.writestr(
+                "data/sitemap.js",
+                'var sitemap = {name:"proj", children:[{name:"图页", url:"img.html"}, {name:"文页", url:"text.html"}]};',
+            )
+            # 图页：无可提取内容，仅内嵌 <img>
+            zf.writestr(
+                "img.html",
+                '<html><body><img src="images/a.png"></body></html>',
+            )
+            # 文页：有必填字段（对照：保留完整头 + 路径 + body 段）
+            zf.writestr(
+                "text.html",
+                '<html><body><p><span style="color:#D9001B;">*</span><span>名称：</span></p></body></html>',
+            )
+        parsed = AxureParser(str(zip_path)).parse()
+        chunks = AxureParser(str(zip_path)).to_product_doc_chunks(parsed)
+        by_name = {c["page_name"]: c["content"] for c in chunks}
+        img_chunk = by_name["图页"]
+        assert "路径" not in img_chunk
+        assert "###" not in img_chunk
+        assert img_chunk.startswith("## 页面: 图页")
+        text_chunk = by_name["文页"]
+        assert "路径" in text_chunk
+        assert "### 必填字段" in text_chunk

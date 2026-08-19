@@ -88,6 +88,10 @@ def _migrate_db():
         _ensure_columns(conn, "glossary", [
             ("kind", "TEXT DEFAULT 'required'"),
         ])
+        # page_images 表新增 image_data 列（2026-08-18 原图 BLOB 直存 SQLite，多模态分析用）
+        _ensure_columns(conn, "page_images", [
+            ("image_data", "BLOB"),
+        ])
         conn.commit()
     finally:
         conn.close()

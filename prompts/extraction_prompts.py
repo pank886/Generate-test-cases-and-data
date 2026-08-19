@@ -80,10 +80,19 @@ def repair_excel_plan_prompt() -> ChatPromptTemplate:
     return ChatPromptTemplate.from_messages([
         ("system",
          "你正在修复一个 Excel 测试计划中的失败用例。按以下要求修正每个失败用例。\n\n"
-         "### 输出 JSON 格式（必须严格遵循，一个字符都不能错）\n"
+         "严格按下方 JSON Schema 输出，禁止 Markdown，只输出纯 JSON。\n\n"
+         "### JSON Schema（必须严格遵循此结构）\n"
+         "```json\n"
+         "{json_schema}\n"
+         "```\n\n"
+         "### 输出 JSON 格式（结构示意，字段定义以上方 JSON Schema 为准）\n"
          "必须输出以下结构的 JSON 对象：\n\n"
          "  {{\n"
-         '    "shared_preconditions": [],\n'
+         '    "shared_preconditions": [\n'
+         '      {{"id": "PRE-001", "name": "已创建测试电表",\n'
+         '        "steps": "1.调用 POST /electricMeter/add，填写电表名称\\"测试电表B\\"。\\n2.确认返回创建成功。",\n'
+         '        "expected": "1.[eq]返回200，创建成功。"}}\n'
+         '    ],\n'
          '    "test_cases": [\n'
          '      {{"id": "TC-001",\n'
          '        "story": "设施添加",\n'
@@ -101,7 +110,8 @@ def repair_excel_plan_prompt() -> ChatPromptTemplate:
          "- steps 和 expected 必须是**字符串**（\\n 分隔各条），禁止输出数组/列表\n"
          "- steps 和 expected 的条数必须一致（\\n 分隔后 count 相等）\n"
          "- preconditions 是 PRE ID 数组，无则为 []\n"
-         "- mutates_data/is_negative_test 为布尔值\n\n"
+         "- mutates_data/is_negative_test 为布尔值\n"
+         "- shared_preconditions 元素 = {{id, name, steps, expected}}，name 必填；禁止输出 story/title/preconditions/mutates_data/is_negative_test/cloned_from 等用例字段\n\n"
          "### 测试场景分析（参考上下文）\n{analysis_section}\n\n"
          "### 共享前置（参考原始设计，如有错误接口路径需一并修正）\n{shared_pre_section}\n\n"
          "### 完整用例描述（参考原始设计）\n{cases_section}\n\n"

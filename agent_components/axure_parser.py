@@ -1390,6 +1390,10 @@ class AxureParser:
                 detail.get("page_explanation"),
                 detail.get("interactions"),
             )
+            if not main_body and detail.get("embedded_images"):
+                # 仅有图片页面：不生成 "路径: xxx.html" 无用文本，仅保留页面标签。
+                # 前端据此（chunk 无 ### 段 + page_images 有图）渲染原图而非文本。
+                main_header = f"## 页面: {page_path}"
             self._append_chunk(chunks, main_header, main_body, page_path, splitter)
 
             # ---- 弹窗子块（每弹窗一块，标题 = 块标题 ①目录）----

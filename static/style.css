@@ -87,6 +87,7 @@ nav a:hover,nav a.active{color:#fff;border-bottom-color:#fff}
 .axure-opt{color:var(--text-dim);word-break:break-all}
 .axure-explain{font-size:11px;color:#444;line-height:1.7;white-space:pre-wrap;background:#fafbfc;border-radius:4px;padding:6px 8px;max-height:180px;overflow-y:auto}
 .axure-page-img{max-width:100%;max-height:220px;border:1px solid #eee;border-radius:4px;margin:4px 4px 4px 0;cursor:zoom-in}
+.chunk-img{max-width:100%;border:1px solid #eee;border-radius:4px;margin:4px 0;display:block;background:#fff}
 
 /* ── 术语 kind 小标签（模块聚合视图）── */
 .kind-tag{display:inline-block;font-size:10px;padding:0 5px;border-radius:3px;vertical-align:1px;margin-left:4px}

@@ -32,7 +32,7 @@ import uuid
 from datetime import datetime, timezone
 
 from sqlalchemy import (
-    Column, Integer, String, Text, DateTime, ForeignKey,
+    Column, Integer, String, Text, DateTime, ForeignKey, LargeBinary,
     UniqueConstraint, Index,
 )
 from sqlalchemy.orm import relationship
@@ -171,9 +171,10 @@ class GlossaryTerm(Base):
 
 
 class PageImage(Base):
-    """Axure 页面快照图（Edge 无头渲染，主页面块 🖼 展示）。
+    """Axure 页面原图（仅无可提取内容页面的内嵌图，BLOB 直存 SQLite）。
 
-    后续多模态识别可从图片补提取必填/字段。文档删除时级联删除。
+    原图字节存 image_data（多模态可直接取字节分析补提字段）；image_path 保留
+    原文件名（重名去重 / 展示 alt）。文档删除时级联删除。
     """
     __tablename__ = "page_images"
 
@@ -182,7 +183,8 @@ class PageImage(Base):
                     nullable=False, index=True)
     page_path = Column(String(300), nullable=False)   # 块路径（如 电表管理）
     page_url = Column(String(300), default="")        # 页面 URL（如 电表管理.html）
-    image_path = Column(String(500), default="")      # 相对 data/page_images 的 PNG 路径
+    image_path = Column(String(500), default="")      # 原文件名（如 u37.png）
+    image_data = Column(LargeBinary, nullable=True)   # 原图字节（多模态分析用）
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 
     def __repr__(self):
