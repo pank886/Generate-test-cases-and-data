@@ -47,6 +47,18 @@ def _find_missing_yaml_refs(output_base: str, project_root: str) -> list:
     return missing
 
 
+# 单节点生成引导：浓缩 analyze 的 5 条分析要点，引导模型在 thinking 里完成分析
+# （单节点 thinking 走 reasoning_content，content 直接输出 TestData JSON，无独立分析文本）
+YAML_ANALYSIS_GUIDE = (
+    "请先在思考中完成以下分析，再严格按本 prompt 的 JSON 结构输出：\n"
+    "1. 接口匹配：每个步骤对应哪个接口（url/method 与接口定义一致）\n"
+    "2. 请求参数：来源（用例指定/上游提取/工厂方法）\n"
+    "3. 数据传递：哪些返回值需要 extract 供下游引用\n"
+    "4. 断言设计：断言字段与期望值\n"
+    "5. 动态值：用哪个工厂函数，还是固定字面量"
+)
+
+
 class YamlMixin:
     """YAML 生成（thinking 分析 → json_mode 输出）+ 多轮修复循环"""
 
@@ -119,8 +131,40 @@ class YamlMixin:
         # === 阶段 2：json_mode 结构化输出（max_retries=0，失败即抛给登记器） ===
         format_prompt = format_yaml_data_prompt()
 
-        # ── 构建 pre_validate 闭包：注入 _annotations + 处理 is_export 空断言 ──
-        api_defs_list = json.loads(api_defs_json) if api_defs_json and api_defs_json.strip() != "[]" else []
+        # ── 构建 pre_validate 闭包（共享方法，单节点复用，避免两路径漂移）──
+        inject_annotations = self._build_annotation_injector(api_defs_json)
+
+        # db_schema 为空 → 禁 db 断言（TestData.validate_no_db_when_no_schema，2026-08-04 问题 2）
+        from prompts.response_model import set_db_schema_empty
+        set_db_schema_empty(not bool(db_schema))
+
+        result = self._invoke_structured(format_prompt, TestData,
+            max_retries=0,
+            method="json_mode",
+            pre_validate=inject_annotations,
+            data_analysis=analysis,
+            api_definitions=api_defs_json,
+            test_case_logic=test_case_logic,
+            user_context=user_ctx,
+            data_factory_methods=factory_methods_text,
+            db_schema=db_schema,
+        )
+
+        # ── 写盘管线（共享方法：路径参数替换 + 导出接管 + 序列化原子写盘）──
+        return self._write_yaml_result(result, output_path)
+
+    # ------------------------------------------------------------------
+    # 共享助手（两段式 _generate_one_yaml 与单节点 _generate_one_yaml_single 共用，
+    # 避免两路径漂移）
+    # ------------------------------------------------------------------
+    def _build_annotation_injector(self, api_defs_json: str):
+        """构建 pre_validate 闭包：按 url 注入 _annotations + 处理 is_export 空断言。
+
+        两段式（_invoke_structured pre_validate）与单节点（TestData.model_validate 前）
+        共用同一注入逻辑。返回 _inject_annotations(parsed) -> parsed。
+        """
+        api_defs_list = (json.loads(api_defs_json)
+                         if api_defs_json and api_defs_json.strip() != "[]" else [])
 
         def _lookup_api(url: str) -> dict | None:
             """按 url 匹配 API 定义（优先精确匹配，fallback 前缀匹配）。"""
@@ -147,23 +191,13 @@ class YamlMixin:
                                 tc["validation"] = [{"__placeholder_export": True}]
             return parsed
 
-        # db_schema 为空 → 禁 db 断言（TestData.validate_no_db_when_no_schema，2026-08-04 问题 2）
-        from prompts.response_model import set_db_schema_empty
-        set_db_schema_empty(not bool(db_schema))
+        return _inject_annotations
 
-        result = self._invoke_structured(format_prompt, TestData,
-            max_retries=0,
-            method="json_mode",
-            pre_validate=_inject_annotations,
-            data_analysis=analysis,
-            api_definitions=api_defs_json,
-            test_case_logic=test_case_logic,
-            user_context=user_ctx,
-            data_factory_methods=factory_methods_text,
-            db_schema=db_schema,
-        )
+    def _write_yaml_result(self, result, output_path: str) -> str:
+        """写盘前注入（路径参数替换 + 导出断言接管）+ 序列化原子写盘，返回 output_path。
 
-        # ── 写盘前注入：路径参数替换 + 导出接口断言接管（兜底） ──
+        两段式与单节点共用同一写盘管线。
+        """
         for step in result.data:
             annotations = step.baseInfo.get("_annotations", {})
             hp = annotations.get("has_path_params", {})
@@ -175,7 +209,7 @@ class YamlMixin:
                 step.baseInfo["url"] = url
         self._takeover_export_assertions(result.data)
 
-        # ── 序列化写盘（去除 _annotations 元数据字段） ──
+        # 序列化写盘（去除 _annotations 元数据字段）
         _clean_steps = []
         for step in result.data:
             _d = step.model_dump(exclude_none=True, by_alias=True)
@@ -198,6 +232,80 @@ class YamlMixin:
             f.write(yaml_text)
         os.replace(tmp_path, output_path)
         return output_path
+
+    def _generate_one_yaml_single(self, row: dict, api_defs_json: str, user_ctx: str,
+                                  output_path: str, repair_ctx: dict | None = None) -> str:
+        """单节点 YAML 生成：thinking + json_object 一次调用生成 TestData。
+
+        与 `_generate_one_yaml` 同签名/同产物/同写盘管线，仅 LLM 调用从两段式合并为一次：
+          - thinking 走 reasoning_content（不走 `_invoke_structured` 的 json_mode，
+            绕开 METHOD_FEATURES 强制 thinking off），经 `_invoke_think` 的
+            reasoning_label 采集落 thinking_trace.log（思考内容监测）；
+          - content 直接是 TestData JSON → json.loads + _inject_annotations +
+            TestData.model_validate（max_retries=0 语义，失败进修复轮）。
+
+        首轮 data_analysis = YAML_ANALYSIS_GUIDE；修复轮 = 引导 + 错误上下文。
+        开关 config.YAML_SINGLE_NODE（默认 True）在 `_generate_all_yamls` 决定走本节点还是两段式。
+        """
+        from prompts.extraction_prompts import generate_yaml_data_single_prompt
+        from observability import log_thinking
+
+        db_schema = config.DB_SCHEMA  # 数据库表结构（占位，为空禁 db 断言，2026-08-04 问题 2）
+        factory_methods_text = self._load_factory_methods()
+        test_case_logic = f"执行步骤: {row['steps']}\n预期结果: {row.get('expected', '')}"
+        # yaml 格式 schema（TestData 模型 JSON-Schema）：固定内容，注入 system 段
+        json_schema_text = json.dumps(TestData.model_json_schema(),
+                                      ensure_ascii=False, indent=2)
+        case_label = (
+            f"{row.get('case_id') or os.path.basename(os.path.dirname(output_path))}"
+            f" | {os.path.basename(os.path.dirname(output_path))}/{os.path.basename(output_path)}"
+        )
+
+        # data_analysis = 引导 + 修复上下文（首轮 / 修复轮）
+        if repair_ctx:
+            data_analysis = (
+                YAML_ANALYSIS_GUIDE
+                + f"\n\n### 你上一轮的输出（有错）\n{repair_ctx.get('prior_output', '')}"
+                + f"\n### 校验错误明细\n{repair_ctx.get('error_detail', '')}"
+                + f"\n### 全批次错误模式\n{repair_ctx.get('error_pattern_summary', '')}"
+                + f"\n### 后校验问题\n{repair_ctx.get('post_check_issues', '')}"
+            )
+            node_label = f"repair_yaml_data_single_ROUND{repair_ctx.get('round_no', 2)}"
+        else:
+            data_analysis = YAML_ANALYSIS_GUIDE
+            node_label = "generate_yaml_data_single"
+        prompt_label = "generate_yaml_data_single_prompt"
+
+        format_prompt = generate_yaml_data_single_prompt()
+        inject_annotations = self._build_annotation_injector(api_defs_json)
+
+        # ── 单节点：thinking + json_object 一次调用（绕开 METHOD_FEATURES json_mode 强制 thinking off）──
+        llm = self.llm.bind(temperature=0.4,
+                            response_format={"type": "json_object"},
+                            extra_body={"thinking": {"type": "enabled"}})
+        raw = self._invoke_think(
+            llm, format_prompt.format_messages(
+                data_factory_methods=factory_methods_text,
+                api_definitions=api_defs_json,
+                data_analysis=data_analysis,
+                test_case_logic=test_case_logic,
+                user_context=user_ctx,
+                db_schema=db_schema,
+                json_schema=json_schema_text,
+            ),
+            label=node_label, reasoning_label=node_label,
+        )
+        # 单节点 thinking 在 reasoning_content（invoke_think 已按 reasoning_label 采集）；
+        # content 即最终 TestData JSON，一并落 thinking_trace.log
+        log_thinking(node_label, case_label, raw, prompt_label=prompt_label)
+
+        parsed = json.loads(raw)
+        parsed = inject_annotations(parsed)
+        from prompts.response_model import set_db_schema_empty
+        set_db_schema_empty(not bool(db_schema))
+        result = TestData.model_validate(parsed)
+
+        return self._write_yaml_result(result, output_path)
 
     def _generate_all_yamls(self, excel_path: str, api_defs_json: str, user_ctx: str) -> dict:
         """Phase C V2：按 feature/story/func 目录生成 YAML + setup_data。
@@ -331,7 +439,10 @@ class YamlMixin:
                     f"并发 {config.YAML_CONCURRENCY} 个线程，"
                     f"修复轮上限 {config.YAML_REPAIR_ROUNDS}")
 
-        result = self._run_yaml_rounds(yaml_tasks, api_defs_json, user_ctx, output_base)
+        # 单节点开关：True=thinking+json_object 一次调用；False=两段式（analyze → json_mode）
+        gen_func = self._generate_one_yaml_single if config.YAML_SINGLE_NODE else None
+        result = self._run_yaml_rounds(yaml_tasks, api_defs_json, user_ctx, output_base,
+                                       gen_func=gen_func)
 
         # --- YAML 后校验（纯代码，不放 LLM）---
         from agent_components.post_validator import YamlPostValidator
@@ -356,6 +467,7 @@ class YamlMixin:
                                 f"追加一轮修复（{len(_affected_tasks)} 个文件）")
                     _post_result = self._run_yaml_rounds(
                         _affected_tasks, api_defs_json, user_ctx, output_base,
+                        gen_func=gen_func,
                         post_check_issues=_fixable,
                         repair_rounds=1,
                     )

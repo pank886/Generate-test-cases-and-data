@@ -263,7 +263,7 @@ def format_yaml_data_prompt() -> ChatPromptTemplate:
          '        {{\n'
          '          "case_name": "新增单一费率电表",\n'
          '          "json": {{"code": "${{random_plates(1)}}", "name": "测试电表"}},\n'
-         '          "validation": [{{"eq": {{"$.retCode": 0}}}}, {{"contains": {{"$.msg": "成功"}}}}],\n'
+         '          "validation": [{{"contains": {{"$.msg": "成功"}}}}],\n'
          '          "extract": {{"meterCode": "$.data.code"}}\n'
          '        }}\n'
          '      ]\n'
@@ -279,7 +279,7 @@ def format_yaml_data_prompt() -> ChatPromptTemplate:
          '        {{\n'
          '          "case_name": "查询电表列表验证新增",\n'
          '          "json": {{"pageNum": 1, "pageSize": 10}},\n'
-         '          "validation": [{{"eq": {{"$.retCode": 0}}}}, {{"contains": {{"$.data.records[0].meterName": "${{get_extract_data(meterName)}}"}}}}]\n'
+         '          "validation": [{{"contains": {{"$.data.records[0].meterName": "${{get_extract_data(meterName)}}"}}}}]\n'
          '        }}\n'
          '      ]\n'
          '    }}\n'
@@ -300,14 +300,18 @@ def format_yaml_data_prompt() -> ChatPromptTemplate:
          "9. 请求参数按 HTTP 方法选择：GET/DELETE → params, POST/PUT/PATCH → json\n"
          "10. 动态值使用 ${{函数名(参数)}}，函数必须来自上方清单\n"
          "11. extract/input_extract 用不到就省略整个字段，禁止输出空 {{}} 或 null\n"
-         "12. validation 数组不能为空，每步至少一条断言（如 {{eq: {{retCode: 0}}}}）\n"
+         "12. validation 数组不能为空，每步至少一条断言；断言的期望值须按规则 19 取自接口返回定义\n"
          "13. 断言运算符只用 [eq, contains, ne, db] 四种，不等于是 ne 不是 neq\n"
          "14. **若「数据库表结构信息」为空，禁止 db 断言**（无表结构无法写正确 SQL），改用 eq/contains/ne\n"
          "15. **对 `status_code` 的断言必须用 contains: {{status_code: X}}，禁止 eq/ne**（适用于所有接口，"
          "不限于导出；导出/下载/模板接口返回二进制流，维持 contains: {{status_code: 200}}）\n"
          "16. JSONPath 必须以 $. 开头（如 $.data.code）\n"
          "17. 禁止 Markdown，只输出纯净 JSON\n"
-         "18. **`contains` 的值必须是字典对象**（`{{字段: 期望}}` 或 `{{$.JSONPath: 期望}}`），禁止裸字符串/标量"),
+         "18. **`contains` 的值必须是字典对象**（`{{字段: 期望}}` 或 `{{$.JSONPath: 期望}}`），禁止裸字符串/标量\n"
+         "19. **成功/失败断言的期望值取自接口返回定义**：断言的字段与期望值必须取自「接口定义」"
+         "返回定义中真实给出的字段/取值/语义；正向用例断言业务成功对应的返回取值，反向用例"
+         "断言失败返回取值；返回定义未给出明确取值时，退化为 contains 字段存在性或 status_code "
+         "断言，禁止臆造固定取值"),
         ("human",
          "### 数据分析\n{data_analysis}\n\n"
          "### 接口定义\n{api_definitions}\n\n"
@@ -315,6 +319,61 @@ def format_yaml_data_prompt() -> ChatPromptTemplate:
          "### 用户意图\n{user_context}\n\n"
          "### 数据库表结构信息（为空时禁止 db 断言）\n{db_schema}\n\n"
          "请严格按照上方 JSON 结构输出：")
+    ])
+
+
+def generate_yaml_data_single_prompt() -> ChatPromptTemplate:
+    """Phase C YAML 数据 — 单节点专用：schema 驱动，无手写示例。
+
+    thinking + json_object 一次调用（thinking 走 reasoning_content）。
+    与两段式的 format_yaml_data_prompt 区别：
+      - 格式唯一来源 = 下方 json_schema（TestData.model_json_schema()），无示例块；
+      - json_schema 为固定内容，放 system 段（提升 schema 遵循命中率 + system 消息
+        字节一致利于 prompt 缓存）；human 只放逐用例/逐接口的可变内容；
+      - 铁律为抽象规则措辞，不含可照抄的断言字面量（防 LLM 照抄）；
+      - 含 19 号文件 prompt 可修缺陷：成功/失败断言约定、数据唯一化、delete 按定义。
+    """
+    return ChatPromptTemplate.from_messages([
+        ("system",
+         "你是数据格式化专家。yaml 格式 schema（固定内容）见下方 system 段；B 用例内容、"
+         "A 数据分析、接口详情文档在 human 段。一次输出 TestData 模型的 JSON（Pydantic "
+         "校验，字段与类型一个都不能错）。本 prompt 不含任何具体业务示例，禁止编造与输入"
+         "无关的固定数据。\n\n"
+         "### 可用数据工厂方法（动态占位符只能从此清单选择，严格按 syntax 填写）\n"
+         "{data_factory_methods}\n\n"
+         "### yaml 格式 schema（输出结构唯一来源，禁止自创结构/推断字段）\n"
+         "{json_schema}\n\n"
+         "### 铁律（抽象规则，无示例；内容唯一来源 = 上方 yaml 格式 schema + "
+         "human 段 B 用例内容 / A 数据分析 / 接口详情文档）\n"
+         "1. 顶层只能有一个 data 数组，每元素含 baseInfo 与 testCase 两个键\n"
+         "2. 请求体三选一（json/params/data 只出现一个）：按接口定义 HTTP 方法选——"
+         "GET/DELETE 用 params，POST/PUT/PATCH 用 json\n"
+         "3. url 与接口定义中的路径完全一致：只写路径、禁 query/域名/占位符表达式；"
+         "路径参数不得替换成具体值\n"
+         "4. 每个 baseInfo 必有 header 键：JSON 请求体方法写 Content-Type=application/json，"
+         "其余写空对象\n"
+         "5. validation 数组不得为空，每步至少一条断言；运算符只允许 eq/contains/ne/db\n"
+         "6. status_code 只能被 contains 断言，且 contains 的值必须是字典对象"
+         "（键=字段名、值=期望值）；禁止用 eq/ne 断言 status_code\n"
+         "7. JSONPath 一律以 $. 开头\n"
+         "8. extract/input_extract 用不到就整字段省略，禁止输出空对象或 null\n"
+         "9. **成功/失败断言的期望值取自接口返回定义**：断言的字段与期望值必须取自"
+         "「接口详情文档」返回定义中真实给出的字段/取值/语义；正向用例断言业务成功对应的"
+         "返回取值，反向用例断言失败返回取值；返回定义未给出明确成功/失败取值时，退化为"
+         "contains 字段存在性或 status_code 断言，禁止臆造返回定义之外的固定取值\n"
+         "10. **数据唯一化**：设备名/编码等唯一键必须动态生成（${{ }} 工厂方法或时间戳/"
+         "随机后缀），禁止输出固定假值——防跨套件重名与套件内自碰撞\n"
+         "11. **delete 参数按接口定义**：delete 请求参数严格按接口定义填写，禁止输出"
+         "接口定义之外的任何字段\n"
+         "12. 禁止 Markdown；只输出纯净 JSON（Pydantic 校验，字段/类型一个都不能错）"),
+        ("human",
+         "### B 用例内容（本用例执行步骤 + 预期结果）\n{test_case_logic}\n\n"
+         "### A 数据分析（生成前思考要点引导）\n{data_analysis}\n\n"
+         "### 接口详情文档（路径/请求字段/返回语义，取值唯一来源）\n{api_definitions}\n\n"
+         "### 用户意图\n{user_context}\n\n"
+         "### 数据库表结构信息（为空时禁止 db 断言）\n{db_schema}\n\n"
+         "请严格按照 system 段的 yaml 格式 schema 输出 TestData JSON：字段名与结构以 schema 为准，字段值根据上述分析和用例上下文合理生成，可优先参考用例中已出现的具体取值，禁止使用示例或占位数据。"
+         )
     ])
 
 

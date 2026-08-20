@@ -256,3 +256,82 @@ class TestReasoningContent:
 
         result = adapter._create_chat_result(resp)
         assert "reasoning_content" not in result.generations[0].message.additional_kwargs
+
+
+class TestInvokeThinkReasoning:
+    """invoke_think 对 reasoning_content 的监测采集（单节点 thinking 观测）。
+
+    reasoning_content 藏在 additional_kwargs（不进 content）；reasoning_label
+    传入时按 ``{label}_thinking`` 打标落 thinking_trace.log，且不再走
+    ``{label} 思考内容`` 通用路径（防双写）。
+    """
+
+    @staticmethod
+    def _fake_llm(content: str, reasoning: str | None):
+        from unittest.mock import Mock
+        from langchain_core.messages import AIMessage
+        llm = Mock()
+        llm.invoke.return_value = AIMessage(
+            content=content,
+            additional_kwargs={"reasoning_content": reasoning} if reasoning else {},
+        )
+        return llm
+
+    def test_reasoning_label_logs_tagged_node(self, monkeypatch):
+        """有 reasoning_label → 落 ``{label}_thinking`` 节点，且不落 ``{label} 思考内容``。"""
+        from unittest.mock import Mock
+        import agent_components.llm_client as llm_client
+        llm = self._fake_llm('{"data": []}', "先思考，再输出 JSON。")
+        mock_log = Mock()
+        monkeypatch.setattr(llm_client, "log_thinking", mock_log)
+
+        text = llm_client.invoke_think(
+            llm, [{"role": "user", "content": "hi"}],
+            label="generate_yaml_data_single",
+            reasoning_label="generate_yaml_data_single")
+
+        assert text == '{"data": []}'
+        nodes = [c.args[0] for c in mock_log.call_args_list]
+        assert "generate_yaml_data_single_thinking" in nodes
+        assert "generate_yaml_data_single 思考内容" not in nodes
+
+    def test_no_reasoning_label_keeps_generic_path(self, monkeypatch):
+        """无 reasoning_label → 维持 ``{label} 思考内容`` 通用路径（行为不变）。"""
+        from unittest.mock import Mock
+        import agent_components.llm_client as llm_client
+        llm = self._fake_llm("ok", None)
+        mock_generic = Mock()
+        monkeypatch.setattr(llm_client, "_log_reasoning_content", mock_generic)
+
+        text = llm_client.invoke_think(
+            llm, [{"role": "user", "content": "hi"}], label="analyze_yaml_data")
+
+        assert text == "ok"
+        mock_generic.assert_called_once()
+
+    def test_reasoning_label_empty_content_retries(self, monkeypatch):
+        """content 空但 reasoning 非空 → 仍触发空响应重试；监测照常记录。"""
+        from unittest.mock import Mock
+        import agent_components.llm_client as llm_client
+        calls = {"n": 0}
+
+        def invoke(messages):
+            calls["n"] += 1
+            from langchain_core.messages import AIMessage
+            if calls["n"] == 1:
+                return AIMessage(content="", additional_kwargs={"reasoning_content": "想一下"})
+            return AIMessage(content="ok", additional_kwargs={"reasoning_content": "想一下"})
+
+        llm = Mock()
+        llm.invoke.side_effect = invoke
+        mock_log = Mock()
+        monkeypatch.setattr(llm_client, "log_thinking", mock_log)
+
+        text = llm_client.invoke_think(
+            llm, [{"role": "user", "content": "hi"}],
+            label="node_x", reasoning_label="node_x", max_retries=1)
+
+        assert text == "ok"
+        assert calls["n"] == 2
+        nodes = [c.args[0] for c in mock_log.call_args_list]
+        assert nodes.count("node_x_thinking") == 2

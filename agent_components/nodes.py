@@ -767,9 +767,15 @@ class ChatTestAgentGraph(RetrievalMixin, GenerationMixin):
         return load_factory_methods()
 
     def _invoke_think(self, bound_llm, messages, max_retries: int | None = None,
-                      label: str = "LLM") -> str:
-        """通用 thinking 调用（空 content 复用输入重试），实现见 llm_client.py。"""
-        return invoke_think(bound_llm, messages, max_retries=max_retries, label=label)
+                      label: str = "LLM", reasoning_label: str | None = None) -> str:
+        """通用 thinking 调用（空 content 复用输入重试），实现见 llm_client.py。
+
+        reasoning_label: 非 None 时采集 result.reasoning_content（单节点 thinking，
+            thinking+json_object 场景 thinking 不进 content）落 thinking_trace.log，
+            弥补单节点可观测性损失（思考内容监测）。
+        """
+        return invoke_think(bound_llm, messages, max_retries=max_retries,
+                            label=label, reasoning_label=reasoning_label)
 
     def _invoke_structured(self, prompt, model_class,
                            max_retries: int = config.MAX_RETRIES,

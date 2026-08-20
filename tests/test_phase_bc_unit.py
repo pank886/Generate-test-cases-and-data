@@ -1018,6 +1018,206 @@ class TestYamlRepairLoop:
 
 
 # ============================================================
+# M7b — YAML 单节点生成（恢复）+ 思考内容监测
+# ============================================================
+
+class TestYamlSingleNodeFlag:
+    """YAML_SINGLE_NODE 开关 → _generate_all_yamls 传入的 gen_func 路由。"""
+
+    @staticmethod
+    def _agent(monkeypatch):
+        from unittest.mock import Mock
+        import observability
+        agent = object.__new__(ChatTestAgentGraph)
+        agent._read_excel_rows = lambda path: [{
+            "feature": "设施管理", "story": "设施添加", "title": "新增设施-正向",
+            "steps": "1.调用新增接口", "expected": "", "preconditions": "",
+            "case_id": "TC-001",
+        }]
+        agent._translate_to_en = lambda path, rows: {
+            "feature_en": {}, "story_en": {}, "title_en": {}}
+        agent._read_shared_preconditions = lambda path: []
+        captured = {}
+        agent._run_yaml_rounds = Mock(
+            side_effect=lambda *a, **kw: captured.update(kw) or {
+                "total": 1, "success": 1, "failed": 0, "repaired": 0,
+                "rounds": 1, "errors_file": None})
+        agent._log_node_output = Mock()
+        monkeypatch.setattr(observability, "log_thinking", Mock())
+        return agent, captured
+
+    def test_true_selects_single_node(self, monkeypatch, tmp_path):
+        """YAML_SINGLE_NODE=True → gen_func=_generate_one_yaml_single。"""
+        import config
+        monkeypatch.setattr(config, "YAML_SINGLE_NODE", True)
+        agent, captured = self._agent(monkeypatch)
+        agent._generate_all_yamls(
+            os.path.join(str(tmp_path), "test_plan.xlsx"), "[]", "ctx")
+        assert captured["gen_func"] == agent._generate_one_yaml_single
+
+    def test_false_selects_two_stage(self, monkeypatch, tmp_path):
+        """YAML_SINGLE_NODE=False → gen_func=None（两段式 _generate_one_yaml）。"""
+        import config
+        monkeypatch.setattr(config, "YAML_SINGLE_NODE", False)
+        agent, captured = self._agent(monkeypatch)
+        agent._generate_all_yamls(
+            os.path.join(str(tmp_path), "test_plan.xlsx"), "[]", "ctx")
+        assert captured["gen_func"] is None
+
+
+class TestYamlSingleNodeGenerate:
+    """单节点：thinking + json_object 一次调用，绕开 _invoke_structured。"""
+
+    @staticmethod
+    def _agent(monkeypatch, llm_text: str):
+        from unittest.mock import Mock
+        import observability
+        agent = object.__new__(ChatTestAgentGraph)
+        agent.llm = Mock()
+        agent._invoke_think = Mock(return_value=llm_text)
+        agent._invoke_structured = Mock()
+        agent._load_factory_methods = lambda: ""
+        monkeypatch.setattr(observability, "log_thinking", Mock())
+        return agent
+
+    def test_single_node_writes_yaml_bypasses_structured(self, monkeypatch, tmp_path):
+        """单节点一次调用生成合法 TestData JSON → 落盘；_invoke_structured 不被调用。"""
+        import config
+        monkeypatch.setattr(config, "YAML_SINGLE_NODE", True)
+        yaml_json = json.dumps({
+            "data": [{
+                "baseInfo": {"api_name": "新增", "url": "/meterDevice/add",
+                             "method": "post", "header": {}},
+                "testCase": [{"case_name": "新增单一费率电表",
+                              "validation": [{"eq": {"code": 0}}]}],
+            }]
+        }, ensure_ascii=False)
+        agent = self._agent(monkeypatch, yaml_json)
+        out = os.path.join(str(tmp_path), "feature_en", "func_en", "test_data.yaml")
+        ret = agent._generate_one_yaml_single(
+            {"steps": "1.调用新增接口", "expected": "1.[eq]成功", "case_id": "TC-001"},
+            "[]", "用户意图", out)
+        assert ret == out
+        assert os.path.exists(out)
+        assert "/meterDevice/add" in open(out, encoding="utf-8").read()
+        agent._invoke_structured.assert_not_called()
+        _, kwargs = agent._invoke_think.call_args
+        assert kwargs.get("reasoning_label") == "generate_yaml_data_single"
+
+    def test_single_node_messages_schema_in_system_not_human(self, monkeypatch, tmp_path):
+        """单节点 prompt 分层：schema 固定入 system，human 只放可变内容、无示例字面量。"""
+        import config
+        monkeypatch.setattr(config, "YAML_SINGLE_NODE", True)
+        yaml_json = json.dumps({
+            "data": [{
+                "baseInfo": {"api_name": "新增", "url": "/meterDevice/add",
+                             "method": "post", "header": {}},
+                "testCase": [{"case_name": "新增电表",
+                              "validation": [{"eq": {"code": 0}}]}],
+            }]
+        }, ensure_ascii=False)
+        agent = self._agent(monkeypatch, yaml_json)
+        out = os.path.join(str(tmp_path), "feature_en", "func_en", "test_data.yaml")
+        agent._generate_one_yaml_single(
+            {"steps": "1.调用新增接口", "expected": "1.[eq]成功", "case_id": "TC-001"},
+            "[]", "用户意图", out)
+
+        msgs = agent._invoke_think.call_args[0][1]
+        by_type = {m.type: m.content for m in msgs}
+        sys_text, hum_text = by_type["system"], by_type["human"]
+        # schema 固定入 system；human 无 {json_schema} 占位
+        assert "$defs" in sys_text and "StepData" in sys_text
+        assert "{json_schema}" not in hum_text
+        # human 三节可变来源
+        for k in ("B 用例内容", "A 数据分析", "接口详情文档"):
+            assert k in hum_text
+        # 无可照抄断言字面量（防 LLM 照抄）
+        text = sys_text + hum_text
+        assert "retCode: 0" not in text
+        assert "$.retCode" not in text
+        # 19号 prompt 可修缺陷铁律
+        assert "接口返回定义" in sys_text
+        assert "数据唯一化" in sys_text
+        assert "delete 参数按接口定义" in sys_text
+
+
+class TestYamlSingleNodePromptRender:
+    """generate_yaml_data_single_prompt 直接渲染：schema 只在 system、无示例字面量。"""
+
+    @staticmethod
+    def _render() -> dict:
+        from prompts.extraction_prompts import generate_yaml_data_single_prompt
+        from prompts.response_model import TestData
+        schema = json.dumps(TestData.model_json_schema(), ensure_ascii=False, indent=2)
+        msgs = generate_yaml_data_single_prompt().format_messages(
+            data_factory_methods="factory_text",
+            api_definitions="api_defs",
+            data_analysis="analysis",
+            test_case_logic="test_case_logic",
+            user_context="user_ctx",
+            db_schema="db_schema",
+            json_schema=schema,
+        )
+        return {m.type: m.content for m in msgs}
+
+    def test_schema_in_system_only(self):
+        """{json_schema} 占位替换进 system；human 不含占位。"""
+        msgs = self._render()
+        assert "$defs" in msgs["system"] and "StepData" in msgs["system"]
+        assert "{json_schema}" not in msgs["system"]
+        assert "{json_schema}" not in msgs["human"]
+
+    def test_no_copyable_assertion_literals(self):
+        """整体无 retCode: 0 / $.retCode 可照抄断言字面量。"""
+        text = self._render()["system"] + self._render()["human"]
+        assert "retCode: 0" not in text
+        assert "$.retCode" not in text
+
+    def test_sources_and_rules_present(self):
+        """system 含铁律；human 含 B/A/接口 三节来源。"""
+        msgs = self._render()
+        assert "接口返回定义" in msgs["system"]
+        assert "数据唯一化" in msgs["system"]
+        assert "delete 参数按接口定义" in msgs["system"]
+        for k in ("B 用例内容", "A 数据分析", "接口详情文档"):
+            assert k in msgs["human"]
+
+    def test_no_project_specific_retcode(self):
+        """不硬编码任何项目特例取值（retCode 1/0）——断言值委托接口返回定义。"""
+        text = self._render()["system"]
+        assert "retCode: 1" not in text
+        assert "retCode: 0" not in text
+        assert "成功=1" not in text
+
+
+class TestFormatYamlPromptNoProjectRetcode:
+    """两段式 format_yaml_data_prompt 同思路：不硬编码项目特例 retCode 取值。"""
+
+    @staticmethod
+    def _render() -> str:
+        from prompts.extraction_prompts import format_yaml_data_prompt
+        m = format_yaml_data_prompt().format_messages(
+            data_factory_methods="factory_text",
+            api_definitions="api_defs",
+            data_analysis="analysis",
+            test_case_logic="test_case_logic",
+            user_context="user_ctx",
+            db_schema="db_schema",
+        )
+        return {x.type: x.content for x in m}["system"]
+
+    def test_no_retcode_zero_hardcode(self):
+        """示例与规则均无 retCode: 0 / $.retCode 可照抄字面量。"""
+        text = self._render()
+        assert "retCode: 0" not in text
+        assert "$.retCode" not in text
+
+    def test_assertion_value_from_return_definition(self):
+        """铁律 19：断言期望值取自接口返回定义（同单节点思路）。"""
+        assert "返回定义中真实给出的字段" in self._render()
+
+
+# ============================================================
 # M8 — Phase C 接口定义解析与缺失阻断（web/tasks._resolve_api_defs）
 # ============================================================
 

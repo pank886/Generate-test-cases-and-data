@@ -87,20 +87,40 @@ def invoke_think(bound_llm, messages, max_retries: int | None = None,
     retries = config.MAX_RETRIES if max_retries is None else max_retries
     for attempt in range(retries + 1):
         result = bound_llm.invoke(messages)
-        if reasoning_label:
-            _rc = getattr(result, "reasoning_content", None)
-            if _rc:
-                log_thinking(f"{reasoning_label}_thinking", label, str(_rc),
-                             prompt_label="reasoning_content")
+        # reasoning_label 存在时按标签采集 reasoning_content（单节点 thinking 监测）；
+        # 否则保持通用 _log_reasoning_content（{label} 思考内容）路径，避免双写
+        reasoning = _extract_reasoning_content(result) if reasoning_label else None
+        if reasoning:
+            log_thinking(f"{reasoning_label}_thinking", label, str(reasoning),
+                         prompt_label="reasoning_content")
         text = result.content if hasattr(result, "content") else str(result)
         if text and text.strip():
-            _log_reasoning_content(result, label)
+            if not reasoning_label:
+                _log_reasoning_content(result, label)
             return text
         if attempt < retries:
             logger.warning(
                 "   ⚠️ %s 返回空 content（第 %d 次），复用同一输入重试第 %d 次",
                 label, attempt + 1, attempt + 2)
     raise RuntimeError(f"{label} 连续 {retries + 1} 次返回空 content，已终止")
+
+
+def _extract_reasoning_content(result) -> str | None:
+    """从 ChatResult / AIMessage 提取 additional_kwargs 中的 reasoning_content。
+
+    DeepSeekChatOpenAI._create_chat_result 已把 reasoning_content 回补到
+    additional_kwargs（agent_components/llm/deepseek.py:_restore_reasoning_content）；
+    此处统一读取路径，供 invoke_think 与 _log_reasoning_content 复用。
+    无思考内容（thinking 关闭 / 模型未返回 / 结构不符）时返回 None。
+    """
+    try:
+        if hasattr(result, "generations"):
+            msg = result.generations[0].message  # ChatResult 路径
+        else:
+            msg = result  # AIMessage 直接返回路径
+        return msg.additional_kwargs.get("reasoning_content")
+    except (AttributeError, IndexError, TypeError):
+        return None
 
 
 def _log_reasoning_content(result, label: str) -> None:
@@ -110,14 +130,7 @@ def _log_reasoning_content(result, label: str) -> None:
     additional_kwargs；此处按节点标签记录，标注是哪个流程节点的思考。
     无思考内容（thinking 关闭 / 模型未返回）时静默跳过。
     """
-    try:
-        if hasattr(result, "generations"):
-            msg = result.generations[0].message  # ChatResult 路径
-        else:
-            msg = result  # AIMessage 直接返回路径
-        reasoning = msg.additional_kwargs.get("reasoning_content")
-    except (AttributeError, IndexError, TypeError):
-        return
+    reasoning = _extract_reasoning_content(result)
     if not reasoning:
         return
     from observability import log_thinking

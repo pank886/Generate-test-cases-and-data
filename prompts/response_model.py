@@ -514,8 +514,9 @@ class TestCase(BaseModel):
             rule = "validation为空"
             msg = (
                 f"case '{self.case_name}' 的 validation 为空数组。"
-                "validation 每步至少包含一条断言（如 {eq: {retCode: 0}}），禁止 validation: []。"
-                "导出/下载类接口不便校验响应体时，也至少校验状态码: {eq: {retCode: 0}}。"
+                "validation 每步至少包含一条断言（如 {eq: {$.retCode: <接口返回定义中的成功取值>}}），"
+                "禁止 validation: []。"
+                "导出/下载类接口不便校验响应体时，也至少校验状态码: {contains: {status_code: 200}}。"
             )
             ValidationInterceptor.record(rule, msg)
             raise ValueError(msg)
