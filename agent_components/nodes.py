@@ -640,6 +640,19 @@ class ChatTestAgentGraph(RetrievalMixin, GenerationMixin):
             logger.error("接口定义快照写入失败（Phase C 确认时将按 M8 阻断）: %s",
                          api_defs_path, exc_info=True)
 
+        # 模块作用域清单随计划落盘 —— Phase C 按此收敛接口定义范围
+        # （模块绑定 + 关联模块绑定，2026-08-20 用户决策；B 拿快照 / C 拿详情）。
+        module_scope_path = os.path.join(output_dir, "module_scope.json")
+        try:
+            with open(module_scope_path, "w", encoding="utf-8") as f:
+                json.dump({
+                    "module": state.get("confirmed_module") or "",
+                    "related_modules": state.get("related_modules") or [],
+                }, f, ensure_ascii=False, indent=2)
+            logger.info(f"   🎯 模块作用域已保存: {module_scope_path}")
+        except OSError:
+            logger.warning("模块作用域清单写入失败: %s", module_scope_path, exc_info=True)
+
         fail_warn = f"（{len(failed_details)} 行未通过校验，需人工审查）" if failed_details else ""
         n_modules = len(set(tc.story for tc in valid_cases))
         n_pres = len(all_shared_pres)

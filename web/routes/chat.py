@@ -11,8 +11,13 @@ router = APIRouter(tags=["chat"])
 @router.post("/confirm-plan")
 async def confirm_plan(excel_path: str = Form(None),
                        user_ctx: str = Form(""),
+                       module_name: str = Form(""),
                        background_tasks: BackgroundTasks = None):
-    """确认测试计划 → 立即返回 task_id，后台异步生成 .py + .yaml。"""
+    """确认测试计划 → 立即返回 task_id，后台异步生成 .py + .yaml。
+
+    module_name：模块作用域（模块绑定 + 关联模块绑定接口，2026-08-20 收敛）；
+    可空——后台优先从计划目录 module_scope.json 读取。
+    """
     import config
     from web.state import _phase_b_components, _create_task
     from observability import get_logger
@@ -41,8 +46,11 @@ async def confirm_plan(excel_path: str = Form(None),
 
     task_id = await _create_task()
     from web.tasks import _confirm_plan_bg
+    # 2026-08-20：修位置参数错位（原第 3 个位置参数把 user_ctx 传进 api_defs_json 槽位），
+    # 改关键字传参 + 透传 module_name（模块作用域）。
     background_tasks.add_task(
-        _confirm_plan_bg, task_id, excel_path, user_ctx,
+        _confirm_plan_bg, task_id, excel_path,
+        user_ctx=user_ctx, module_name=module_name,
     )
     return {"success": True, "task_id": task_id,
             "message": "确认计划已提交，后台生成中"}

@@ -158,20 +158,37 @@ async def _process_file_bg(task_id: str, file_path: str, ext: str,
 # Phase C: 确认计划 → 生成 .py + .yaml
 # ========================================================================
 
-def _resolve_api_defs(excel_path: str, api_defs_json: str = "") -> str | None:
+def _resolve_api_defs(excel_path: str, api_defs_json: str = "",
+                      module_name: str = "") -> str | None:
     """解析 Phase C 所需的接口定义（规则 M8：缺失必须显式失败，禁止空定义续跑）。
 
-    2026-08-18 改：Phase C 直接用 SQL 从 documents 表读全部接口详情（body/return/header/annotations），
+    2026-08-18 改：Phase C 直接用 SQL 从 documents 表读接口详情（body/return/header/annotations），
     不再依赖 Phase B 快照——快照来自 ChromaDB 检索，返回结构缺 body/return，
     曾导致 YAML 生成无字段名可抄而瞎编（meterName/meterNo 等）。
 
+    2026-08-20 改：接口范围收敛——只读「测试模块绑定 + 模块关联模块绑定」的接口
+    （用户决策；关联模块发现后续增加语义检索），而非 SQL 全部记录。
+
     优先级:
       1. 显式入参 api_defs_json（非空且非 "[]"）——信任原样（兼容历史调用方）
-      2. SQL documents 表 doc_type='api' 全部记录（含 body/return/header/annotations）
+      2. 模块作用域详情：module_name 优先；空则从计划目录 module_scope.json 读模块名
+         → 该模块绑定 + 关联模块绑定的接口详情
+      3. 作用域为空（模块无绑定接口）→ 回退全部接口详情（避免空定义，警告）
+      4. SQL 无任何接口定义 → 返回 None（M8：调用方必须阻断任务）
     返回 None 表示无接口定义，调用方必须阻断任务，严禁以空值/假数据继续生成。
     """
     if api_defs_json and api_defs_json.strip() and api_defs_json.strip() != "[]":
         return api_defs_json
+
+    if not module_name:
+        module_name = _read_module_scope(excel_path)
+    if module_name:
+        scoped = _load_api_defs_scoped(module_name)
+        if scoped:
+            logger.info("SQL 读取接口定义（模块作用域 [%s]）: %d 个",
+                        module_name, len(scoped))
+            return _json.dumps(scoped, ensure_ascii=False, indent=2)
+        logger.warning("模块 [%s] 无绑定接口，回退全部接口定义", module_name)
 
     apis = _load_all_api_defs()
     if not apis:
@@ -180,10 +197,68 @@ def _resolve_api_defs(excel_path: str, api_defs_json: str = "") -> str | None:
     return _json.dumps(apis, ensure_ascii=False, indent=2)
 
 
-def _load_all_api_defs() -> list[dict]:
-    """从 SQL（documents 表）读取全部接口详情，供 Phase C 使用。
+def _read_module_scope(excel_path: str) -> str:
+    """读取计划目录 module_scope.json 的模块名（B→C 作用域契约，M8 产物传递）。
+
+    缺失/解析失败返回空串（调用方回退全部接口定义，不阻断旧计划）。
+    """
+    if not excel_path:
+        return ""
+    scope_path = os.path.join(os.path.dirname(excel_path), "module_scope.json")
+    try:
+        with open(scope_path, "r", encoding="utf-8") as f:
+            data = _json.load(f)
+        module = data.get("module") or ""
+        return module if isinstance(module, str) else ""
+    except (OSError, ValueError):
+        return ""
+
+
+def _load_api_defs_scoped(module_name: str) -> list[dict]:
+    """按模块作用域读取接口详情：模块绑定 + 关联模块绑定（+ 公共基础服务存在时）。
+
+    与 Phase B 检索口径一致（search_modules = {模块} ∪ 关联模块 ∪ 公共基础服务）。
+    返回 SQL 详情形式（body/return/header/annotations + apply_all），非 ChromaDB 概要。
+    """
+    from database import get_session_ctx
+    from database.operations import BindingOps, ModuleOps
+    from database.operations.bindings import discover_related_modules
+
+    scope_modules: list[str] = [module_name]
+    try:
+        with get_session_ctx() as session:
+            scope_modules.extend(
+                m for m in discover_related_modules(session, module_name)
+                if m != module_name
+            )
+            # 镜像 Phase B：公共基础服务模块存在时纳入（2026-08-20 决策口径）
+            try:
+                if (_config.COMMON_SERVICE_MODULE
+                        and _config.COMMON_SERVICE_MODULE not in scope_modules
+                        and ModuleOps.get_by_name(session, _config.COMMON_SERVICE_MODULE)):
+                    scope_modules.append(_config.COMMON_SERVICE_MODULE)
+            except Exception:
+                logger.debug("公共基础服务模块检查失败，跳过", exc_info=True)
+
+            api_doc_ids: set[str] = set()
+            for m in dict.fromkeys(scope_modules):
+                for d in BindingOps.get_bound_docs(session, m):
+                    if d.doc_type == "api":
+                        api_doc_ids.add(d.id)
+    except Exception as e:
+        logger.error("模块作用域计算失败: %s", e, exc_info=True)
+        return []
+
+    if not api_doc_ids:
+        return []
+    return _load_all_api_defs(doc_ids=api_doc_ids)
+
+
+def _load_all_api_defs(doc_ids: list[str] | set[str] | None = None) -> list[dict]:
+    """从 SQL（documents 表）读取接口详情，供 Phase C 使用。
 
     绕过 ChromaDB 检索（检索结果结构上缺 body/return，见 2026-08-18 根因）。
+    doc_ids 非 None 时仅返回指定文档的接口（2026-08-20 模块作用域收敛）；None = 全部。
     annotations 列已含 is_export/has_path_params 持久化结果，此处再跑一次
     ApiAnnotationRegistry.apply_all（幂等、不覆盖人工编辑），保证新注册检测器也生效。
     """
@@ -194,7 +269,10 @@ def _load_all_api_defs() -> list[dict]:
     apis = []
     try:
         with get_session_ctx() as session:
-            records = session.query(DocModel).filter_by(doc_type="api").all()
+            q = session.query(DocModel).filter_by(doc_type="api")
+            if doc_ids:
+                q = q.filter(DocModel.id.in_(doc_ids))
+            records = q.all()
             for d in records:
                 if not d.api_url:
                     continue
@@ -216,11 +294,14 @@ def _load_all_api_defs() -> list[dict]:
 
 
 async def _confirm_plan_bg(task_id: str, excel_path: str | None,
-                          api_defs_json: str = "", user_ctx: str = ""):
+                          api_defs_json: str = "", user_ctx: str = "",
+                          module_name: str = ""):
     """后台执行确认计划 -> 生成 .py + .yaml。
 
     api_defs_json / user_ctx 由 /confirm-plan 端点显式传入，
     不再依赖全局 _last_api_defs / _last_user_input。
+    module_name：模块作用域（模块绑定 + 关联模块绑定接口，2026-08-20 收敛）；
+    空时由 _resolve_api_defs 回退读取计划目录 module_scope.json。
     """
     import glob
     import config
@@ -253,7 +334,7 @@ async def _confirm_plan_bg(task_id: str, excel_path: str | None,
             return
 
         # 规则 M8：接口定义缺失必须显式阻断，禁止空定义盲写 YAML
-        resolved_defs = _resolve_api_defs(excel_path, api_defs_json)
+        resolved_defs = _resolve_api_defs(excel_path, api_defs_json, module_name)
         if resolved_defs is None:
             await _update_task(
                 task_id, status="failed",

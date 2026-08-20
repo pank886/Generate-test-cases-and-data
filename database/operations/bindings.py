@@ -170,3 +170,50 @@ class BindingOps:
             .filter(Document.id.in_(bound_ids))
             .all()
         )
+
+
+def discover_related_modules(session: Session, module_name: str) -> list[str]:
+    """发现模块的关联模块（绑定图三路召回，跳过自身，去重排序）。
+
+    三路召回策略（与 Phase B 节点 extract_related_modules 同源）：
+      1. module↔module 直接绑定 —— 模块之间的显式关联
+      2. product/axure 文档 → 其他模块 —— 文档被多个模块共享
+      3. API 文档 → 其他模块 —— API 被多个模块引用
+
+    直接查询 SQLite 绑定关系，不依赖 ChromaDB 检索结果（不完整）。
+
+    2026-08-20：从 retrievers._extract_related_modules 抽取为共享函数，
+    Phase B（retrievers）与 Phase C（web/tasks）复用同一关联模块口径；
+    后续「语义检索」增强关联模块发现的挂钩点即此函数。
+    """
+    related: set[str] = set()
+    if not module_name:
+        return []
+
+    # 路径 1：module↔module 直接绑定
+    mod_partners = BindingOps.get_partners(
+        session, "module", module_name, partner_type="module",
+    )
+    for _ptype, pname in mod_partners:
+        if pname and pname != module_name:
+            related.add(pname)
+
+    # 路径 2+3：通过模块下所有类型文档查找关联模块
+    bound_docs = BindingOps.get_bound_docs(session, module_name)
+    product_ids = [d.id for d in bound_docs if d.doc_type == "product"]
+    axure_ids = [d.id for d in bound_docs if d.doc_type == "axure"]
+    api_ids = [d.id for d in bound_docs if d.doc_type == "api"]
+    for doc_type, doc_ids in (("product", product_ids),
+                              ("axure", axure_ids),
+                              ("api", api_ids)):
+        if not doc_ids:
+            continue
+        results = BindingOps.get_partners_batch(
+            session, doc_type, doc_ids, partner_type="module",
+        )
+        for _doc_id, partners in results.items():
+            for _ptype, pname in partners:
+                if pname and pname != module_name:
+                    related.add(pname)
+
+    return sorted(related)

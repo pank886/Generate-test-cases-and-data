@@ -1275,3 +1275,104 @@ class TestResolveApiDefs:
         import web.tasks as _tasks
         monkeypatch.setattr(_tasks, "_load_all_api_defs", lambda: [])
         assert _resolve_api_defs(self._excel(tmp_path), "") is None
+
+    # ---- 2026-08-20 模块作用域收敛（模块绑定 + 关联模块绑定）----
+
+    def test_module_scope_returns_only_bound_apis(self):
+        """module_name → 仅模块绑定接口（详情形式，非全量 72）。"""
+        resolved = _resolve_api_defs("", "", module_name="智慧用电")
+        assert resolved
+        apis = json.loads(resolved)
+        urls = {a.get("url") for a in apis}
+        assert urls == {
+            "/electricMeter/add", "/electricMeter/delete",
+            "/electricMeter/getList", "/electricMeter/getParentList",
+        }
+        assert len(apis) < 60  # 已收敛，非全部
+        add = next(a for a in apis if a.get("url") == "/electricMeter/add")
+        names = {f.get("name") for f in add.get("body", [])}
+        assert {"name", "code", "meterDeviceType", "meterTypeCode"} <= names  # 详情完整
+        assert len(add.get("return", [])) >= 1
+
+    def test_module_scope_reads_module_scope_file(self, tmp_path):
+        """计划目录 module_scope.json → 免传 module_name 也作用域化（B→C 产物传递）。"""
+        scope = tmp_path / "module_scope.json"
+        scope.write_text(json.dumps(
+            {"module": "智慧用电", "related_modules": []},
+            ensure_ascii=False), encoding="utf-8")
+        resolved = _resolve_api_defs(self._excel(tmp_path), "")
+        assert resolved
+        urls = {a.get("url") for a in json.loads(resolved)}
+        assert "/electricMeter/add" in urls
+        assert len(urls) == 4
+
+    def test_module_scope_empty_falls_back_to_all(self):
+        """无绑定接口的模块 → 回退全部接口定义（不空定义续跑）。"""
+        resolved = _resolve_api_defs("", "", module_name="不存在的模块")
+        assert resolved
+        apis = json.loads(resolved)
+        assert len(apis) >= 60  # 回退全量
+
+    def test_module_scope_includes_related_modules(self, monkeypatch):
+        """关联模块绑定接口纳入作用域（monkeypatch 关联发现）。"""
+        # 园区管理本身绑定 0 接口；关联模块智慧用电绑定 4 个 → 全部纳入
+        monkeypatch.setattr(
+            "database.operations.bindings.discover_related_modules",
+            lambda session, name: ["智慧用电"],
+        )
+        resolved = _resolve_api_defs("", "", module_name="园区管理")
+        assert resolved
+        urls = {a.get("url") for a in json.loads(resolved)}
+        assert "/electricMeter/add" in urls  # 关联模块绑定接口被纳入
+
+
+# ============================================================
+# discover_related_modules（关联模块三路召回，共享函数）
+# ============================================================
+
+from database.operations.bindings import discover_related_modules as _discover_related
+
+
+class TestDiscoverRelatedModules:
+    """绑定图三路召回：module↔module + product/axure/api→module；去重、排除自身、排序。"""
+
+    class _FakeSession:
+        pass
+
+    def test_module_module_direct(self, monkeypatch):
+        """路径1 module↔module：取关联、跳过自身、去重排序。"""
+        import database.operations.bindings as _b
+        monkeypatch.setattr(_b.BindingOps, "get_partners",
+                            lambda *a, **k: [("module", "B"), ("module", "智慧用电"),
+                                             ("module", "A"), ("module", "B")])
+        monkeypatch.setattr(_b.BindingOps, "get_bound_docs", lambda *a, **k: [])
+        monkeypatch.setattr(_b.BindingOps, "get_partners_batch", lambda *a, **k: {})
+        assert _discover_related(self._FakeSession(), "智慧用电") == ["A", "B"]
+
+    def test_doc_to_module_paths(self, monkeypatch):
+        """路径2+3：product/axure/api 文档 → 共享模块。"""
+        import database.operations.bindings as _b
+
+        class _D:
+            def __init__(self, did, doc_type):
+                self.id, self.doc_type = did, doc_type
+
+        monkeypatch.setattr(_b.BindingOps, "get_partners", lambda *a, **k: [])
+        monkeypatch.setattr(_b.BindingOps, "get_bound_docs",
+                            lambda *a, **k: [_D("p1", "product"), _D("a1", "axure"),
+                                             _D("api1", "api")])
+        monkeypatch.setattr(_b.BindingOps, "get_partners_batch",
+                            lambda *a, **k: {"p1": [("module", "M2")],
+                                             "a1": [("module", "M1")],
+                                             "api1": [("module", "M3")]})
+        # a1 → M1 是自身，被排除
+        assert _discover_related(self._FakeSession(), "M1") == ["M2", "M3"]
+
+    def test_empty_module_returns_empty(self, monkeypatch):
+        """空模块名 / 无绑定 → 空列表。"""
+        import database.operations.bindings as _b
+        monkeypatch.setattr(_b.BindingOps, "get_partners", lambda *a, **k: [])
+        monkeypatch.setattr(_b.BindingOps, "get_bound_docs", lambda *a, **k: [])
+        monkeypatch.setattr(_b.BindingOps, "get_partners_batch", lambda *a, **k: {})
+        assert _discover_related(self._FakeSession(), "") == []
+        assert _discover_related(self._FakeSession(), "孤立模块") == []
