@@ -653,6 +653,33 @@ class TestYamlOutputHygiene:
                 {"jsonpath": "$.msg", "operator": "eq", "value": "成功"},
             ])
 
+    def test_opkey_jsonpath_as_block_key_rejected(self):
+        """块键是 JSONPath（{$.retCode: {eq: 1}}）→ 校验失败进修复轮。
+
+        2026-08-25 缺口：块键数量==1 但块键不是合法运算符时旧校验整体短路放行。
+        块键必须是运算符 eq/contains/ne/db，JSONPath 写在操作数 dict 的键位。
+        """
+        with pytest.raises(ValueError, match="不是合法运算符"):
+            YamlTestCase(case_name="t", validation=[
+                {"$.retCode": {"eq": 1}},
+            ])
+
+    def test_opkey_bare_field_as_block_key_rejected(self):
+        """裸字段名当块键（{status_code: 200}）→ 校验失败进修复轮。"""
+        with pytest.raises(ValueError, match="不是合法运算符"):
+            YamlTestCase(case_name="t", validation=[
+                {"status_code": 200},
+            ])
+
+    def test_opkey_legit_operators_pass(self):
+        """合法运算符块键 eq/contains/ne/db 不被误拦。"""
+        YamlTestCase(case_name="t", validation=[
+            {"eq": {"code": 0}},
+            {"contains": {"message": "成功"}},
+            {"ne": {"code": 1}},
+            {"db": {"sql": "select 1"}},
+        ])
+
     # ---- 问题1: baseInfo 无 header（公共头 yq-app-code/token 由框架常量注入，不生成） ----
 
     def test_default_header_injected_for_json_body(self):

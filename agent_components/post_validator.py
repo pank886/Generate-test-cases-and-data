@@ -14,6 +14,7 @@ from observability import get_logger
 logger = get_logger(__name__)
 
 _PLACEHOLDER_RE = re.compile(r'\$\{[^}]+\}')
+_VALID_OPS = {"eq", "contains", "ne", "db"}
 
 
 class YamlPostValidator:
@@ -43,6 +44,7 @@ class YamlPostValidator:
                     continue
                 issues.extend(self._check_delete_body_wrapper(step, path))
                 issues.extend(self._check_assertion_dynamic_key(step, path))
+                issues.extend(self._check_assertion_op_key(step, path))
                 issues.extend(self._check_malformed_assertion(step, path))
         return issues
 
@@ -113,7 +115,35 @@ class YamlPostValidator:
                         })
         return issues
 
-    # ---- 检查 3：断言格式拼合检测 ----
+    # ---- 检查 3：断言块键白名单检测 ----
+
+    def _check_assertion_op_key(self, step: dict, yaml_path: str) -> list[dict]:
+        """检测 validation 块键不是合法运算符（eq/contains/ne/db）。
+
+        P0 兜底：response_model 层已拦截的畸形块若仍落盘，在此标记，
+        供修复轮消费。块键必须是运算符，JSONPath 写在操作数 dict 的键位。
+        """
+        issues = []
+        for tc in step.get("testCase") or []:
+            validation = tc.get("validation") or []
+            for item in validation:
+                if not isinstance(item, dict):
+                    continue
+                for key in item.keys():
+                    if key not in _VALID_OPS:
+                        issues.append({
+                            "yaml_path": yaml_path,
+                            "check": "assertion_op_key",
+                            "severity": "P0",
+                            "line": 0,
+                            "current": f"{key}: ...",
+                            "expected": "块键必须是运算符 eq/contains/ne/db 之一",
+                            "fix_hint": "断言块键必须是运算符，JSONPath 写在操作数 dict 的键位，"
+                                        "如 {eq: {$.code: 1}}，禁止 {$.retCode: {eq: 1}} 等写法",
+                        })
+        return issues
+
+    # ---- 检查 4：断言格式拼合检测 ----
 
     def _check_malformed_assertion(self, step: dict, yaml_path: str) -> list[dict]:
         """检测 validation 中 key 或 value 有未配对的引号。

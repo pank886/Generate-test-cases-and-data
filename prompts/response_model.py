@@ -446,6 +446,17 @@ class TestCase(BaseModel):
                 ValidationInterceptor.record(rule, msg)
                 raise ValueError(msg)
             op, operand = next(iter(v.items()))
+            if op not in ("eq", "contains", "ne", "db"):
+                rule = "断言块键非法"
+                msg = (
+                    f"validation[{i}] 断言块键 '{op}' 不是合法运算符"
+                    "（只允许 eq/contains/ne/db）。执行框架只接受单键断言块"
+                    " {eq|contains|ne|db: {字段: 期望}}；块键必须是运算符，"
+                    "JSONPath 写在操作数 dict 的键位，禁止 {$.retCode: {eq: 1}}、"
+                    "{status_code: 200} 这类块键不是运算符的写法。"
+                )
+                ValidationInterceptor.record(rule, msg)
+                raise ValueError(msg)
             if op in ("eq", "contains", "ne") and not isinstance(operand, dict):
                 rule = "断言操作数非dict"
                 msg = (

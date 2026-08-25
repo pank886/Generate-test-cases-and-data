@@ -126,7 +126,11 @@ def repair_excel_plan_prompt() -> ChatPromptTemplate:
          "3. 若共享前置（PRE-xxx）的步骤含错误接口路径，在 shared_preconditions 中输出修正后的版本（按原 id 修正即可）\n"
          "4. 若「数据库表结构信息」为空，禁止在 expected 中使用 [db] 断言，改用 [eq]/[contains]/[ne]\n"
          "5. 修正后必须满足上方「字段硬约束」：五字段齐全、步骤/预期条数一致、前置引用有效\n"
-         "6. 禁止 Markdown，只输出 JSON"),
+         "6. 枚举/取值字段（值来自接口定义 desc，如电表类型、接入方式、分类等）在前置（PRE-xxx）"
+         "与步骤中禁止写死具体值，只写字段名与取值来源（如「电表类型 meterDeviceType 取合法枚举」）；"
+         "被跨用例引用的标识/编码字段（如 code/name/sceneCode）不受此限，可保留具体值；"
+         "仅当需多个用例（>2）以不同取值区分时才允许写出具体枚举值\n"
+         "7. 禁止 Markdown，只输出 JSON"),
         ("human", "请输出修正后的测试用例 JSON：")
     ])
 
@@ -338,60 +342,70 @@ def translate_to_en_prompt() -> ChatPromptTemplate:
 
 
 def generate_yaml_data_single_prompt() -> ChatPromptTemplate:
-    """Phase C YAML 数据 — 单节点专用：schema 驱动，无手写示例。
+    """Phase C YAML 数据生成 — 单节点专用（schema 驱动，无示例）。
 
-    thinking + json_object 一次调用（thinking 走 reasoning_content）。
-    与两段式的 format_yaml_data_prompt 区别：
-      - 格式唯一来源 = 下方 json_schema（TestData.model_json_schema()），无示例块；
-      - json_schema 为固定内容，放 system 段（提升 schema 遵循命中率 + system 消息
-        字节一致利于 prompt 缓存）；human 只放逐用例/逐接口的可变内容；
-      - 铁律为抽象规则措辞，不含可照抄的断言字面量（防 LLM 照抄）；
-      - 含 19 号文件 prompt 可修缺陷：成功/失败断言约定、数据唯一化、delete 按定义。
+    2026-08-25 替换为 v3 结构：分节标题（# 角色 / 数据工厂 / schema / 铁律）+ 完整规则措辞。
+    A/B 对比（logs/prompt_ab）：v3 修复精简措辞引入的断言块键倒置回归（{$.retCode: {eq: 1}}），
+    断言结构 0 非法块，与旧版同质量且更快；value > desc > 用例值 优先级保留在 human 段。
     """
+
+    # ===================== SYSTEM（固定规则） =====================
+    system_template = """
+    # 角色
+    你是数据格式化专家。输出严格遵循下方 yaml 格式 schema 的 TestData JSON（Pydantic 校验，字段与类型一个都不能错）。
+    本 prompt 不含任何具体业务示例，禁止编造与输入无关的固定数据。
+    
+    # 可用数据工厂方法（动态占位符只能从此清单选择，严格按 syntax 填写）
+    {data_factory_methods}
+    
+    # yaml 格式 schema（输出结构唯一来源，禁止自创结构或推断字段）
+    {json_schema}
+    
+    # 铁律（共 12 条，内容唯一来源 = 上方 schema + human 段的 B/A/接口文档）
+    1. 顶层只能有一个 data 数组，每元素含 baseInfo 与 testCase 两个键
+    2. 请求体三选一（json/params/data 只出现一个）：优先按接口定义 body 字段的 `location` 选——
+       `location=query` 的字段 → params，`location=body` 的字段 → json；接口定义未标 location 时
+       按 HTTP 方法——GET/DELETE 用 params，POST/PUT/PATCH 用 json
+    3. url 与接口定义中的路径完全一致：只写路径、禁 query/域名/占位符表达式；路径参数不得替换成具体值
+    4. 每个 baseInfo 必有 header 键：JSON 请求体方法写 Content-Type=application/json，其余写空对象
+    5. validation 数组不得为空，每步至少一条断言；运算符只允许 eq/contains/ne/db；
+       每条断言必须且只能是一个单键块，即一个运算符键对应一个断言对象，
+       禁止 check/expected/operator、jsonpath/operator/value 等多键写法
+    6. status_code 只能被 contains 断言，且 contains 的值必须是字典对象（键=字段名、值=期望值）；禁止用 eq/ne 断言 status_code
+    7. JSONPath 一律以 $. 开头
+    8. extract/input_extract 用不到就整字段省略，禁止输出空对象或 null
+    9. 成功/失败断言的期望值取自接口返回定义：断言的字段与期望值必须取自「接口详情文档」返回定义中真实给出的字段/取值/语义；
+       正向用例断言业务成功对应的返回取值，反向用例断言失败返回取值；返回定义未给出明确成功/失败取值时，退化为
+       contains 字段存在性或 status_code 断言，禁止臆造返回定义之外的固定取值
+    10. 数据唯一化：设备名/编码等唯一键必须动态生成（${{ }} 工厂方法或时间戳/随机后缀），禁止输出固定假值——防跨套件重名与套件内自碰撞
+    11. delete 参数按接口定义：delete 请求参数严格按接口定义填写，禁止输出接口定义之外的任何字段
+    12. 禁止 Markdown；只输出纯净 JSON（Pydantic 校验，字段/类型一个都不能错）
+    """
+
+    # ===================== HUMAN（可变输入） =====================
+    human_template = """
+    # B 用例内容（本用例执行步骤 + 预期结果）
+    {test_case_logic}
+    
+    # A 数据分析（生成前思考要点引导）
+    {data_analysis}
+    
+    # 接口详情文档（路径/请求字段/返回语义，取值唯一来源）
+    {api_definitions}
+    
+    # 用户意图
+    {user_context}
+    
+    # 数据库表结构信息（为空时禁止 db 断言）
+    {db_schema}
+    
+    请严格按照 system 段的 yaml 格式 schema 输出 TestData JSON：字段名与结构以 schema 为准，
+    字段值按 value > desc > 用例值 的优先级决定（异常用例除外），禁止使用示例或占位数据。
+    """
+
     return ChatPromptTemplate.from_messages([
-        ("system",
-         "你是数据格式化专家。yaml 格式 schema（固定内容）见下方 system 段；B 用例内容、"
-         "A 数据分析、接口详情文档在 human 段。一次输出 TestData 模型的 JSON（Pydantic "
-         "校验，字段与类型一个都不能错）。本 prompt 不含任何具体业务示例，禁止编造与输入"
-         "无关的固定数据。\n\n"
-         "### 可用数据工厂方法（动态占位符只能从此清单选择，严格按 syntax 填写）\n"
-         "{data_factory_methods}\n\n"
-         "### yaml 格式 schema（输出结构唯一来源，禁止自创结构/推断字段）\n"
-         "{json_schema}\n\n"
-         "### 铁律（抽象规则，无示例；内容唯一来源 = 上方 yaml 格式 schema + "
-         "human 段 B 用例内容 / A 数据分析 / 接口详情文档）\n"
-         "1. 顶层只能有一个 data 数组，每元素含 baseInfo 与 testCase 两个键\n"
-         "2. 请求体三选一（json/params/data 只出现一个）：优先按接口定义 body 字段的 `location` 选——"
-         "`location=query` 的字段 → params，`location=body` 的字段 → json；接口定义未标 location 时"
-         "按 HTTP 方法——GET/DELETE 用 params，POST/PUT/PATCH 用 json\n"
-         "3. url 与接口定义中的路径完全一致：只写路径、禁 query/域名/占位符表达式；"
-         "路径参数不得替换成具体值\n"
-         "4. 每个 baseInfo 必有 header 键：JSON 请求体方法写 Content-Type=application/json，"
-         "其余写空对象\n"
-         "5. validation 数组不得为空，每步至少一条断言；运算符只允许 eq/contains/ne/db；"
-         "每条断言必须且只能是一个单键块，即一个运算符键对应一个断言对象，"
-         "禁止 check/expected/operator、jsonpath/operator/value 等多键写法\n"
-         "6. status_code 只能被 contains 断言，且 contains 的值必须是字典对象"
-         "（键=字段名、值=期望值）；禁止用 eq/ne 断言 status_code\n"
-         "7. JSONPath 一律以 $. 开头\n"
-         "8. extract/input_extract 用不到就整字段省略，禁止输出空对象或 null\n"
-         "9. **成功/失败断言的期望值取自接口返回定义**：断言的字段与期望值必须取自"
-         "「接口详情文档」返回定义中真实给出的字段/取值/语义；正向用例断言业务成功对应的"
-         "返回取值，反向用例断言失败返回取值；返回定义未给出明确成功/失败取值时，退化为"
-         "contains 字段存在性或 status_code 断言，禁止臆造返回定义之外的固定取值\n"
-         "10. **数据唯一化**：设备名/编码等唯一键必须动态生成（${{ }} 工厂方法或时间戳/"
-         "随机后缀），禁止输出固定假值——防跨套件重名与套件内自碰撞\n"
-         "11. **delete 参数按接口定义**：delete 请求参数严格按接口定义填写，禁止输出"
-         "接口定义之外的任何字段\n"
-         "12. 禁止 Markdown；只输出纯净 JSON（Pydantic 校验，字段/类型一个都不能错）"),
-        ("human",
-         "### B 用例内容（本用例执行步骤 + 预期结果）\n{test_case_logic}\n\n"
-         "### A 数据分析（生成前思考要点引导）\n{data_analysis}\n\n"
-         "### 接口详情文档（路径/请求字段/返回语义，取值唯一来源）\n{api_definitions}\n\n"
-         "### 用户意图\n{user_context}\n\n"
-         "### 数据库表结构信息（为空时禁止 db 断言）\n{db_schema}\n\n"
-         "请严格按照 system 段的 yaml 格式 schema 输出 TestData JSON：字段名与结构以 schema 为准，字段值根据上述分析和用例上下文合理生成，可优先参考用例中已出现的具体取值，禁止使用示例或占位数据。"
-         )
+        ("system", system_template),
+        ("human", human_template),
     ])
 
 
@@ -556,10 +570,14 @@ def analyze_api_mapping_prompt() -> ChatPromptTemplate:
          "1. 将每个 API 接口映射到对应的业务场景和功能点\n"
          "2. 分析接口间的数据依赖关系（produces → consumes）\n"
          "3. 识别跨模块接口调用链\n"
-         "4. 标注数据流向（哪个接口产出什么数据 → 哪个接口消费）\n\n"
+         "4. 标注数据流向（哪个接口产出什么数据 → 哪个接口消费）\n"
+         "5. 对每个写接口（POST/PUT/PATCH）的 body 字段，标注哪些是枚举/取值字段及其合法取值，"
+         "格式为「字段名：枚举值1/枚举值2/...」，如 meterDeviceType：单相/双相/三相、"
+         "accessMethod：网关接入/电表直连/平台对接、meterTypeCode：1/2/3；"
+         "取值来源以接口定义 body 字段的 desc/备注为准，无明确枚举的不臆造\n\n"
          "### 输出\n"
          "自由文本分析报告，不需要 JSON 格式。\n"
-         "结构建议：接口→场景映射 → 数据依赖链 → 跨模块调用链 → 关键约束。"),
+         "结构建议：接口→场景映射 → 数据依赖链 → 跨模块调用链 → 关键约束（含枚举字段取值标注）。"),
         ("human",
          "### 模块名\n{module_name}\n\n"
          "### 测试场景总结（Step 1 输出）\n{scenario_analysis}\n\n"
