@@ -18,7 +18,7 @@ def _extract_text(file_path: str) -> str:
             t = p.extract_text()
             if t: texts.append(t)
         return "\n\n".join(texts)
-    elif ext in (".md", ".txt"):
+    elif ext in (".md", ".txt", ".json"):
         with open(file_path, "r", encoding="utf-8") as f:
             return f.read()
     elif ext == ".docx":

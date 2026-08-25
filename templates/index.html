@@ -27,7 +27,7 @@
     </label>
     <label class="upload-card" ondragover="event.preventDefault();this.classList.add('dragover')" ondragleave="this.classList.remove('dragover')" ondrop="handleDrop(event,'api')">
       <div class="icon">📡</div><div class="title">接口文档</div><div class="hint">Markdown，LLM 拆分后确认入库</div>
-      <input type="file" accept=".md,.txt" onchange="uploadFile(this,'api')">
+      <input type="file" accept=".md,.txt,.json" onchange="uploadFile(this,'api')">
     </label>
     <label class="upload-card" ondragover="event.preventDefault();this.classList.add('dragover')" ondragleave="this.classList.remove('dragover')" ondrop="handleDrop(event,'axure')">
       <div class="icon">🎨</div><div class="title">Axure 原型</div><div class="hint">ZIP 压缩包，提取页面结构和交互</div>

@@ -208,9 +208,10 @@ function renderPendingBanner() {
 var _llmResultCache = null;  // LLM 提取结果缓存，供选择弹窗使用
 
 function showExtractChoiceModal(data, fileName) {
-  /* 选择提取方式：代码提取（YApi MD）vs LLM 提取 */
+  /* 选择提取方式：代码提取（YApi MD）/ JSON 代码提取 / LLM 提取 */
   _llmResultCache = data;
   var hasLLM = data.apis && data.apis.length;
+  var isJson = /\.json$/i.test(fileName || '');
   showModal('<h3>📡 选择接口提取方式</h3>'
     + '<p style="font-size:12px;color:var(--text-dim);margin-bottom:12px">文件: <b>' + esc(fileName) + '</b></p>'
     + '<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:12px">'
@@ -221,6 +222,10 @@ function showExtractChoiceModal(data, fileName) {
     + '<div class="card" style="padding:16px;cursor:pointer;border:2px solid var(--border)" id="choice-llm" onclick="selectExtractMethod(\'llm\')">'
     + '<h3 style="color:var(--primary)">🤖 LLM 提取</h3>'
     + '<p style="font-size:11px;color:var(--text-dim)">适用于其他格式的 MD 文档。DeepSeek 分析提取，约需 1-5 分钟。</p>'
+    + '</div>'
+    + '<div class="card" style="padding:16px;cursor:pointer;border:2px solid ' + (isJson ? 'var(--success)' : 'var(--border)') + '" id="choice-json" onclick="selectExtractMethod(\'json\')">'
+    + '<h3 style="color:var(--success)">📄 JSON 代码提取</h3>'
+    + '<p style="font-size:11px;color:var(--text-dim)">适用于 <b>YApi 导出的 api.json</b>。确定性解析 req_query / req_body_other / res_body，query 与 body 分层，秒级完成。</p>'
     + '</div></div>'
     + '<div class="btn-row"><button class="btn btn-outline" id="cancel-extract-btn">取消</button></div>');
   document.getElementById('cancel-extract-btn').onclick = function() {
@@ -241,10 +246,12 @@ function selectExtractMethod(method) {
   if (!data) { toast('数据丢失，请重新上传'); closeModal(); return; }
   closeModal();
   var banner = document.getElementById('pending-api-banner');
-  if (banner) { banner.style.display = ''; banner.innerHTML = '<h3>⏳ ' + (method === 'llm' ? 'LLM 提取中（DeepSeek，约需 1-5 分钟）...' : '代码提取中...') + '</h3>'; }
+  var statusText = method === 'llm' ? 'LLM 提取中（DeepSeek，约需 1-5 分钟）...' : (method === 'json' ? 'JSON 解析中...' : '代码提取中...');
+  if (banner) { banner.style.display = ''; banner.innerHTML = '<h3>⏳ ' + statusText + '</h3>'; }
   var url = method === 'llm' ? '/api/upload/extract-api' : '/api/upload/extract-api-code';
   var fd = new FormData();
   fd.append('file_path', data.file_path);
+  if (method === 'json') { fd.append('format', 'json'); }
   fetch(url, { method: 'POST', body: fd }).then(r => r.json()).then(d => {
     if (d.success) {
       showApiConfirmModal(d, data.file_name || '');
@@ -267,20 +274,36 @@ function showApiConfirmModal(result, fileName) {
 
 function _renderApiConfirmModal(result, fileName) {
   const apis = result.apis || [], mod = result.module_name || '';
-  const rows = apis.map((a, i) => `<label style="display:flex;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid #eee"><input type="checkbox" checked data-idx="${i}"><b>${esc(a.method || '?')}</b> ${esc(a.url || '')} — ${esc(a.name || '')}</label>`).join('');
-  showModal(`<h3>📡 接口拆分确认</h3><p style="font-size:12px;color:var(--text-dim);margin-bottom:8px">模块: <b>${esc(mod)}</b> | 文件: ${esc(fileName)}</p><div style="max-height:400px;overflow-y:auto">${rows}</div>
+  // 按分类分组展示（annotations.category），无分类接口归到「未分类」
+  const catOrder = [], catMap = {};
+  apis.forEach((a, i) => {
+    const c = (a.annotations && a.annotations.category) || mod || '未分类';
+    if (!catMap[c]) { catMap[c] = []; catOrder.push(c); }
+    catMap[c].push({ api: a, idx: i });
+  });
+  const rows = catOrder.map(c => {
+    const items = catMap[c].map(({ api, idx }) =>
+      `<label style="display:flex;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid #eee"><input type="checkbox" checked data-idx="${idx}"><b>${esc(api.method || '?')}</b> ${esc(api.url || '')} — ${esc(api.name || '')}</label>`).join('');
+    return `<div style="font-size:12px;color:var(--primary);font-weight:bold;margin:10px 0 4px">📁 ${esc(c)}（${catMap[c].length}）</div>` + items;
+  }).join('');
+  const catLabel = catOrder.length > 1 ? catOrder.length + ' 个分类' : '分类: ' + esc(catOrder[0] || '-');
+  showModal(`<h3>📡 接口拆分确认</h3>
+    <p style="font-size:12px;color:var(--text-dim);margin-bottom:8px">文件: <b>${esc(fileName)}</b> | ${apis.length} 个接口 / ${catLabel}</p>
+    <div style="margin-bottom:8px;font-size:12px">模块名: <input id="api-module-input" type="text" value="${esc(mod)}" style="padding:4px 8px;border:1px solid var(--border);border-radius:4px;width:200px" placeholder="输入模块名（多分类建议留空，按分类分组）"></div>
+    <div style="max-height:400px;overflow-y:auto">${rows}</div>
     <div class="btn-row"><button class="btn btn-outline" id="retry-api-btn">🔄 重新拆分</button><button class="btn btn-success" id="commit-api-btn">✅ 确认入库</button></div>`);
   document.getElementById('commit-api-btn').onclick = async () => {
     let selected = [], allChecked = true;
     document.querySelectorAll('#modal-content input[type=checkbox]').forEach(cb => {
       if (cb.checked) selected.push(apis[parseInt(cb.dataset.idx)]); else allChecked = false;
     });
+    const modVal = (document.getElementById('api-module-input').value || '').trim() || mod;
     closeModal();
     _pendingApiConfirm = null; renderPendingBanner();
     // 显示入库进度
     var banner = document.getElementById('pending-api-banner');
     if (banner) { banner.style.display = ''; banner.innerHTML = '<h3>⏳ 向量化入库中... 0/' + selected.length + '</h3>'; }
-    const r = await fetch('/api/upload/commit-api', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ file_path: result.file_path, module_name: mod, apis: selected, all_selected: allChecked }) });
+    const r = await fetch('/api/upload/commit-api', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ file_path: result.file_path, module_name: modVal, apis: selected, all_selected: allChecked }) });
     const d = await r.json();
     if (d.success && d.task_id) {
       await pollTask(d.task_id,
@@ -599,14 +622,57 @@ async function loadUnassociatedDocs() {
           }).join('') + '</div>';
         }
         return '<div class="doc-assoc-item' + (pagesHtml ? ' has-pages' : '') + '">'
+          + '<span style="flex-shrink:0;margin-right:8px;display:flex"><input type="checkbox" class="js-unassoc-check" data-doc-id="' + esc(d.doc_id) + '" data-doc-type="' + esc(dt) + '" onchange="updateUnassocCount()"></span>'
           + '<span class="name">' + icon + ' ' + esc(d.file_name || d.doc_id || '') + '</span>'
           + pagesHtml
           + '<span class="actions"><button class="btn btn-sm btn-outline js-doc-bind" data-doc-id="' + esc(d.doc_id) + '" data-doc-type="' + esc(dt) + '">关联</button></span></div>';
       }).join('');
       return '<div class="unassoc-group' + (i === 0 ? '' : ' hidden') + '" id="unassoc-' + dt + '">' + items + '</div>';
     }).join('');
-    el.innerHTML = tabsHtml + bodyHtml;
+    const selectBar = '<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin:8px 0;font-size:12px">'
+      + '<label style="display:flex;align-items:center;gap:4px;flex-shrink:0"><input type="checkbox" id="unassoc-check-all" onclick="toggleAllUnassoc()"> 全选本页</label>'
+      + '<span style="color:var(--text-dim);flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">关联到当前模块：<b>' + esc(selectedModuleName || '（未选择）') + '</b></span>'
+      + '<span id="unassoc-selected-count" style="flex-shrink:0;color:var(--text-dim)">已选 0</span>'
+      + '<button class="btn btn-sm btn-success" onclick="bindSelectedDocs()" style="flex-shrink:0">⚡ 批量关联选中</button></div>';
+    el.innerHTML = tabsHtml + selectBar + bodyHtml;
+    updateUnassocCount();
   } catch (e) { document.getElementById('unassociated-by-type').innerHTML = '<div class="empty-hint">加载失败</div>'; }
+}
+
+function updateUnassocCount() {
+  const n = document.querySelectorAll('.js-unassoc-check:checked').length;
+  const el = document.getElementById('unassoc-selected-count');
+  if (el) el.textContent = '已选 ' + n;
+}
+
+function toggleAllUnassoc() {
+  /* 全选/全不选当前激活分类页面的勾选。 */
+  const on = document.getElementById('unassoc-check-all').checked;
+  const activeTab = document.querySelector('.doc-type-tabs button.active');
+  const dt = activeTab ? activeTab.dataset.dt : '';
+  const groupEl = document.getElementById('unassoc-' + dt);
+  if (groupEl) groupEl.querySelectorAll('.js-unassoc-check').forEach(cb => cb.checked = on);
+  updateUnassocCount();
+}
+
+async function bindSelectedDocs() {
+  /* 批量关联：把勾选的接口（可跨分类、跨文档类型）绑定到当前模块。 */
+  if (!selectedModuleName) { toast('请先选择模块'); return; }
+  const checked = Array.from(document.querySelectorAll('.js-unassoc-check:checked'));
+  if (!checked.length) { toast('请先勾选要关联的接口'); return; }
+  if (!(await checkAnalysisAndConfirm(selectedModuleName))) return;
+  if (!confirm('将选中的 ' + checked.length + ' 个接口关联到模块「' + selectedModuleName + '」？')) return;
+  let ok = 0, fail = 0;
+  for (const cb of checked) {
+    try {
+      const r = await fetch('/api/bindings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ source_type: cb.dataset.docType, source_id: cb.dataset.docId, target_type: 'module', target_id: selectedModuleName }) });
+      const d = await r.json();
+      if (d.success) ok++; else fail++;
+    } catch (e) { fail++; }
+  }
+  await invalidateAnalysis(selectedModuleName);
+  loadBoundDocs(selectedModuleName); loadUnassociatedDocs(); loadRelatedModules(selectedModuleName);
+  toast(ok ? '✅ 已关联 ' + ok + ' 个' + (fail ? '，失败 ' + fail : '') : '❌ 关联失败 ' + fail + ' 个');
 }
 function showDocDetail(docId, docType) {
   selectedDocId = docId; selectedDocType = docType;

@@ -73,6 +73,20 @@ categories:
           min_args: 1
           max_args: 1
 
+      - name: random_code
+        syntax: '${random_code(prefix, length)}'
+        description: 生成带固定前缀的唯一随机编码（小写字母+数字），自动全局去重并持久化；用于编号/编码类字段（如电表编号、方案编码），保证每个编码值全局唯一
+        params:
+          prefix: 固定前缀，业务标识（必填，字符串需加引号，如 METER/PAY/SCENE）
+          length: 随机后缀长度，小写字母+数字（可选，默认6）
+        usage_tips:
+          - '生成固定前缀编码: ${random_code(''METER'', 6)} → "METER_x8f2k9"'
+          - '只写前缀用默认长度: ${random_code(''SCENE'')} → "SCENE_x8f2k9"'
+          - '需唯一值的编号/编码字段优先用本方法'
+        validation:
+          min_args: 1
+          max_args: 2
+
   - name: 时间类
     description: 当前时间与偏移时间（未来/过去场景）。注意：时间偏移一律用 get_offset_time，禁止在占位符内做任何运算；注册表不支持的时间能力用合理固定字面量（如 "2029-12-31 10:00:00"）
     methods:

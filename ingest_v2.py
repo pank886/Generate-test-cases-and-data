@@ -26,6 +26,7 @@ from ingest import (
     _merge_api_defs,
     _extract_valid_api_paths,
     extract_apis_from_yapi_md,
+    extract_apis_from_yapi_json,
     _split_text_by_headers,
     # chunking
     _parse_chunk_summaries,

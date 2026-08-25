@@ -156,170 +156,185 @@ def translate_to_en_prompt() -> ChatPromptTemplate:
     ])
 
 
-def analyze_yaml_data_prompt() -> ChatPromptTemplate:
-    """Phase C YAML 数据 — 第一阶段：thinking 自由分析。"""
-    return ChatPromptTemplate.from_messages([
-        ("system",
-         "你是资深测试数据构造专家。根据【接口定义】和【用例逻辑】，深度分析需要生成的测试数据。\n\n"
-         "请分析以下方面（自由文本，不要输出 JSON）：\n"
-         "1. **接口匹配**：每个步骤对应哪个接口（从接口定义中找匹配的 url/method）。"
-         "**分析中描述接口时，url 只写路径**（如 /payConfig/detail），不要写 ${{}} 或完整 URL，"
-         "动态参数通过 params 传递即可。\n"
-         "2. **请求参数**：每个接口需要哪些请求参数，参数值从哪来（用例指定 / 上游提取 / 模拟）\n"
-         "3. **数据传递**：哪些步骤的返回值需要 extract，供下游步骤引用（使用数据工厂清单中的提取函数）\n"
-         "4. **断言设计**：每个步骤应该断言什么字段（从接口 returns 中选择），期望值是什么\n"
-         "5. **工厂方法**：哪些参数值需要用工厂方法随机生成\n\n"
-         "### 可用数据工厂方法\n{data_factory_methods}\n\n"
-         "### 输出字段约束（json_mode 阶段会严格按以下 schema 输出，你的分析要覆盖这些字段）\n"
-         "- baseInfo: 仅含 api_name/url/method/header 四个字段。**header 必须存在**（GET 请求 header 为空字典，POST/PUT/PATCH 写 Content-Type: application/json）\n"
-         "- testCase: case_name/json|params|data/extract|input_extract/validation\n"
-         "- 请求参数按 HTTP 方法选择：GET/DELETE → params（query string），POST/PUT/PATCH → json（JSON body）\n"
-         "- **url 禁止动态占位符**——url 在框架中不经 replace_load() 解析，动态参数必须用 params 传递，url 保持静态路径\n"
-         "- **params/json/data 只能放在 testCase 内**，禁止放在 baseInfo 层级\n"
-         "- validation 支持 eq/contains/ne/db 四种断言（不等于是 ne 不是 neq）。**validation 不能为空数组**\n"
-         "- **db 断言禁止**：若「数据库表结构信息」为空，禁止生成 db 断言（无表结构无法写正确 SQL），改用 eq/contains/ne\n"
-         "- **导出/下载/模板接口**（URL 含 export/import/template/download/upload 或接口标注 is_export）：返回二进制流，"
-         "断言必须用 `contains: {{status_code: 200}}`，禁止 eq/ne 检查状态码\n"
-         "- **对 `status_code` 的断言必须用 `contains: {{status_code: X}}`，禁止 eq/ne**（不限于导出接口；导出接口维持 contains: {{status_code: 200}}）\n"
-         "- **`contains` 的值必须是字典对象**（`{{字段: 期望}}` 或 `{{$.JSONPath: 期望}}`），禁止裸字符串/标量\n"
-         "- extract 从接口返回值中提取数据（JSONPath），供下游步骤用 ${{get_extract_data(key)}} 引用。"
-         "input_extract 极少使用，不要把它当数据暂存。禁止填入 PRE 编号或固定字面量\n"
-         "- extract/validation 的 JSONPath 必须以 $. 开头（如 $.data.id）\n"
-         "- 动态占位符只能从上方数据工厂清单中选择并按 syntax 使用，禁止胡编函数或语法；"
-         "清单不支持的能力用合理固定字面量（如远期日期直接写 \"2029-12-31 10:00:00\"）\n"
-         "- 分析阶段就要为每个动态值判定：用哪个工厂函数，还是固定字面量"),
-        ("human",
-         "### 接口定义\n{api_definitions}\n\n"
-         "### 用例逻辑\n{test_case_logic}\n\n"
-         "### 用户意图\n{user_context}\n\n"
-         "### 数据库表结构信息（为空时禁止 db 断言）\n{db_schema}\n\n"
-         "请分析测试数据需求：")
-    ])
+# ======================================================================
+# 两段式 prompt 已注释（2026-08-24）。生成路径收敛为单节点
+# generate_yaml_data_single_prompt（schema 驱动、无手写示例）。原代码见 git 历史：
+#   git show HEAD:prompts/extraction_prompts.py
+# ======================================================================
+# def analyze_yaml_data_prompt() -> ChatPromptTemplate:
+#     """Phase C YAML 数据 — 第一阶段：thinking 自由分析。"""
+#     return ChatPromptTemplate.from_messages([
+#         ("system",
+#          "你是资深测试数据构造专家。根据【接口定义】和【用例逻辑】，深度分析需要生成的测试数据。\n\n"
+#          "请分析以下方面（自由文本，不要输出 JSON）：\n"
+#          "1. **接口匹配**：每个步骤对应哪个接口（从接口定义中找匹配的 url/method）。"
+#          "**分析中描述接口时，url 只写路径**（如 /payConfig/detail），不要写 ${{}} 或完整 URL，"
+#          "动态参数通过 params 传递即可。\n"
+#          "2. **请求参数**：每个接口需要哪些请求参数，参数值从哪来（用例指定 / 上游提取 / 模拟）\n"
+#          "3. **数据传递**：哪些步骤的返回值需要 extract，供下游步骤引用（使用数据工厂清单中的提取函数）\n"
+#          "4. **断言设计**：每个步骤应该断言什么字段（从接口 returns 中选择），期望值是什么\n"
+#          "5. **工厂方法**：哪些参数值需要用工厂方法随机生成\n\n"
+#          "### 可用数据工厂方法\n{data_factory_methods}\n\n"
+#          "### 输出字段约束（json_mode 阶段会严格按以下 schema 输出，你的分析要覆盖这些字段）\n"
+#          "- baseInfo: 仅含 api_name/url/method/header 四个字段。**header 必须存在**（GET 请求 header 为空字典，POST/PUT/PATCH 写 Content-Type: application/json）\n"
+#          "- testCase: case_name/json|params|data/extract|input_extract/validation\n"
+#          "- 请求参数位置按接口定义字段的 `location` 决定：`location=query` 的字段 → params（query string），"
+#          "`location=body` 的字段 → json（JSON body）；接口定义未标 location 时按 HTTP 方法——"
+#          "GET/DELETE → params，POST/PUT/PATCH → json\n"
+#          "- **url 禁止动态占位符**——url 在框架中不经 replace_load() 解析，动态参数必须用 params 传递，url 保持静态路径\n"
+#          "- **params/json/data 只能放在 testCase 内**，禁止放在 baseInfo 层级\n"
+#          "- validation 支持 eq/contains/ne/db 四种断言（不等于是 ne 不是 neq）。**validation 不能为空数组**\n"
+#          "- **db 断言禁止**：若「数据库表结构信息」为空，禁止生成 db 断言（无表结构无法写正确 SQL），改用 eq/contains/ne\n"
+#          "- **导出/下载/模板接口**（URL 含 export/import/template/download/upload 或接口标注 is_export）：返回二进制流，"
+#          "断言必须用 `contains: {{status_code: 200}}`，禁止 eq/ne 检查状态码\n"
+#          "- **对 `status_code` 的断言必须用 `contains: {{status_code: X}}`，禁止 eq/ne**（不限于导出接口；导出接口维持 contains: {{status_code: 200}}）\n"
+#          "- **`contains` 的值必须是字典对象**（`{{字段: 期望}}` 或 `{{$.JSONPath: 期望}}`），禁止裸字符串/标量\n"
+#          "- extract 从接口返回值中提取数据（JSONPath），供下游步骤用 ${{get_extract_data(key)}} 引用。"
+#          "input_extract 极少使用，不要把它当数据暂存。禁止填入 PRE 编号或固定字面量\n"
+#          "- extract/validation 的 JSONPath 必须以 $. 开头（如 $.data.id）\n"
+#          "- 动态占位符只能从上方数据工厂清单中选择并按 syntax 使用，禁止胡编函数或语法；"
+#          "清单不支持的能力用合理固定字面量（如远期日期直接写 \"2029-12-31 10:00:00\"）\n"
+#          "- 分析阶段就要为每个动态值判定：用哪个工厂函数，还是固定字面量"),
+#         ("human",
+#          "### 接口定义\n{api_definitions}\n\n"
+#          "### 用例逻辑\n{test_case_logic}\n\n"
+#          "### 用户意图\n{user_context}\n\n"
+#          "### 数据库表结构信息（为空时禁止 db 断言）\n{db_schema}\n\n"
+#          "请分析测试数据需求：")
+#     ])
 
 
-def repair_yaml_data_prompt() -> ChatPromptTemplate:
-    """Phase C YAML 数据 — 修复轮思考：带上一轮错误输出与校验错误自查（thinking on）。
+# def repair_yaml_data_prompt() -> ChatPromptTemplate:
+#     """Phase C YAML 数据 — 修复轮思考：带上一轮错误输出与校验错误自查（thinking on）。
+#
+#     与 analyze_yaml_data_prompt 相同定位（自由文本分析），额外注入：
+#       - 上一轮原始输出（有错）
+#       - 本项校验错误明细
+#       - 全批次错误模式统计（跨文件模式反馈）
+#     输出接 format_yaml_data_prompt 结构化收敛。
+#     """
+#     return ChatPromptTemplate.from_messages([
+#         ("system",
+#          "你是资深测试数据构造专家。你上一轮生成的测试数据未通过校验，"
+#          "请先分析错误原因，再给出修正后的完整数据方案（自由文本，不要输出 JSON）。\n\n"
+#          "### 本轮全批次错误模式统计（其他文件也在犯的错，注意规避）\n"
+#          "{error_pattern_summary}\n\n"
+#          "### 可用数据工厂方法（动态占位符只能从此清单选择，严格按 syntax 填写）\n"
+#          "{data_factory_methods}\n\n"
+#          "### 修复要点\n"
+#          "- 逐条对照【校验错误明细】定位问题字段，说明错在哪、应改成什么\n"
+#          "- 动态值只能用数据工厂清单内的函数（语法见清单），禁止自创函数或语法"
+#          "清单不支持的能力写合理固定字面量\n"
+#          "- 无需提取时省略 extract/input_extract 字段，禁止 {{}} 占位与 null 值条目\n"
+#          "- json/params/data 三选一：优先按接口定义字段的 `location` 确定——`location=query` → params，"
+#          "`location=body` → json；未标 location 时按 HTTP 方法——GET/DELETE → params，POST/PUT/PATCH → json\n"
+#          "- **若「数据库表结构信息」为空，禁止 db 断言**，改用 eq/contains/ne\n"
+#          "- **导出/下载/模板接口**（URL 含 export/import/template/download/upload）：断言用 contains: {{status_code: 200}}，禁止 eq/ne 检查状态码\n"
+#          "- **对 `status_code` 的断言必须用 `contains: {{status_code: X}}`，禁止 eq/ne**（不限于导出接口）\n"
+#          "- **`contains` 的值必须是字典对象**（`{{字段: 期望}}` 或 `{{$.JSONPath: 期望}}`），禁止裸字符串\n"
+#          "- 修正时保持原有正确部分不动，只改错误部分"),
+#         ("human",
+#          "{post_check_issues}"
+#          "### 接口定义\n{api_definitions}\n\n"
+#          "### 用例逻辑\n{test_case_logic}\n\n"
+#          "### 用户意图\n{user_context}\n\n"
+#          "### 数据库表结构信息（为空时禁止 db 断言）\n{db_schema}\n\n"
+#          "### 你上一轮的输出（有错）\n{prior_output}\n\n"
+#          "### 校验错误明细\n{error_detail}\n\n"
+#          "请分析并给出修正方案：")
+#     ])
 
-    与 analyze_yaml_data_prompt 相同定位（自由文本分析），额外注入：
-      - 上一轮原始输出（有错）
-      - 本项校验错误明细
-      - 全批次错误模式统计（跨文件模式反馈）
-    输出接 format_yaml_data_prompt 结构化收敛。
-    """
-    return ChatPromptTemplate.from_messages([
-        ("system",
-         "你是资深测试数据构造专家。你上一轮生成的测试数据未通过校验，"
-         "请先分析错误原因，再给出修正后的完整数据方案（自由文本，不要输出 JSON）。\n\n"
-         "### 本轮全批次错误模式统计（其他文件也在犯的错，注意规避）\n"
-         "{error_pattern_summary}\n\n"
-         "### 可用数据工厂方法（动态占位符只能从此清单选择，严格按 syntax 填写）\n"
-         "{data_factory_methods}\n\n"
-         "### 修复要点\n"
-         "- 逐条对照【校验错误明细】定位问题字段，说明错在哪、应改成什么\n"
-         "- 动态值只能用数据工厂清单内的函数（语法见清单），禁止自创函数或语法"
-         "清单不支持的能力写合理固定字面量\n"
-         "- 无需提取时省略 extract/input_extract 字段，禁止 {{}} 占位与 null 值条目\n"
-         "- json/params/data 三选一，依据接口定义确定正确的请求方式\n"
-         "- **若「数据库表结构信息」为空，禁止 db 断言**，改用 eq/contains/ne\n"
-         "- **导出/下载/模板接口**（URL 含 export/import/template/download/upload）：断言用 contains: {{status_code: 200}}，禁止 eq/ne 检查状态码\n"
-         "- **对 `status_code` 的断言必须用 `contains: {{status_code: X}}`，禁止 eq/ne**（不限于导出接口）\n"
-         "- **`contains` 的值必须是字典对象**（`{{字段: 期望}}` 或 `{{$.JSONPath: 期望}}`），禁止裸字符串\n"
-         "- 修正时保持原有正确部分不动，只改错误部分"),
-        ("human",
-         "{post_check_issues}"
-         "### 接口定义\n{api_definitions}\n\n"
-         "### 用例逻辑\n{test_case_logic}\n\n"
-         "### 用户意图\n{user_context}\n\n"
-         "### 数据库表结构信息（为空时禁止 db 断言）\n{db_schema}\n\n"
-         "### 你上一轮的输出（有错）\n{prior_output}\n\n"
-         "### 校验错误明细\n{error_detail}\n\n"
-         "请分析并给出修正方案：")
-    ])
 
-
-def format_yaml_data_prompt() -> ChatPromptTemplate:
-    """Phase C YAML 数据 — 第二阶段：json_mode 结构化输出（thinking off）。
-
-    输出 TestData 模型的 JSON，字段与 Pydantic 严格对齐。
-    """
-    return ChatPromptTemplate.from_messages([
-        ("system",
-         "你是数据格式化专家。根据【数据分析】和【接口定义】，输出 TestData 模型结构的 JSON（Pydantic 校验）。\n\n"
-         "### 可用数据工厂方法（动态占位符只能从此清单选择，严格按 syntax 填写）\n"
-         "{data_factory_methods}\n\n"
-         "### ⚠️ 输出 JSON 结构（必须严格遵循，一个字符都不能错）\n\n"
-         "整个输出只有一个顶层 key: **data**（数组），数组中每个元素是一个步骤对象。\n\n"
-         "```json\n"
-         "{{\n"
-         '  "data": [\n'
-         '    {{\n'
-         '      "baseInfo": {{\n'
-         '        "api_name": "新增创建",\n'
-         '        "url": "/meterDevice/add",\n'
-         '        "method": "post",\n'
-         '        "header": {{"Content-Type": "application/json;charset=UTF-8"}}\n'
-         '      }},\n'
-         '      "testCase": [\n'
-         '        {{\n'
-         '          "case_name": "新增单一费率电表",\n'
-         '          "json": {{"code": "${{random_plates(1)}}", "name": "测试电表"}},\n'
-         '          "validation": [{{"contains": {{"$.msg": "成功"}}}}],\n'
-         '          "extract": {{"meterCode": "$.data.code"}}\n'
-         '        }}\n'
-         '      ]\n'
-         '    }},\n'
-         '    {{\n'
-         '      "baseInfo": {{\n'
-         '        "api_name": "分页查询",\n'
-         '        "url": "/meterDevice/getPage",\n'
-         '        "method": "post",\n'
-         '        "header": {{"Content-Type": "application/json;charset=UTF-8"}}\n'
-         '      }},\n'
-         '      "testCase": [\n'
-         '        {{\n'
-         '          "case_name": "查询电表列表验证新增",\n'
-         '          "json": {{"pageNum": 1, "pageSize": 10}},\n'
-         '          "validation": [{{"contains": {{"$.data.records[0].meterName": "${{get_extract_data(meterName)}}"}}}}]\n'
-         '        }}\n'
-         '      ]\n'
-         '    }}\n'
-         '  ]\n'
-         '}}\n'
-         "```\n\n"
-         "### 结构铁律（参考上方示例）\n"
-         "1. 顶层必须是 **\"data\": [...]** 数组，禁止用 testCase 或其他名字\n"
-         "2. data 数组的每个元素是步骤对象，必须包含 **baseInfo** 和 **testCase** 两个键\n"
-         "3. **testCase 必须是数组** [...], 禁止写成对象 {{...}}\n"
-         "4. **validation 必须是数组** [...], 禁止写成对象 {{...}}\n"
-         "5. api_name/url/method 与接口定义完全一致\n"
-         "6. method 必须小写（post/get/put/delete）\n"
-         "7. url 必须与接口序列（锚）中的 url **逐字一致**（含 {{param}} 字面量）；"
-         "只写路径、禁域名、禁 query、禁 ${{}}；路径参数禁止替换成具体值"
-         "（具体值/query 走 testCase.params 或 json）\n"
-         "8. **每个 baseInfo 必须有 header 字段**：POST/PUT/PATCH 写 Content-Type: application/json, GET 写空 {{}}\n"
-         "9. 请求参数按 HTTP 方法选择：GET/DELETE → params, POST/PUT/PATCH → json\n"
-         "10. 动态值使用 ${{函数名(参数)}}，函数必须来自上方清单\n"
-         "11. extract/input_extract 用不到就省略整个字段，禁止输出空 {{}} 或 null\n"
-         "12. validation 数组不能为空，每步至少一条断言；断言的期望值须按规则 19 取自接口返回定义\n"
-         "13. 断言运算符只用 [eq, contains, ne, db] 四种，不等于是 ne 不是 neq\n"
-         "14. **若「数据库表结构信息」为空，禁止 db 断言**（无表结构无法写正确 SQL），改用 eq/contains/ne\n"
-         "15. **对 `status_code` 的断言必须用 contains: {{status_code: X}}，禁止 eq/ne**（适用于所有接口，"
-         "不限于导出；导出/下载/模板接口返回二进制流，维持 contains: {{status_code: 200}}）\n"
-         "16. JSONPath 必须以 $. 开头（如 $.data.code）\n"
-         "17. 禁止 Markdown，只输出纯净 JSON\n"
-         "18. **`contains` 的值必须是字典对象**（`{{字段: 期望}}` 或 `{{$.JSONPath: 期望}}`），禁止裸字符串/标量\n"
-         "19. **成功/失败断言的期望值取自接口返回定义**：断言的字段与期望值必须取自「接口定义」"
-         "返回定义中真实给出的字段/取值/语义；正向用例断言业务成功对应的返回取值，反向用例"
-         "断言失败返回取值；返回定义未给出明确取值时，退化为 contains 字段存在性或 status_code "
-         "断言，禁止臆造固定取值"),
-        ("human",
-         "### 数据分析\n{data_analysis}\n\n"
-         "### 接口定义\n{api_definitions}\n\n"
-         "### 用例逻辑\n{test_case_logic}\n\n"
-         "### 用户意图\n{user_context}\n\n"
-         "### 数据库表结构信息（为空时禁止 db 断言）\n{db_schema}\n\n"
-         "请严格按照上方 JSON 结构输出：")
-    ])
+# def format_yaml_data_prompt() -> ChatPromptTemplate:
+#     """Phase C YAML 数据 — 第二阶段：json_mode 结构化输出（thinking off）。
+#
+#     输出 TestData 模型的 JSON，字段与 Pydantic 严格对齐。
+#     """
+#     return ChatPromptTemplate.from_messages([
+#         ("system",
+#          "你是数据格式化专家。根据【数据分析】和【接口定义】，输出 TestData 模型结构的 JSON（Pydantic 校验）。\n\n"
+#          "### 可用数据工厂方法（动态占位符只能从此清单选择，严格按 syntax 填写）\n"
+#          "{data_factory_methods}\n\n"
+#          "### ⚠️ 输出 JSON 结构（必须严格遵循，一个字符都不能错）\n\n"
+#          "整个输出只有一个顶层 key: **data**（数组），数组中每个元素是一个步骤对象。\n\n"
+#          "```json\n"
+#          "{{\n"
+#          '  "data": [\n'
+#          '    {{\n'
+#          '      "baseInfo": {{\n'
+#          '        "api_name": "新增创建",\n'
+#          '        "url": "/meterDevice/add",\n'
+#          '        "method": "post",\n'
+#          '        "header": {{"Content-Type": "application/json;charset=UTF-8"}}\n'
+#          '      }},\n'
+#          '      "testCase": [\n'
+#          '        {{\n'
+#          '          "case_name": "新增单一费率电表",\n'
+#          # 注意：下方示例中的 random_plates(1) 车牌生成器被 LLM 误用于电表编号 ——
+#          # 这是两段式被注释的原因之一（错误示例诱导字段误用）。
+#          '          "json": {{"code": "${{random_plates(1)}}", "name": "测试电表"}},\n'
+#          '          "validation": [{{"contains": {{"$.msg": "成功"}}}}],\n'
+#          '          "extract": {{"meterCode": "$.data.code"}}\n'
+#          '        }}\n'
+#          '      ]\n'
+#          '    }},\n'
+#          '    {{\n'
+#          '      "baseInfo": {{\n'
+#          '        "api_name": "分页查询",\n'
+#          '        "url": "/meterDevice/getPage",\n'
+#          '        "method": "post",\n'
+#          '        "header": {{"Content-Type": "application/json;charset=UTF-8"}}\n'
+#          '      }},\n'
+#          '      "testCase": [\n'
+#          '        {{\n'
+#          '          "case_name": "查询电表列表验证新增",\n'
+#          '          "json": {{"pageNum": 1, "pageSize": 10}},\n'
+#          '          "validation": [{{"contains": {{"$.data.records[0].meterName": "${{get_extract_data(meterName)}}"}}}}]\n'
+#          '        }}\n'
+#          '      ]\n'
+#          '    }}\n'
+#          '  ]\n'
+#          '}}\n'
+#          "```\n\n"
+#          "### 结构铁律（参考上方示例）\n"
+#          "1. 顶层必须是 **\"data\": [...]** 数组，禁止用 testCase 或其他名字\n"
+#          "2. data 数组的每个元素是步骤对象，必须包含 **baseInfo** 和 **testCase** 两个键\n"
+#          "3. **testCase 必须是数组** [...], 禁止写成对象 {{...}}\n"
+#          "4. **validation 必须是数组** [...], 禁止写成对象 {{...}}\n"
+#          "5. api_name/url/method 与接口定义完全一致\n"
+#          "6. method 必须小写（post/get/put/delete）\n"
+#          "7. url 必须与接口序列（锚）中的 url **逐字一致**（含 {{param}} 字面量）；"
+#          "只写路径、禁域名、禁 query、禁 ${{}}；路径参数禁止替换成具体值"
+#          "（具体值/query 走 testCase.params 或 json）\n"
+#          "8. **每个 baseInfo 必须有 header 字段**：POST/PUT/PATCH 写 Content-Type: application/json, GET 写空 {{}}\n"
+#          "9. 请求参数位置按接口定义 body 字段的 `location` 决定：`location=query` 的字段 → testCase.params，"
+#          "`location=body` 的字段 → testCase.json；接口定义未标 location 时按 HTTP 方法——"
+#          "GET/DELETE → params, POST/PUT/PATCH → json\n"
+#          "10. 动态值使用 ${{函数名(参数)}}，函数必须来自上方清单\n"
+#          "11. extract/input_extract 用不到就省略整个字段，禁止输出空 {{}} 或 null\n"
+#          "12. validation 数组不能为空，每步至少一条断言；断言的期望值须按规则 19 取自接口返回定义\n"
+#          "13. 断言运算符只用 [eq, contains, ne, db] 四种，不等于是 ne 不是 neq；"
+#          "每条断言必须且只能是一个单键块（如 {{eq: {{$.msg: 成功}}}} / "
+#          "{{contains: {{status_code: 200}}}}），禁止 check/expected/operator、"
+#          "jsonpath/operator/value 等多键写法\n"
+#          "14. **若「数据库表结构信息」为空，禁止 db 断言**（无表结构无法写正确 SQL），改用 eq/contains/ne\n"
+#          "15. **对 `status_code` 的断言必须用 contains: {{status_code: X}}，禁止 eq/ne**（适用于所有接口，"
+#          "不限于导出；导出/下载/模板接口返回二进制流，维持 contains: {{status_code: 200}}）\n"
+#          "16. JSONPath 必须以 $. 开头（如 $.data.code）\n"
+#          "17. 禁止 Markdown，只输出纯净 JSON\n"
+#          "18. **`contains` 的值必须是字典对象**（`{{字段: 期望}}` 或 `{{$.JSONPath: 期望}}`），禁止裸字符串/标量\n"
+#          "19. **成功/失败断言的期望值取自接口返回定义**：断言的字段与期望值必须取自「接口定义」"
+#          "返回定义中真实给出的字段/取值/语义；正向用例断言业务成功对应的返回取值，反向用例"
+#          "断言失败返回取值；返回定义未给出明确取值时，退化为 contains 字段存在性或 status_code "
+#          "断言，禁止臆造固定取值"),
+#         ("human",
+#          "### 数据分析\n{data_analysis}\n\n"
+#          "### 接口定义\n{api_definitions}\n\n"
+#          "### 用例逻辑\n{test_case_logic}\n\n"
+#          "### 用户意图\n{user_context}\n\n"
+#          "### 数据库表结构信息（为空时禁止 db 断言）\n{db_schema}\n\n"
+#          "请严格按照上方 JSON 结构输出：")
+#     ])
 
 
 def generate_yaml_data_single_prompt() -> ChatPromptTemplate:
@@ -346,13 +361,16 @@ def generate_yaml_data_single_prompt() -> ChatPromptTemplate:
          "### 铁律（抽象规则，无示例；内容唯一来源 = 上方 yaml 格式 schema + "
          "human 段 B 用例内容 / A 数据分析 / 接口详情文档）\n"
          "1. 顶层只能有一个 data 数组，每元素含 baseInfo 与 testCase 两个键\n"
-         "2. 请求体三选一（json/params/data 只出现一个）：按接口定义 HTTP 方法选——"
-         "GET/DELETE 用 params，POST/PUT/PATCH 用 json\n"
+         "2. 请求体三选一（json/params/data 只出现一个）：优先按接口定义 body 字段的 `location` 选——"
+         "`location=query` 的字段 → params，`location=body` 的字段 → json；接口定义未标 location 时"
+         "按 HTTP 方法——GET/DELETE 用 params，POST/PUT/PATCH 用 json\n"
          "3. url 与接口定义中的路径完全一致：只写路径、禁 query/域名/占位符表达式；"
          "路径参数不得替换成具体值\n"
          "4. 每个 baseInfo 必有 header 键：JSON 请求体方法写 Content-Type=application/json，"
          "其余写空对象\n"
-         "5. validation 数组不得为空，每步至少一条断言；运算符只允许 eq/contains/ne/db\n"
+         "5. validation 数组不得为空，每步至少一条断言；运算符只允许 eq/contains/ne/db；"
+         "每条断言必须且只能是一个单键块，即一个运算符键对应一个断言对象，"
+         "禁止 check/expected/operator、jsonpath/operator/value 等多键写法\n"
          "6. status_code 只能被 contains 断言，且 contains 的值必须是字典对象"
          "（键=字段名、值=期望值）；禁止用 eq/ne 断言 status_code\n"
          "7. JSONPath 一律以 $. 开头\n"

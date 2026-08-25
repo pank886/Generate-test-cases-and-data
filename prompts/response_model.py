@@ -419,6 +419,10 @@ class TestCase(BaseModel):
         对 str 调用 .items() 抛 AttributeError（非 AssertionError），run_blocks
         不捕获，整个测试方法崩溃。此处约束两种形态（元素非 dict / contains
         操作数非 dict）→ 裸字符串直接校验失败，进修复轮由 LLM 自查重生成。
+        2026-08-20 问题 5：LLM 输出 check/expected/operator、jsonpath/operator/value
+        等多键断言块（智慧用电_35 全量被执行框架拒绝）。框架 assert_result
+        只认单键 {eq|contains|ne|db: {...}}，此处强制 len(v)==1，多键块直接
+        校验失败，进修复轮由 LLM 自查改写为单键格式。
         """
         for i, v in enumerate(self.validation):
             if not isinstance(v, dict):
@@ -430,18 +434,28 @@ class TestCase(BaseModel):
                 )
                 ValidationInterceptor.record(rule, msg)
                 raise ValueError(msg)
-            if len(v) == 1:
-                op, operand = next(iter(v.items()))
-                if op in ("eq", "contains", "ne") and not isinstance(operand, dict):
-                    rule = "断言操作数非dict"
-                    msg = (
-                        f"validation[{i}] 运算符 '{op}' 的操作数不是 dict"
-                        f"（{type(operand).__name__}），当前值: {str(operand)[:60]}。"
-                        "操作数必须是 {字段: 期望} 形式的 dict，禁止裸字符串/标量。"
-                        f"例如 {op}: {{message: 成功}} 而非 {op}: 成功。"
-                    )
-                    ValidationInterceptor.record(rule, msg)
-                    raise ValueError(msg)
+            if len(v) != 1:
+                rule = "断言块多键"
+                msg = (
+                    f"validation[{i}] 断言块必须且只能包含一个断言运算符键"
+                    f"（当前 {len(v)} 个: {list(v.keys())}）。"
+                    "执行框架只接受单键断言块 {eq|contains|ne|db: {字段: 期望}}；"
+                    "禁止 check/expected/operator、jsonpath/operator/value 等多键写法，"
+                    "请改写为单键运算符格式。"
+                )
+                ValidationInterceptor.record(rule, msg)
+                raise ValueError(msg)
+            op, operand = next(iter(v.items()))
+            if op in ("eq", "contains", "ne") and not isinstance(operand, dict):
+                rule = "断言操作数非dict"
+                msg = (
+                    f"validation[{i}] 运算符 '{op}' 的操作数不是 dict"
+                    f"（{type(operand).__name__}），当前值: {str(operand)[:60]}。"
+                    "操作数必须是 {字段: 期望} 形式的 dict，禁止裸字符串/标量。"
+                    f"例如 {op}: {{message: 成功}} 而非 {op}: 成功。"
+                )
+                ValidationInterceptor.record(rule, msg)
+                raise ValueError(msg)
         return self
 
     @model_validator(mode="after")

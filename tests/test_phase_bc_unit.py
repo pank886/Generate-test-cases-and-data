@@ -632,6 +632,27 @@ class TestYamlOutputHygiene:
         tc = YamlTestCase(case_name="t", validation=[{"eq": {"code": 0}}])
         assert tc.validation == [{"eq": {"code": 0}}]
 
+    # ---- 2026-08-20 问题5: 多键断言块必须拒绝（_35 全量被执行框架拒绝的根因） ----
+
+    def test_multi_key_validation_block_rejected(self):
+        """check/expected/operator 三键写法 → 校验失败，进修复轮重生成。
+
+        执行框架 assert_result 只认单键 {eq|contains|ne|db: {...}}，
+        多键块在此处拦截，防止落盘后整体跑不动。
+        """
+        with pytest.raises(ValueError, match="断言块必须且只能包含一个断言运算符键"):
+            YamlTestCase(case_name="t", validation=[
+                {"check": "status_code", "expected": {"status_code": 200},
+                 "operator": "contains"},
+            ])
+
+    def test_multi_key_jsonpath_validation_block_rejected(self):
+        """jsonpath/operator/value 三键写法同样拒绝。"""
+        with pytest.raises(ValueError, match="断言块必须且只能包含一个断言运算符键"):
+            YamlTestCase(case_name="t", validation=[
+                {"jsonpath": "$.msg", "operator": "eq", "value": "成功"},
+            ])
+
     # ---- 问题1: baseInfo 无 header（公共头 yq-app-code/token 由框架常量注入，不生成） ----
 
     def test_default_header_injected_for_json_body(self):
@@ -802,11 +823,12 @@ class TestFactoryRegistry:
     def teardown_method(self):
         df_registry.reset_cache()
 
-    def test_load_methods_covers_all_six(self):
+    def test_load_methods_covers_all_seven(self):
         names = {m["name"] for m in df_registry.load_methods()}
         assert names == {
-            "random_plates", "get_extract_data", "get_extract_data_list",
-            "get_current_time", "get_offset_time", "split_extract_data",
+            "random_plates", "random_code", "get_extract_data",
+            "get_extract_data_list", "get_current_time", "get_offset_time",
+            "split_extract_data",
         }
 
     def test_every_method_has_category(self):
@@ -1055,14 +1077,16 @@ class TestYamlSingleNodeFlag:
             os.path.join(str(tmp_path), "test_plan.xlsx"), "[]", "ctx")
         assert captured["gen_func"] == agent._generate_one_yaml_single
 
-    def test_false_selects_two_stage(self, monkeypatch, tmp_path):
-        """YAML_SINGLE_NODE=False → gen_func=None（两段式 _generate_one_yaml）。"""
-        import config
-        monkeypatch.setattr(config, "YAML_SINGLE_NODE", False)
-        agent, captured = self._agent(monkeypatch)
-        agent._generate_all_yamls(
-            os.path.join(str(tmp_path), "test_plan.xlsx"), "[]", "ctx")
-        assert captured["gen_func"] is None
+    # 两段式已注释（2026-08-24）：_generate_all_yamls 恒走单节点，不再存在
+    # YAML_SINGLE_NODE=False → gen_func=None 的路径。
+    # def test_false_selects_two_stage(self, monkeypatch, tmp_path):
+    #     """YAML_SINGLE_NODE=False → gen_func=None（两段式 _generate_one_yaml）。"""
+    #     import config
+    #     monkeypatch.setattr(config, "YAML_SINGLE_NODE", False)
+    #     agent, captured = self._agent(monkeypatch)
+    #     agent._generate_all_yamls(
+    #         os.path.join(str(tmp_path), "test_plan.xlsx"), "[]", "ctx")
+    #     assert captured["gen_func"] is None
 
 
 class TestYamlSingleNodeGenerate:
@@ -1190,31 +1214,32 @@ class TestYamlSingleNodePromptRender:
         assert "成功=1" not in text
 
 
-class TestFormatYamlPromptNoProjectRetcode:
-    """两段式 format_yaml_data_prompt 同思路：不硬编码项目特例 retCode 取值。"""
-
-    @staticmethod
-    def _render() -> str:
-        from prompts.extraction_prompts import format_yaml_data_prompt
-        m = format_yaml_data_prompt().format_messages(
-            data_factory_methods="factory_text",
-            api_definitions="api_defs",
-            data_analysis="analysis",
-            test_case_logic="test_case_logic",
-            user_context="user_ctx",
-            db_schema="db_schema",
-        )
-        return {x.type: x.content for x in m}["system"]
-
-    def test_no_retcode_zero_hardcode(self):
-        """示例与规则均无 retCode: 0 / $.retCode 可照抄字面量。"""
-        text = self._render()
-        assert "retCode: 0" not in text
-        assert "$.retCode" not in text
-
-    def test_assertion_value_from_return_definition(self):
-        """铁律 19：断言期望值取自接口返回定义（同单节点思路）。"""
-        assert "返回定义中真实给出的字段" in self._render()
+# 两段式 format_yaml_data_prompt 已注释（2026-08-24），本类测试对象不存在。
+# class TestFormatYamlPromptNoProjectRetcode:
+#     """两段式 format_yaml_data_prompt 同思路：不硬编码项目特例 retCode 取值。"""
+#
+#     @staticmethod
+#     def _render() -> str:
+#         from prompts.extraction_prompts import format_yaml_data_prompt
+#         m = format_yaml_data_prompt().format_messages(
+#             data_factory_methods="factory_text",
+#             api_definitions="api_defs",
+#             data_analysis="analysis",
+#             test_case_logic="test_case_logic",
+#             user_context="user_ctx",
+#             db_schema="db_schema",
+#         )
+#         return {x.type: x.content for x in m}["system"]
+#
+#     def test_no_retcode_zero_hardcode(self):
+#         """示例与规则均无 retCode: 0 / $.retCode 可照抄字面量。"""
+#         text = self._render()
+#         assert "retCode: 0" not in text
+#         assert "$.retCode" not in text
+#
+#     def test_assertion_value_from_return_definition(self):
+#         """铁律 19：断言期望值取自接口返回定义（同单节点思路）。"""
+#         assert "返回定义中真实给出的字段" in self._render()
 
 
 # ============================================================

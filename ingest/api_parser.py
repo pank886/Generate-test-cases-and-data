@@ -514,6 +514,199 @@ def extract_apis_from_yapi_md(text: str) -> dict:
     return {"apis": apis, "module_name": module_name}
 
 
+# ============================================================
+# YApi JSON 导出解析（api.json）
+# ============================================================
+
+def _schema_children(schema: dict) -> list[dict]:
+    """JSON Schema properties → 六字段 children（递归）。
+
+    required 取当前层级 schema 的 required 数组；属性为 object/array 时继续下钻。
+    """
+    props = schema.get("properties") if isinstance(schema, dict) else None
+    if not isinstance(props, dict):
+        return []
+    required_raw = schema.get("required") or []
+    if isinstance(required_raw, str):
+        required_raw = [required_raw]
+    required_set = set(required_raw)
+    out = []
+    for name, prop in props.items():
+        f = _schema_to_field(str(name), prop, name in required_set)
+        if f:
+            out.append(f)
+    return out
+
+
+def _schema_to_field(name: str, prop: dict, required: bool) -> dict:
+    """JSON Schema 单个属性 → 六字段（object/array 递归 children）。"""
+    if not isinstance(prop, dict):
+        return _make_field(name, "string", required, "", "", "")
+    type_ = prop.get("type") or ""
+    if not type_ and isinstance(prop.get("properties"), dict):
+        type_ = "object"
+    desc = (prop.get("desc") or prop.get("description") or "").strip()
+    default = prop.get("default") or ""
+    if type_ == "object":
+        f = _make_field(name, "object", required, default, desc)
+        children = _schema_children(prop)
+        if children:
+            f["children"] = children
+        return f
+    if type_ == "array":
+        f = _make_field(name, "array", required, default, desc)
+        items = prop.get("items")
+        if isinstance(items, dict) and (
+            items.get("type") == "object" or isinstance(items.get("properties"), dict)
+        ):
+            children = _schema_children(items)
+            if children:
+                f["children"] = children
+        return f
+    return _make_field(name, type_ or "string", required, default, desc)
+
+
+def _parse_json_schema_fields(schema_text) -> list[dict]:
+    """JSON Schema 字符串（YApi req_body_other/res_body）→ 六字段数组。
+
+    顶层为 {type:object, properties:{...}, required:[...]}；对象/数组嵌套 → children 递归。
+    """
+    if not schema_text or not str(schema_text).strip():
+        return []
+    try:
+        schema = json.loads(schema_text)
+    except (json.JSONDecodeError, TypeError):
+        return []
+    if not isinstance(schema, dict):
+        return []
+    return _schema_children(schema)
+
+
+def _yapi_json_list_item_to_field(item: dict, location: str,
+                                  default_type: str = "string") -> dict:
+    """YApi JSON req_query / req_body_form 条目 → 六字段（带 location）。
+
+    YApi 的 required 是字符串 "1"/"0"，复用 _is_required 判定。
+    """
+    f = _make_field(
+        item.get("name") or "",
+        item.get("type") or default_type,
+        _is_required(str(item.get("required"))),
+        item.get("default") or "",
+        item.get("desc") or "",
+        item.get("value") or "",
+    )
+    if location:
+        f["location"] = location
+    return f
+
+
+def _yapi_json_api_to_def(item: dict, category: str = "") -> dict:
+    """YApi JSON 导出中的单个接口元素 → 归一化 API def。
+
+    body 带 location 标记：req_query → "query"，req_body_other / req_body_form → "body"；
+    return 为 res_body JSON Schema 解析结果（无 location，与契约 response 一致）。
+    """
+    url = (item.get("path") or "").strip()
+    if not url and isinstance(item.get("query_path"), dict):
+        url = (item.get("query_path").get("path") or "").strip()
+    method = (item.get("method") or "?").strip().upper()
+    name = (item.get("title") or "").strip()
+    desc = re.sub(r"<[^>]+>", "", item.get("desc") or "").strip()
+
+    # 请求头 → {名: 示例值}（YApi req_headers: name/value/example/required）
+    header = {}
+    for h in item.get("req_headers") or []:
+        if isinstance(h, dict) and h.get("name"):
+            header[h["name"].strip()] = (h.get("example") or h.get("value") or "")
+
+    body = []
+    # 1) 真正挂在 query string 的参数 → location="query"
+    for q in item.get("req_query") or []:
+        if isinstance(q, dict) and q.get("name"):
+            body.append(_yapi_json_list_item_to_field(q, "query"))
+    # 2) JSON 请求体（req_body_other JSON Schema）→ location="body"
+    schema_fields = _parse_json_schema_fields(item.get("req_body_other") or "")
+    for f in schema_fields:
+        f["location"] = "body"
+    body.extend(schema_fields)
+    # 3) 表单字段（req_body_form，含文件上传）→ location="body"
+    for fm in item.get("req_body_form") or []:
+        if isinstance(fm, dict) and fm.get("name"):
+            body.append(_yapi_json_list_item_to_field(fm, "body", "file"))
+
+    # 返回 → res_body JSON Schema 解析（无 location）
+    ret = _parse_json_schema_fields(item.get("res_body") or "")
+
+    annotations = {}
+    if category:
+        annotations["category"] = category
+
+    return {
+        "name": name,
+        "url": url,
+        "method": method,
+        "description": desc or name,
+        "header": header,
+        "body": body,
+        "return": ret,
+        "annotations": annotations,
+    }
+
+
+def extract_apis_from_yapi_json(text: str) -> dict:
+    """纯代码提取：解析 YApi JSON 导出（api.json）为归一化 API def 列表。
+
+    顶层结构：[{index, name, desc, add_time, up_time, list: [...]}, ...]
+      每个接口元素：path/method/title/desc(HTML)/req_headers/req_query/req_params/
+                    req_body_other(JSON Schema)/req_body_form/res_body(JSON Schema)
+    Returns: {"apis": [...], "module_name": str}
+      每个 api: {name, url, method, description, header, body, return, annotations}
+        body 字段带 location：req_query→"query"、req_body_other/req_body_form→"body"
+        annotations["category"] = 所属 YApi 分类名
+    """
+    try:
+        data = json.loads(text)
+    except (json.JSONDecodeError, TypeError) as e:
+        raise ValueError(f"JSON 解析失败: {e}") from e
+    if isinstance(data, dict):
+        # 容错：允许单分类对象 {name, list:[...]} → 包装成单元素数组
+        if isinstance(data.get("list"), list):
+            data = [data]
+        else:
+            raise ValueError("不支持的 JSON 结构：期望顶层为分类数组 [{name, list:[...]}]")
+    if not isinstance(data, list):
+        raise ValueError("不支持的 JSON 结构：期望顶层为分类数组 [{name, list:[...]}]")
+
+    module_name = ""
+    categories: set = set()
+    apis = []
+    seen = set()  # (method, url) 去重（跨分类可能重复导出）
+
+    for cat in data:
+        if not isinstance(cat, dict):
+            continue
+        cat_name = (cat.get("name") or "").strip()
+        if cat_name:
+            categories.add(cat_name)
+        for item in cat.get("list") or []:
+            if not isinstance(item, dict):
+                continue
+            api = _yapi_json_api_to_def(item, cat_name)
+            if api and (api.get("url") or api.get("name")):
+                key = (api.get("method", "?"), api.get("url", ""))
+                if key not in seen:
+                    seen.add(key)
+                    apis.append(api)
+
+    # 多分类文件没有单一模块名——只在实际只有一个分类时才用它作为模块名，
+    # 否则置空（前端按 annotations.category 分组展示，避免误显示为首个分类）。
+    if len(categories) == 1:
+        module_name = next(iter(categories))
+
+    return {"apis": apis, "module_name": module_name}
+
+
 def _coerce_api_format(api: dict) -> dict:
     """把任意来源的 API dict 归一化为新结构（header 映射 + body/return 六字段数组）。
 
@@ -558,7 +751,10 @@ def _coerce_api_format(api: dict) -> dict:
 
 
 def _normalize_field_item(f: dict) -> dict:
-    """旧字段元素 {name,type,required,description,default,children} → 六字段。"""
+    """旧字段元素 {name,type,required,description,default,children} → 六字段。
+
+    保留附加键（如 location=query/body），避免入库归一化时丢失 query/body 分层标记。
+    """
     out = {
         "name": (f.get("name") or "").strip(),
         "type": (f.get("type") or "").strip() or "string",
@@ -567,6 +763,9 @@ def _normalize_field_item(f: dict) -> dict:
         "desc": (f.get("desc") or f.get("description") or "").strip(),
         "value": f.get("value", ""),
     }
+    for k, v in f.items():
+        if k not in out and k != "children":
+            out[k] = v
     children = f.get("children")
     if children:
         out["children"] = [_normalize_field_item(c) for c in children if isinstance(c, dict)]

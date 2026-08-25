@@ -107,9 +107,15 @@ async def retry_api_extract(data: dict):
 
 
 @router.post("/extract-api-code")
-async def extract_api_code(file_path: str = Form(""), module_name: str = Form("")):
-    """纯代码提取接口（YApi MD 格式），不走 LLM。"""
-    from ingest_v2 import extract_apis_from_yapi_md, _extract_text
+async def extract_api_code(file_path: str = Form(""), module_name: str = Form(""),
+                           format: str = Form("md")):
+    """纯代码提取接口，不走 LLM。
+
+    读取类型（format）：
+      - "md"（默认）   → YApi 导出的 MD 文档
+      - "json"        → YApi 导出的 api.json（req_query/req_body_other/res_body 确定性解析）
+    """
+    from ingest_v2 import extract_apis_from_yapi_md, extract_apis_from_yapi_json, _extract_text
     if not file_path or not os.path.exists(file_path):
         return JSONResponse(status_code=400,
                             content={"success": False, "message": "文件不存在"})
@@ -119,11 +125,16 @@ async def extract_api_code(file_path: str = Form(""), module_name: str = Form(""
         if not full_text:
             return JSONResponse(status_code=400,
                                 content={"success": False, "message": "文档内容为空"})
-        extracted = extract_apis_from_yapi_md(full_text)
+        if format == "json":
+            extracted = extract_apis_from_yapi_json(full_text)
+            extract_method = "json"
+        else:
+            extracted = extract_apis_from_yapi_md(full_text)
+            extract_method = "code"
         apis = extracted["apis"]
         if not module_name:
             module_name = extracted["module_name"] or (apis[0]["name"] if apis else "Unknown")
-        # 自动标注
+        # 自动标注（is_export/has_path_params/category 等）
         for api in apis:
             ApiAnnotationRegistry.apply_all(api)
         return {
@@ -132,7 +143,7 @@ async def extract_api_code(file_path: str = Form(""), module_name: str = Form(""
             "apis": apis,
             "file_path": file_path,
             "file_name": os.path.basename(file_path),
-            "extract_method": "code",
+            "extract_method": extract_method,
         }
     except Exception as e:
         return JSONResponse(status_code=500,

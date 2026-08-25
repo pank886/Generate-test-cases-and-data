@@ -41,7 +41,7 @@ async def upload_file(file: UploadFile = File(...),
     # 防路径遍历：只取纯文件名
     filename = _os.path.basename(raw_filename)
     ext = _os.path.splitext(filename)[1].lower()
-    type_map = {".pdf": "product", ".md": "md", ".docx": "product", ".zip": "axure", ".yml": "md", ".yaml": "md"}
+    type_map = {".pdf": "product", ".md": "md", ".json": "md", ".docx": "product", ".zip": "axure", ".yml": "md", ".yaml": "md"}
     file_type = type_map.get(ext)
     if file_type is None:
         supported = ", ".join(type_map.keys())

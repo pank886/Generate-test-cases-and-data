@@ -68,9 +68,9 @@ async def _process_file_bg(task_id: str, file_path: str, ext: str,
             )
             count = result.get("chunks", 0)
             source = "Axure 原型"
-        elif ext == ".md":
-            _progress(20, "MD 文件已接收，等待选择提取方式...")
-            # 不在这里跑 LLM——前端弹窗让用户选 代码提取 / LLM 提取
+        elif ext in (".md", ".json"):
+            _progress(20, "接口文档已接收，等待选择提取方式...")
+            # 不在这里跑 LLM——前端弹窗让用户选 代码提取 / LLM 提取 / JSON 代码提取
             resp = {
                 "success": True,
                 "message": "请选择接口提取方式",

@@ -62,100 +62,106 @@ YAML_ANALYSIS_GUIDE = (
 class YamlMixin:
     """YAML 生成（thinking 分析 → json_mode 输出）+ 多轮修复循环"""
 
-    def _generate_one_yaml(self, row: dict, api_defs_json: str, user_ctx: str,
-                           output_path: str, repair_ctx: dict | None = None) -> str:
-        """Phase C V2 两段式 YAML 生成：thinking 分析 → json_mode 单次输出。
-
-        db_schema 读取 config.DB_SCHEMA（占位，为空时禁 db 断言，2026-08-04 问题 2）。
-
-        与 Phase B 的 analyze_test_points_raw → generate_excel_plan 模式一致：
-          - 第一阶段：thinking on，自由文本分析用例数据需求（全文落 thinking_trace.log）
-          - 第二阶段：thinking off + json_mode，输出结构化 YAML
-
-        校验失败不做 inline 重试（json_mode 无思考，原地重打无法纠正"信念型错误"）—— 直接抛异常，由 _run_yaml_rounds 登记后
-        进入轮末思考自查修复循环。
-
-        repair_ctx（修复轮时非 None）:
-          {prior_output, error_detail, error_pattern_summary, round_no, post_check_issues}
-        """
-        from prompts.extraction_prompts import (
-            analyze_yaml_data_prompt, format_yaml_data_prompt, repair_yaml_data_prompt,
-        )
-        from observability import log_thinking
-
-        db_schema = config.DB_SCHEMA  # 数据库表结构（占位，为空禁 db 断言，2026-08-04 问题 2）
-        factory_methods_text = self._load_factory_methods()
-        test_case_logic = f"执行步骤: {row['steps']}\n预期结果: {row.get('expected', '')}"
-        case_label = (
-            f"{row.get('case_id') or os.path.basename(os.path.dirname(output_path))}"
-            f" | {os.path.basename(os.path.dirname(output_path))}/{os.path.basename(output_path)}"
-        )
-
-        # === 阶段 1：thinking 分析（首轮=需求分析 / 修复轮=带错误上下文自查） ===
-        if repair_ctx:
-            think_prompt = repair_yaml_data_prompt()
-            prompt_vars = dict(
-                api_definitions=api_defs_json,
-                test_case_logic=test_case_logic,
-                user_context=user_ctx,
-                data_factory_methods=factory_methods_text,
-                db_schema=db_schema,
-                error_pattern_summary=repair_ctx.get("error_pattern_summary", ""),
-                prior_output=repair_ctx.get("prior_output", ""),
-                error_detail=repair_ctx.get("error_detail", ""),
-                post_check_issues=repair_ctx.get("post_check_issues", ""),
-            )
-            node_label = f"repair_yaml_data_ROUND{repair_ctx.get('round_no', 2)}"
-            prompt_label = "repair_yaml_data_prompt"
-        else:
-            think_prompt = analyze_yaml_data_prompt()
-            prompt_vars = dict(
-                api_definitions=api_defs_json,
-                test_case_logic=test_case_logic,
-                user_context=user_ctx,
-                data_factory_methods=factory_methods_text,
-                db_schema=db_schema,
-            )
-            node_label = "analyze_yaml_data"
-            prompt_label = "analyze_yaml_data_prompt"
-
-        llm_kwargs = {"extra_body": {"thinking": {"type": "enabled"}}}
-        bound_llm = self.llm.bind(**llm_kwargs)
-        # 空 content 有限重试（公共方法 _invoke_think，复用同一输入重试 config.MAX_RETRIES 次）
-        analysis = self._invoke_think(
-            bound_llm, think_prompt.format_messages(**prompt_vars), label=node_label)
-
-        # Phase C 思考全文与 Phase B 同规格写入 thinking_trace.log
-        log_thinking(node_label, case_label, analysis, prompt_label=prompt_label)
-
-        # === 阶段 2：json_mode 结构化输出（max_retries=0，失败即抛给登记器） ===
-        format_prompt = format_yaml_data_prompt()
-
-        # ── 构建 pre_validate 闭包（共享方法，单节点复用，避免两路径漂移）──
-        inject_annotations = self._build_annotation_injector(api_defs_json)
-
-        # db_schema 为空 → 禁 db 断言（TestData.validate_no_db_when_no_schema，2026-08-04 问题 2）
-        from prompts.response_model import set_db_schema_empty
-        set_db_schema_empty(not bool(db_schema))
-
-        result = self._invoke_structured(format_prompt, TestData,
-            max_retries=0,
-            method="json_mode",
-            pre_validate=inject_annotations,
-            data_analysis=analysis,
-            api_definitions=api_defs_json,
-            test_case_logic=test_case_logic,
-            user_context=user_ctx,
-            data_factory_methods=factory_methods_text,
-            db_schema=db_schema,
-        )
-
-        # ── 写盘管线（共享方法：路径参数替换 + 导出接管 + 序列化原子写盘）──
-        return self._write_yaml_result(result, output_path)
+    # ======================================================================
+    # 两段式 _generate_one_yaml 已注释（2026-08-24）。
+    # 原因：与单节点 _generate_one_yaml_single 重复，且其 prompt 含错误示例
+    #       （format_yaml_data_prompt 内 random_plates 车牌示例导致字段误用），
+    #       生成路径收敛为单节点一次调用。原代码见 git 历史，若需恢复：
+    #       git show HEAD:agent_components/generators/yaml_gen.py
+    # ======================================================================
+    # def _generate_one_yaml(self, row: dict, api_defs_json: str, user_ctx: str,
+    #                        output_path: str, repair_ctx: dict | None = None) -> str:
+    #     """Phase C V2 两段式 YAML 生成：thinking 分析 → json_mode 单次输出。
+    #
+    #     db_schema 读取 config.DB_SCHEMA（占位，为空时禁 db 断言，2026-08-04 问题 2）。
+    #
+    #     与 Phase B 的 analyze_test_points_raw → generate_excel_plan 模式一致：
+    #       - 第一阶段：thinking on，自由文本分析用例数据需求（全文落 thinking_trace.log）
+    #       - 第二阶段：thinking off + json_mode，输出结构化 YAML
+    #
+    #     校验失败不做 inline 重试（json_mode 无思考，原地重打无法纠正"信念型错误"）—— 直接抛异常，由 _run_yaml_rounds 登记后
+    #     进入轮末思考自查修复循环。
+    #
+    #     repair_ctx（修复轮时非 None）:
+    #       {prior_output, error_detail, error_pattern_summary, round_no, post_check_issues}
+    #     """
+    #     from prompts.extraction_prompts import (
+    #         analyze_yaml_data_prompt, format_yaml_data_prompt, repair_yaml_data_prompt,
+    #     )
+    #     from observability import log_thinking
+    #
+    #     db_schema = config.DB_SCHEMA  # 数据库表结构（占位，为空禁 db 断言，2026-08-04 问题 2）
+    #     factory_methods_text = self._load_factory_methods()
+    #     test_case_logic = f"执行步骤: {row['steps']}\n预期结果: {row.get('expected', '')}"
+    #     case_label = (
+    #         f"{row.get('case_id') or os.path.basename(os.path.dirname(output_path))}"
+    #         f" | {os.path.basename(os.path.dirname(output_path))}/{os.path.basename(output_path)}"
+    #     )
+    #
+    #     # === 阶段 1：thinking 分析（首轮=需求分析 / 修复轮=带错误上下文自查） ===
+    #     if repair_ctx:
+    #         think_prompt = repair_yaml_data_prompt()
+    #         prompt_vars = dict(
+    #             api_definitions=api_defs_json,
+    #             test_case_logic=test_case_logic,
+    #             user_context=user_ctx,
+    #             data_factory_methods=factory_methods_text,
+    #             db_schema=db_schema,
+    #             error_pattern_summary=repair_ctx.get("error_pattern_summary", ""),
+    #             prior_output=repair_ctx.get("prior_output", ""),
+    #             error_detail=repair_ctx.get("error_detail", ""),
+    #             post_check_issues=repair_ctx.get("post_check_issues", ""),
+    #         )
+    #         node_label = f"repair_yaml_data_ROUND{repair_ctx.get('round_no', 2)}"
+    #         prompt_label = "repair_yaml_data_prompt"
+    #     else:
+    #         think_prompt = analyze_yaml_data_prompt()
+    #         prompt_vars = dict(
+    #             api_definitions=api_defs_json,
+    #             test_case_logic=test_case_logic,
+    #             user_context=user_ctx,
+    #             data_factory_methods=factory_methods_text,
+    #             db_schema=db_schema,
+    #         )
+    #         node_label = "analyze_yaml_data"
+    #         prompt_label = "analyze_yaml_data_prompt"
+    #
+    #     llm_kwargs = {"extra_body": {"thinking": {"type": "enabled"}}}
+    #     bound_llm = self.llm.bind(**llm_kwargs)
+    #     # 空 content 有限重试（公共方法 _invoke_think，复用同一输入重试 config.MAX_RETRIES 次）
+    #     analysis = self._invoke_think(
+    #         bound_llm, think_prompt.format_messages(**prompt_vars), label=node_label)
+    #
+    #     # Phase C 思考全文与 Phase B 同规格写入 thinking_trace.log
+    #     log_thinking(node_label, case_label, analysis, prompt_label=prompt_label)
+    #
+    #     # === 阶段 2：json_mode 结构化输出（max_retries=0，失败即抛给登记器） ===
+    #     format_prompt = format_yaml_data_prompt()
+    #
+    #     # ── 构建 pre_validate 闭包（共享方法，单节点复用，避免两路径漂移）──
+    #     inject_annotations = self._build_annotation_injector(api_defs_json)
+    #
+    #     # db_schema 为空 → 禁 db 断言（TestData.validate_no_db_when_no_schema，2026-08-04 问题 2）
+    #     from prompts.response_model import set_db_schema_empty
+    #     set_db_schema_empty(not bool(db_schema))
+    #
+    #     result = self._invoke_structured(format_prompt, TestData,
+    #         max_retries=0,
+    #         method="json_mode",
+    #         pre_validate=inject_annotations,
+    #         data_analysis=analysis,
+    #         api_definitions=api_defs_json,
+    #         test_case_logic=test_case_logic,
+    #         user_context=user_ctx,
+    #         data_factory_methods=factory_methods_text,
+    #         db_schema=db_schema,
+    #     )
+    #
+    #     # ── 写盘管线（共享方法：路径参数替换 + 导出接管 + 序列化原子写盘）──
+    #     return self._write_yaml_result(result, output_path)
 
     # ------------------------------------------------------------------
-    # 共享助手（两段式 _generate_one_yaml 与单节点 _generate_one_yaml_single 共用，
-    # 避免两路径漂移）
+    # 共享助手（单节点 _generate_one_yaml_single 专用；原两段式共用说明见 git 历史）
     # ------------------------------------------------------------------
     def _build_annotation_injector(self, api_defs_json: str):
         """构建 pre_validate 闭包：按 url 注入 _annotations + 处理 is_export 空断言。
@@ -237,7 +243,8 @@ class YamlMixin:
                                   output_path: str, repair_ctx: dict | None = None) -> str:
         """单节点 YAML 生成：thinking + json_object 一次调用生成 TestData。
 
-        与 `_generate_one_yaml` 同签名/同产物/同写盘管线，仅 LLM 调用从两段式合并为一次：
+        两段式 `_generate_one_yaml` 已注释（2026-08-24），本方法为唯一生成路径。
+        与原两段式同产物/同写盘管线，仅 LLM 调用合并为一次：
           - thinking 走 reasoning_content（不走 `_invoke_structured` 的 json_mode，
             绕开 METHOD_FEATURES 强制 thinking off），经 `_invoke_think` 的
             reasoning_label 采集落 thinking_trace.log（思考内容监测）；
@@ -245,7 +252,7 @@ class YamlMixin:
             TestData.model_validate（max_retries=0 语义，失败进修复轮）。
 
         首轮 data_analysis = YAML_ANALYSIS_GUIDE；修复轮 = 引导 + 错误上下文。
-        开关 config.YAML_SINGLE_NODE（默认 True）在 `_generate_all_yamls` 决定走本节点还是两段式。
+        （原 YAML_SINGLE_NODE 两段式开关随两段式一并注释，`_generate_all_yamls` 恒走本方法。）
         """
         from prompts.extraction_prompts import generate_yaml_data_single_prompt
         from observability import log_thinking
@@ -439,8 +446,8 @@ class YamlMixin:
                     f"并发 {config.YAML_CONCURRENCY} 个线程，"
                     f"修复轮上限 {config.YAML_REPAIR_ROUNDS}")
 
-        # 单节点开关：True=thinking+json_object 一次调用；False=两段式（analyze → json_mode）
-        gen_func = self._generate_one_yaml_single if config.YAML_SINGLE_NODE else None
+        # 单节点生成：thinking+json_object 一次调用（两段式已注释，2026-08-24 起恒走单节点）
+        gen_func = self._generate_one_yaml_single
         result = self._run_yaml_rounds(yaml_tasks, api_defs_json, user_ctx, output_base,
                                        gen_func=gen_func)
 
@@ -512,7 +519,7 @@ class YamlMixin:
         不写任何占位假文件。
 
         Args:
-            gen_func: 可注入的单文件生成函数（单元测试用），签名同 _generate_one_yaml
+            gen_func: 可注入的单文件生成函数（单元测试用），签名同 _generate_one_yaml_single
             repair_rounds: 修复轮数覆盖（默认 config.YAML_REPAIR_ROUNDS）
             post_check_issues: YAML 后校验发现的问题列表（直接注入修复轮）
         """
@@ -523,7 +530,7 @@ class YamlMixin:
 
         ValidationInterceptor.reset()
 
-        gen = gen_func or self._generate_one_yaml
+        gen = gen_func or self._generate_one_yaml_single
         max_repair = config.YAML_REPAIR_ROUNDS if repair_rounds is None else repair_rounds
         tlog = get_thinking_logger()
 
@@ -589,7 +596,7 @@ class YamlMixin:
                             "generate_yaml_FAILED",
                             f"| {case_id} | {rel_path} | {pid} |",
                             err_text[:1500],
-                            prompt_label="format_yaml_data_prompt",
+                            prompt_label="generate_yaml_data_single_prompt",
                         )
                         # 详细错误日志：原文 + 错误点，写入输出目录
                         _write_fail_detail(output_base, pid, case_id, rel_path,
