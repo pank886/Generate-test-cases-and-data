@@ -1,0 +1,20 @@
+[
+  {
+    "field": "name",
+    "required": true,
+    "type": "string",
+    "desc": "电表名称（必填）"
+  },
+  {
+    "field": "code",
+    "required": true,
+    "type": "string",
+    "desc": "电表编号（必填，唯一；可用 random_code 动态生成）"
+  },
+  {
+    "field": "payConfigCode",
+    "required": false,
+    "type": "string",
+    "desc": "计费方案编码（收费电表必填；从 /payConfig/list 取真实值，固定计费样例：zhyqP25529429，分时：zhyqP96644027；不能随机编 PAY_xxx）"
+  }
+]

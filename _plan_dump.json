@@ -1,0 +1,222 @@
+[
+  {
+    "@allure.epic": "园区基线",
+    "@allure.feature": "智慧用电",
+    "@allure.story": "电表管理",
+    "@allure.title": "电表管理-添加电表-单一费率-正向",
+    "fixture等级": "danyuan",
+    "用例编号": "TC-001",
+    "前置步骤": "无",
+    "执行步骤": "调用 POST /electricMeter/add，创建电表，电表分类 meterTypeCode 取枚举（单一费率），电表编码 code 为 ELEC_TC001，名称 name 为「自动化用例电表001」，总初始电量 electricity 取 0，其余必填字段按接口要求填写\n调用 POST /electricMeter/getList，按电表编码 code=ELEC_TC001 查询",
+    "预期结果": "1.[eq]返回 retCode=1，创建成功且返回新电表编码\n2.[contains]查询结果包含电表编码 ELEC_TC001，电表分类为单一费率"
+  },
+  {
+    "@allure.epic": "园区基线",
+    "@allure.feature": "智慧用电",
+    "@allure.story": "电表管理",
+    "@allure.title": "电表管理-添加电表-收费绑定方案-正向",
+    "fixture等级": "danyuan",
+    "用例编号": "TC-003",
+    "前置步骤": "无",
+    "执行步骤": "调用 POST /electricMeter/add，计费方式选择「收费」，收费方案 payConfigCode 选择已存在且未被其他电表绑定的计费方案编码，电表编码 code=ELEC_TC003，名称 name=「收费电表003」，其余必填字段合规\n调用 POST /electricMeter/getList，按电表编码 code=ELEC_TC003 查询",
+    "预期结果": "1.[eq]返回 retCode=1，创建成功\n2.[contains]查询结果中该电表已绑定所选计费方案"
+  },
+  {
+    "@allure.epic": "园区基线",
+    "@allure.feature": "智慧用电",
+    "@allure.story": "电表管理",
+    "@allure.title": "电表管理-添加电表-网关接入协议必选-正向",
+    "fixture等级": "danyuan",
+    "用例编号": "TC-004",
+    "前置步骤": "无",
+    "执行步骤": "调用 POST /electricMeter/add，接入方式 accessMethod 取枚举（网关接入），对接协议 accessType 取枚举（如 modbusRTU），电表编码 code=ELEC_TC004，其余必填字段合规\n调用 POST /electricMeter/getList，按电表编码 code=ELEC_TC004 查询",
+    "预期结果": "1.[eq]返回 retCode=1，创建成功\n2.[contains]查询结果显示接入方式为网关接入且对接协议正确"
+  },
+  {
+    "@allure.epic": "园区基线",
+    "@allure.feature": "智慧用电",
+    "@allure.story": "电表管理",
+    "@allure.title": "电表管理-获取电表列表-分页筛选-正向",
+    "fixture等级": "danyuan",
+    "用例编号": "TC-005",
+    "前置步骤": "PRE-001",
+    "执行步骤": "调用 POST /electricMeter/getList，传入分页参数 pageNum=1、pageSize=10\n调用 POST /electricMeter/getList，传入查询条件 code=ELEC_001",
+    "预期结果": "1.[eq]返回 retCode=1，列表数据条数不超过 pageSize\n2.[contains]筛选结果包含电表编码 ELEC_001"
+  },
+  {
+    "@allure.epic": "园区基线",
+    "@allure.feature": "智慧用电",
+    "@allure.story": "电表管理",
+    "@allure.title": "电表管理-获取上级电表列表-正向",
+    "fixture等级": "danyuan",
+    "用例编号": "TC-006",
+    "前置步骤": "PRE-004",
+    "执行步骤": "调用 POST /electricMeter/getParentList，获取可作为上级电表的数据",
+    "预期结果": "1.[contains]返回结果中包含 PRE-004 创建的上级电表编码 ELEC_PARENT"
+  },
+  {
+    "@allure.epic": "园区基线",
+    "@allure.feature": "智慧用电",
+    "@allure.story": "电表管理",
+    "@allure.title": "电表管理-删除电表-正向",
+    "fixture等级": "danyuan",
+    "用例编号": "TC-007",
+    "前置步骤": "PRE-001_isolated_TC-007",
+    "执行步骤": "调用 POST /electricMeter/delete，传入 PRE-001 创建的电表编码 ELEC_001\n调用 POST /electricMeter/getList，按电表编码 code=ELEC_001 查询",
+    "预期结果": "1.[eq]返回 retCode=1，删除成功\n2.[ne]查询结果中不再包含电表编码 ELEC_001"
+  },
+  {
+    "@allure.epic": "园区基线",
+    "@allure.feature": "智慧用电",
+    "@allure.story": "电表管理",
+    "@allure.title": "电表管理-添加电表-电表编号重复-异常",
+    "fixture等级": "danyuan",
+    "用例编号": "TC-008",
+    "前置步骤": "PRE-001",
+    "执行步骤": "调用 POST /electricMeter/add，电表编码 code 传 PRE-001 已存在的 ELEC_001，其余字段合规",
+    "预期结果": "1.[eq]返回 retCode=0，提示「电表编号已存在」"
+  },
+  {
+    "@allure.epic": "园区基线",
+    "@allure.feature": "智慧用电",
+    "@allure.story": "电表管理",
+    "@allure.title": "电表管理-添加电表-必填字段缺失-异常",
+    "fixture等级": "danyuan",
+    "用例编号": "TC-009",
+    "前置步骤": "无",
+    "执行步骤": "调用 POST /electricMeter/add，省略必填字段电表编码 code（或电表名称 name），其余字段合规",
+    "预期结果": "1.[contains]返回参数校验失败，提示必填字段不能为空"
+  },
+  {
+    "@allure.epic": "园区基线",
+    "@allure.feature": "智慧用电",
+    "@allure.story": "电表管理",
+    "@allure.title": "电表管理-添加电表-电表分类枚举非法-异常",
+    "fixture等级": "danyuan",
+    "用例编号": "TC-010",
+    "前置步骤": "无",
+    "执行步骤": "调用 POST /electricMeter/add，电表分类 meterTypeCode 传枚举之外的非法值（如 0 或 3），其余字段合规",
+    "预期结果": "1.[contains]返回参数校验失败，提示电表分类取值不合法"
+  },
+  {
+    "@allure.epic": "园区基线",
+    "@allure.feature": "智慧用电",
+    "@allure.story": "电表管理",
+    "@allure.title": "电表管理-添加电表-初始读数负数-异常",
+    "fixture等级": "danyuan",
+    "用例编号": "TC-011",
+    "前置步骤": "无",
+    "执行步骤": "调用 POST /electricMeter/add，单一费率总初始电量 electricity 传 -1，其余字段合规",
+    "预期结果": "1.[contains]返回参数校验失败，提示初始电量不能为负数"
+  },
+  {
+    "@allure.epic": "园区基线",
+    "@allure.feature": "智慧用电",
+    "@allure.story": "电表管理",
+    "@allure.title": "电表管理-添加电表-初始读数超精度-异常",
+    "fixture等级": "danyuan",
+    "用例编号": "TC-012",
+    "前置步骤": "无",
+    "执行步骤": "调用 POST /electricMeter/add，总初始电量 electricity 传 1.235（超过2位小数），其余字段合规",
+    "预期结果": "1.[contains]返回参数校验失败，提示读数最多保留2位小数"
+  },
+  {
+    "@allure.epic": "园区基线",
+    "@allure.feature": "智慧用电",
+    "@allure.story": "电表管理",
+    "@allure.title": "电表管理-添加电表-收费未选方案-异常",
+    "fixture等级": "danyuan",
+    "用例编号": "TC-013",
+    "前置步骤": "无",
+    "执行步骤": "调用 POST /electricMeter/add，计费方式选择「收费」但不传收费方案 payConfigCode，其余字段合规",
+    "预期结果": "1.[contains]返回业务校验失败，提示收费电表必须选择计费方案"
+  },
+  {
+    "@allure.epic": "园区基线",
+    "@allure.feature": "智慧用电",
+    "@allure.story": "电表管理",
+    "@allure.title": "电表管理-添加电表-网关接入未选协议-异常",
+    "fixture等级": "danyuan",
+    "用例编号": "TC-014",
+    "前置步骤": "无",
+    "执行步骤": "调用 POST /electricMeter/add，接入方式 accessMethod 取枚举（网关接入）但不传对接协议 accessType，其余字段合规",
+    "预期结果": "1.[contains]返回业务校验失败，提示网关接入必须选择对接协议"
+  },
+  {
+    "@allure.epic": "园区基线",
+    "@allure.feature": "智慧用电",
+    "@allure.story": "电表管理",
+    "@allure.title": "电表管理-添加电表-名称超长-异常",
+    "fixture等级": "danyuan",
+    "用例编号": "TC-015",
+    "前置步骤": "无",
+    "执行步骤": "调用 POST /electricMeter/add，电表名称 name 传超过最大长度限制的字符串（如 200 字符），其余字段合规",
+    "预期结果": "1.[contains]返回参数校验失败，提示名称超长"
+  },
+  {
+    "@allure.epic": "园区基线",
+    "@allure.feature": "智慧用电",
+    "@allure.story": "电表管理",
+    "@allure.title": "电表管理-添加电表-编号含SQL注入-异常",
+    "fixture等级": "danyuan",
+    "用例编号": "TC-016",
+    "前置步骤": "无",
+    "执行步骤": "调用 POST /electricMeter/add，电表编码 code 传带单引号或 SQL 注入片段（如 \"1' OR '1'='1\"），其余字段合规",
+    "预期结果": "1.[contains]返回参数校验失败或业务拒绝，提示编码格式不合法"
+  },
+  {
+    "@allure.epic": "园区基线",
+    "@allure.feature": "智慧用电",
+    "@allure.story": "电表管理",
+    "@allure.title": "电表管理-删除电表-已绑定计费方案-异常",
+    "fixture等级": "danyuan",
+    "用例编号": "TC-017",
+    "前置步骤": "PRE-003",
+    "执行步骤": "调用 POST /electricMeter/delete，传入 PRE-003 中已绑定计费方案的电表编码 ELEC_BIND",
+    "预期结果": "1.[contains]返回 retCode=0，提示「该方案已绑定资源，无法删除」"
+  },
+  {
+    "@allure.epic": "园区基线",
+    "@allure.feature": "智慧用电",
+    "@allure.story": "电表管理",
+    "@allure.title": "电表管理-删除电表-不存在的编码-异常",
+    "fixture等级": "danyuan",
+    "用例编号": "TC-018",
+    "前置步骤": "无",
+    "执行步骤": "调用 POST /electricMeter/delete，传入不存在的电表编码 ELEC_NOT_EXIST",
+    "预期结果": "1.[contains]返回业务失败，提示电表不存在或无法删除"
+  },
+  {
+    "@allure.epic": "园区基线",
+    "@allure.feature": "智慧用电",
+    "@allure.story": "电表管理",
+    "@allure.title": "电表管理-获取电表列表-非法页码-异常",
+    "fixture等级": "danyuan",
+    "用例编号": "TC-019",
+    "前置步骤": "无",
+    "执行步骤": "调用 POST /electricMeter/getList，传入分页参数 pageNum=0 或 pageNum=-1",
+    "预期结果": "1.[contains]返回参数校验失败，提示分页参数不合法"
+  },
+  {
+    "@allure.epic": "园区基线",
+    "@allure.feature": "智慧用电",
+    "@allure.story": "电表管理",
+    "@allure.title": "电表管理-获取电表列表-非法排序值-异常",
+    "fixture等级": "danyuan",
+    "用例编号": "TC-020",
+    "前置步骤": "无",
+    "执行步骤": "调用 POST /electricMeter/getList，传入排序参数 sortKey=2（超出枚举 0/1）",
+    "预期结果": "1.[contains]返回参数校验失败，提示排序参数不合法"
+  },
+  {
+    "@allure.epic": "园区基线",
+    "@allure.feature": "智慧用电",
+    "@allure.story": "智慧用电",
+    "@allure.title": "电表管理-添加电表-分时-正向",
+    "fixture等级": "danyuan",
+    "用例编号": "TC-002",
+    "前置步骤": "PRE-002",
+    "执行步骤": "1.调用 POST /electricMeter/add，创建分时电表，电表分类 meterTypeCode 取枚举（分时），电表编码 code=ELEC_TC002，名称 name=「自动化用例电表002」，分项初始读数 sharpElectricity、peakElectricity、flatElectricity、valleyElectricity 均取 0，其余必填字段合规。\n2.调用 POST /electricMeter/getList，按电表编码 code=ELEC_TC002 查询。",
+    "预期结果": "1.[eq]返回 retCode=1，创建成功。\n2.[contains]查询结果包含该电表，分时电表展示尖峰平谷分项初始读数。"
+  }
+]

@@ -1,0 +1,242 @@
+[
+  {
+    "name": "name",
+    "required": true,
+    "type": "string",
+    "desc": "电表名称（必填）"
+  },
+  {
+    "name": "code",
+    "required": true,
+    "type": "string",
+    "desc": "电表编号（必填，唯一；可用 random_code 动态生成）"
+  },
+  {
+    "name": "meterDeviceType",
+    "required": true,
+    "type": "string",
+    "desc": "电表类型，直接传中文（枚举）：单相/双相/三相"
+  },
+  {
+    "name": "meterTypeCode",
+    "required": true,
+    "type": "string",
+    "desc": "电表分类（枚举）：1=单相/2=三相/3=双相，与 meterDeviceType 对应"
+  },
+  {
+    "name": "sceneCode",
+    "required": true,
+    "type": "string",
+    "desc": "电表场景编码（必填，从场景接口取真实值，样例：zhyqE29999415）"
+  },
+  {
+    "name": "sceneName",
+    "required": true,
+    "type": "string",
+    "desc": "电表场景名称（样例：公司场所/公寓场所）"
+  },
+  {
+    "name": "accessMethod",
+    "required": true,
+    "type": "string",
+    "desc": "接入方式（枚举，必填）：1=网关接入/2=电表直连/3=平台对接"
+  },
+  {
+    "name": "level",
+    "required": true,
+    "type": "integer",
+    "desc": "电表级别（必填，样例：1）"
+  },
+  {
+    "name": "useType",
+    "required": false,
+    "type": "string",
+    "desc": "用电类型（枚举）：1/2（样例为 1）"
+  },
+  {
+    "name": "meterDeviceManufacturerCode",
+    "required": false,
+    "type": "string",
+    "desc": "厂家编码（枚举/主数据，样例：华立）"
+  },
+  {
+    "name": "meterDeviceManufacturerName",
+    "required": false,
+    "type": "string",
+    "desc": "厂家名称（枚举/主数据，样例：华立）"
+  },
+  {
+    "name": "meterDeviceModelCode",
+    "required": false,
+    "type": "string",
+    "desc": "型号编码（枚举/主数据，样例：DDS28/DTS541）"
+  },
+  {
+    "name": "meterDeviceModelName",
+    "required": false,
+    "type": "string",
+    "desc": "型号名称（枚举/主数据，样例：DDS28/DTS541）"
+  },
+  {
+    "name": "electricControlDeviceCode",
+    "required": false,
+    "type": "string",
+    "desc": "集中器编码（从集中器接口取真实值，样例：pank001/pank002）"
+  },
+  {
+    "name": "electricControlDeviceName",
+    "required": false,
+    "type": "string",
+    "desc": "集中器名称（样例：pank集中器/pank集中器002）"
+  },
+  {
+    "name": "regionCode",
+    "required": false,
+    "type": "string",
+    "desc": "区域编码（从区域接口取真实值，样例：zhyqE96265606 合约专区）"
+  },
+  {
+    "name": "regionName",
+    "required": false,
+    "type": "string",
+    "desc": "区域名称（样例：合约专区）"
+  },
+  {
+    "name": "buildingCode",
+    "required": false,
+    "type": "string",
+    "desc": "楼栋编码（从楼栋接口取真实值，样例：zhyqG45805263 合约楼）"
+  },
+  {
+    "name": "buildingName",
+    "required": false,
+    "type": "string",
+    "desc": "楼栋名称（样例：合约楼）"
+  },
+  {
+    "name": "floorCode",
+    "required": false,
+    "type": "string",
+    "desc": "楼层编码（从楼层接口取真实值，样例：zhyqL29193557）"
+  },
+  {
+    "name": "floorName",
+    "required": false,
+    "type": "string",
+    "desc": "楼层名称（样例：1）"
+  },
+  {
+    "name": "roomCode",
+    "required": false,
+    "type": "string",
+    "desc": "房间编码（从房间接口取真实值，样例：zhyqE58365936）"
+  },
+  {
+    "name": "roomNumber",
+    "required": false,
+    "type": "string",
+    "desc": "房间号（样例：101/102）"
+  },
+  {
+    "name": "roomName",
+    "required": false,
+    "type": "string",
+    "desc": "房间名称（样例：101/102）"
+  },
+  {
+    "name": "personCode",
+    "required": false,
+    "type": "string",
+    "desc": "责任人编码（从人员接口取真实值，样例：zhyqB31966477）"
+  },
+  {
+    "name": "personName",
+    "required": false,
+    "type": "string",
+    "desc": "责任人名称（样例：程文虎）"
+  },
+  {
+    "name": "parentDeviceCode",
+    "required": false,
+    "type": "string",
+    "desc": "上级设备编码（无则传空字符串）"
+  },
+  {
+    "name": "parentDeviceName",
+    "required": false,
+    "type": "string",
+    "desc": "上级设备名称（无则传空字符串）"
+  },
+  {
+    "name": "payConfigCode",
+    "required": false,
+    "type": "string",
+    "desc": "计费方案编码（收费电表必填；从 /payConfig/list 取真实值，固定计费样例：zhyqP25529429，分时：zhyqP96644027；不能随机编"
+  },
+  {
+    "name": "initDetailList",
+    "required": false,
+    "type": "array",
+    "desc": "分时初始化明细：数组 [{elepayTypeCode: sharp/peak/flat/valley/value, initElectricity: 初始度数"
+  },
+  {
+    "name": "electricity",
+    "required": false,
+    "type": "string",
+    "desc": "当前度数/初始读数（字符串，样例：0）"
+  },
+  {
+    "name": "maxValue",
+    "required": false,
+    "type": "string",
+    "desc": "最大需量（字符串，样例：100；分时电表可空）"
+  },
+  {
+    "name": "billingFactor",
+    "required": false,
+    "type": "string",
+    "desc": "计费系数（样例：1）"
+  },
+  {
+    "name": "autoOff",
+    "required": false,
+    "type": "string",
+    "desc": "自动关闸（枚举）：0=否/1=是"
+  },
+  {
+    "name": "mutualInductorOnOrOff",
+    "required": false,
+    "type": "string",
+    "desc": "互感器（枚举）：0=否/1=是"
+  },
+  {
+    "name": "powerRate",
+    "required": false,
+    "type": "number",
+    "desc": "功率（数值，样例：1）"
+  },
+  {
+    "name": "purpose",
+    "required": false,
+    "type": "string",
+    "desc": "用电用途（照明/空调等）"
+  },
+  {
+    "name": "memo",
+    "required": false,
+    "type": "string",
+    "desc": "备注（可空字符串）"
+  },
+  {
+    "name": "whetherToCount",
+    "required": false,
+    "type": "boolean",
+    "desc": "是否计入统计（样例：true）"
+  },
+  {
+    "name": "accessType",
+    "required": false,
+    "type": "string",
+    "desc": "接入类型（枚举）：1/4（样例：单相 4，三相 1）"
+  }
+]

@@ -361,7 +361,7 @@ def generate_yaml_data_single_prompt() -> ChatPromptTemplate:
     # yaml 格式 schema（输出结构唯一来源，禁止自创结构或推断字段）
     {json_schema}
     
-    # 铁律（共 12 条，内容唯一来源 = 上方 schema + human 段的 B/A/接口文档）
+    # 铁律（共 15 条，内容唯一来源 = 上方 schema + human 段的 B/A/接口文档）
     1. 顶层只能有一个 data 数组，每元素含 baseInfo 与 testCase 两个键
     2. 请求体三选一（json/params/data 只出现一个）：优先按接口定义 body 字段的 `location` 选——
        `location=query` 的字段 → params，`location=body` 的字段 → json；接口定义未标 location 时
@@ -377,9 +377,16 @@ def generate_yaml_data_single_prompt() -> ChatPromptTemplate:
     9. 成功/失败断言的期望值取自接口返回定义：断言的字段与期望值必须取自「接口详情文档」返回定义中真实给出的字段/取值/语义；
        正向用例断言业务成功对应的返回取值，反向用例断言失败返回取值；返回定义未给出明确成功/失败取值时，退化为
        contains 字段存在性或 status_code 断言，禁止臆造返回定义之外的固定取值
-    10. 数据唯一化：设备名/编码等唯一键必须动态生成（${{ }} 工厂方法或时间戳/随机后缀），禁止输出固定假值——防跨套件重名与套件内自碰撞
+    10. 唯一键动态化：设备名/编码等唯一键一律用工厂方法生成，可保留用例给出的值作前缀并追加随机后缀，禁止输出纯字面值；覆盖 setup 与用例内所有创建步骤
     11. delete 参数按接口定义：delete 请求参数严格按接口定义填写，禁止输出接口定义之外的任何字段
     12. 禁止 Markdown；只输出纯净 JSON（Pydantic 校验，字段/类型一个都不能错）
+    13. 跨步骤/前置资源引用：引用前置（setup）或上游步骤创建的资源标识（code/name 等），必须从创建步骤
+       input_extract 提取 key（如 $.json.code），本步骤用 ${{get_extract_data(key)}} 引用；禁止写死或重新构造。
+       引用动作禁止随机生成——必须引用创建时提取的同一值
+    14. 列表型返回断言：data 为数组时用 contains 断言 $.data（键=$.data、值=目标值；框架对 $.data 拼接列表
+       全部元素做子串包含，稳定）；避免用 $..字段 做断言（框架取第一个匹配值，列表顺序变化即不稳定）
+    15. ne 断言仅用于简单字段比较（无 JSONPath），禁止对 JSONPath 用 ne（框架 ne 不解析 JSONPath，必败）；
+       JSONPath 断言一律用 eq/contains
     """
 
     # ===================== HUMAN（可变输入） =====================

@@ -1,0 +1,1 @@
+{"name": "name", "required": true, "desc": "电表名称（必填，唯一；建议 random_code 动态生成）"}

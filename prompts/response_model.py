@@ -467,6 +467,34 @@ class TestCase(BaseModel):
                 )
                 ValidationInterceptor.record(rule, msg)
                 raise ValueError(msg)
+            if isinstance(operand, dict):
+                # A 类：操作数 dict 内部禁止 jsonpath/value 显式字段键（2026-08-26 问题 6）
+                _field_format_keys = ("jsonpath", "value", "operator", "expected", "check", "path")
+                bad_keys = [k for k in operand if isinstance(k, str) and k in _field_format_keys]
+                if bad_keys:
+                    rule = "断言操作数显式字段"
+                    msg = (
+                        f"validation[{i}] 运算符 '{op}' 的操作数用了显式字段键 {bad_keys}，"
+                        "执行框架只认 {字段: 期望} 紧凑形式（字段 = JSONPath 如 $.retCode，"
+                        "或简单字段名如 retCode），禁止 jsonpath/value/operator/expected 等"
+                        "字段名做断言键——它们会被框架当 JSONPath 解析且必然匹配不到。"
+                        "请改写为 {$.retCode: 1} 这类紧凑形式。"
+                    )
+                    ValidationInterceptor.record(rule, msg)
+                    raise ValueError(msg)
+                # E 类：contains 期望值必须是标量，禁止 dict/list（2026-08-26 问题 7）
+                if op == "contains":
+                    for _k, _v in operand.items():
+                        if isinstance(_v, (dict, list)):
+                            rule = "contains值非标量"
+                            msg = (
+                                f"validation[{i}] contains 断言 '{_k}' 的期望值是"
+                                f"{type(_v).__name__}，contains 只支持标量目标值"
+                                "（框架对列表/对象做字符串子串包含，dict/list 期望值无法稳定匹配）。"
+                                "请改为单个目标值字符串，如 contains {$.data: <目标值>}。"
+                            )
+                            ValidationInterceptor.record(rule, msg)
+                            raise ValueError(msg)
         return self
 
     @model_validator(mode="after")
@@ -1017,6 +1045,36 @@ class TestData(BaseModel):
                             )
                             ValidationInterceptor.record(rule, msg)
                             raise ValueError(msg)
+        return self
+
+    @model_validator(mode="after")
+    def validate_no_fuzzy_jsonpath(self) -> "TestData":
+        """O2：禁止 $.. 模糊 JSONPath 断言。
+
+        框架对 '$..字段' 只取第一个匹配值，列表顺序变化即断言不稳定（2026-08-26 O2）。
+        列表型返回（data 为数组）必须用 contains 断言 $.data（键=$.data、值=目标值；框架拼接列表全部元素
+        做子串包含，稳定）；单值字段用明确路径 $.字段。$.. 深层通配在框架下不可靠，一律回炉。
+        """
+        for i, step in enumerate(self.data):
+            url = step.baseInfo.get("url", "?")
+            for j, tc in enumerate(step.testCase):
+                for k, v in enumerate(tc.validation):
+                    if not isinstance(v, dict):
+                        continue
+                    for op, payload in v.items():
+                        if not isinstance(payload, dict):
+                            continue
+                        for jp in payload.keys():
+                            if isinstance(jp, str) and jp.startswith("$.."):
+                                rule = "列表断言$.."
+                                msg = (
+                                    f"data[{i}].testCase[{j}].validation[{k}] 用了 '$..' 模糊 JSONPath（{jp}）"
+                                    f"，接口 {url}。框架对 '$..字段' 只取第一个匹配值，列表顺序变化即断言不稳定。"
+                                    "列表型返回（data 为数组）必须用 contains: {{$.data: <目标值>}}"
+                                    "（框架拼接全部元素做子串包含）；单值字段用明确路径 $.字段。"
+                                )
+                                ValidationInterceptor.record(rule, msg)
+                                raise ValueError(msg)
         return self
 
 

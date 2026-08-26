@@ -1,0 +1,34 @@
+[
+  {
+    "name": "retCode",
+    "type": "integer",
+    "required": false,
+    "default": "",
+    "desc": "业务信封：成功=1，失败=0（非 HTTP 状态码，2026-08-21 已确认）",
+    "value": "1"
+  },
+  {
+    "name": "msg",
+    "type": "string",
+    "required": false,
+    "default": "",
+    "desc": "成功时返回 success（2026-08-21 已确认）",
+    "value": "success"
+  },
+  {
+    "name": "data",
+    "type": "object",
+    "required": false,
+    "default": "",
+    "desc": "成功时 data 为 null，2026-08-26 实测 add 返回 {\"retCode\":1,\"msg\":\"success\",\"data\":null}",
+    "value": ""
+  },
+  {
+    "name": "queue",
+    "type": "string",
+    "required": false,
+    "default": "",
+    "desc": "",
+    "value": ""
+  }
+]

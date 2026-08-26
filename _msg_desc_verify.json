@@ -1,0 +1,12 @@
+[
+  {
+    "url": "/park-energy-electric-web/electricMeter/add",
+    "name": "msg",
+    "desc": "成功时返回 success；失败时返回 fail，后端无具体失败文案（2026-08-26 实测）"
+  },
+  {
+    "url": "/park-energy-electric-web/electricMeter/delete",
+    "name": "msg",
+    "desc": "成功时返回 success；失败时返回 fail，后端无具体失败文案（2026-08-26 实测）"
+  }
+]
