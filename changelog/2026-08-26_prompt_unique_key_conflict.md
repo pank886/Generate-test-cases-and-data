@@ -125,12 +125,17 @@ LLM 面对「唯一化」与「用例值优先」两条冲突指令时，v2/v3 �
 ## 方案外发现处置（2026-08-26 用户决策）
 
 **发现 1 → 静态检查拦截**（已实现）
-- `_check_37_unique_keys.py` 新增第 4 步「引用键一致性」：收集 setup_data 全部 input_extract keys + 本文件内已提取 keys，校验用例 `get_extract_data('key')` 引用必须在其中。
+- `tests/tools/_check_37_unique_keys.py`（2026-08-27 由根目录迁入 `tests/tools/`）新增第 4 步「引用键一致性」：收集 setup_data 全部 input_extract keys + 本文件内已提取 keys，校验用例 `get_extract_data('key')` 引用必须在其中。
 - 实测抓到 delete_bound 引用 `ELEC_BIND` 未定义（setup 提取键全集：createdMeterCode/electricMeterCode/pre001MeterCode/pre001IsolatedMeterCode/pre003MeterCode/pre004MeterCode）。
 - 佐证机制缺口：setup 提取 key 有 4 种命名风格并存，LLM 自由命名导致用例层引用难对齐。拦截器作为验证手段（不进运行流程）。
 
 **发现 2 → 记录不修**（用户决策）
 - 3 个 B 类负向用例（meterTypeCode='0' 非法枚举/不传 payConfigCode/不传 accessType）期望 fail 但后端放行。后端确实无此校验，用例断言 fail 不成立。记录数据事实，本轮不修。
+- **实测证据（pytest_v5.log，dev 后端 2026-08-26 19:34 实测，均为 add 接口）**：
+  - invalid_category → `test_AddElectricMeter_InvalidMeterTypeCode_001`：请求 `{accessMethod:'1', code:'METER_pi657d', meterDeviceType:'单相', meterTypeCode:'0', name:'METERN_bqclds', sceneCode:'zhyqE29999415', sceneName:'公司场所'}` → 返回 `{"retCode":1,"msg":"success","data":null}`（**meterTypeCode='0' 非法枚举后端放行**）
+  - billing_not_selected → `test_ElectricMeter_Add_Charge_WithoutPayConfig_001`：请求 `{accessMethod:'1', code:'METER_oicw1j', meterDeviceType:'单相', meterTypeCode:'1', name:'METER_NAME_05zq7d', sceneCode:'zhyqE29999415', sceneName:'公司场所'}`（无 `payConfigCode`） → 返回 `{"retCode":1,"msg":"success","data":null}`（**收费电表不传计费方案后端放行**）
+  - gateway_protocol_not_selected → `test_ElectricMeterAdd_GatewayWithoutAccessType_negative`：请求 `{accessMethod:'1', code:'METER_CODE_br90eh', meterDeviceType:'单相', meterTypeCode:'1', name:'METER_opm3zq', sceneCode:'zhyqE29999415', sceneName:'公司场所'}`（无 `accessType`） → 返回 `{"retCode":1,"msg":"success","data":null}`（**网关接入不传协议后端放行**）
+  - 归因：3 个用例的「必填/枚举校验」假设均不存在于 dev 后端 add 接口。若要修：后端补校验（记 bug）或改用例为「后端真实存在的校验」（如 code 为空「电表编号不能为空」、初始电量负数「初始电量必须大于0.00」）。
 
 **发现 3 → 查 delete 定义，已定位**（用户决策）
 - 实测 add→delete→getList 链路：DEL retCode=1 success（delete 本身正常，body 传 code 数组格式正确）。
