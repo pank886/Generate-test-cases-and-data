@@ -2,7 +2,7 @@
 
 import os
 
-from observability import get_logger
+from infrastructure.observability import get_logger
 
 logger = get_logger(__name__)
 

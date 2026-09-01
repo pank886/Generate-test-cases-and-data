@@ -17,13 +17,13 @@ sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='repla
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, PROJECT_ROOT)
 
-import config  # noqa: E402  (loads settings + .env)
+import infrastructure.config as config  # noqa: E402  (loads settings + .env)
 
 logging.basicConfig(level=logging.INFO,
                     format='%(asctime)s %(levelname)s %(name)s %(message)s',
                     handlers=[logging.StreamHandler(sys.stdout)])
 
-from agent_components.nodes import ChatTestAgentGraph  # noqa: E402
+from agent_components.graph.nodes import ChatTestAgentGraph  # noqa: E402
 from web.tasks import _resolve_api_defs  # noqa: E402
 
 BASE = r'C:/Users/damai/PycharmMiscProject/testcase/园区基线/智慧用电_37_regenerated'

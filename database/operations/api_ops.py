@@ -59,7 +59,7 @@ class ApiOps:
 
         返回反序列化 dict；查不到返回 None。
         """
-        from agent_components.api_annotations import normalize_api_url
+        from infrastructure.annotations.api_annotations import normalize_api_url
         norm_url = normalize_api_url(url)
         m = (method or "").strip().upper()
 

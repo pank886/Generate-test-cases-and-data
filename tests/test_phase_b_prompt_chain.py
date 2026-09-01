@@ -11,12 +11,12 @@ import json
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from prompts.definitions import PromptFactory
+from prompts.extraction_prompts import generate_excel_plan_thinking_prompt
 
 
 def _render_thinking_messages() -> tuple[str, str]:
     """渲染 generate_excel_plan_thinking 的 system + human 消息。"""
-    pt = PromptFactory().generate_excel_plan_thinking()
+    pt = generate_excel_plan_thinking_prompt()
     msgs = pt.format_messages(
         json_schema=json.dumps({"type": "object"}, ensure_ascii=False),
         module_analysis="【模块场景与接口分析】\n- /electricMeter/delete 删除电表",

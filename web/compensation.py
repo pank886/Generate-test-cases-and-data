@@ -8,9 +8,9 @@
 import threading
 import time
 
-import config as _config
+import infrastructure.config as _config
 
-from observability import get_logger
+from infrastructure.observability import get_logger
 
 logger = get_logger(__name__)
 
@@ -45,7 +45,7 @@ def _stop_compensation_worker():
 
 def _compensation_loop():
     """补偿 worker 主循环：轮询 pending 任务，按 task_type 分发处理。"""
-    import config
+    import infrastructure.config as config
     poll_interval = config.COMPENSATION_POLL_INTERVAL
 
     while not _compensation_stop:
@@ -92,11 +92,11 @@ def _process_pending_compensation():
 def _compensate_simple_summary(session, task):
     """补偿 simple_summary 生成：重试 LLM 调用。"""
     import json as _json
-    import config
-    from agent_components.nodes import _get_llm
+    import infrastructure.config as config
+    from agent_components.graph.nodes import _get_llm
     from prompts.extraction_prompts import batch_chunk_summary_prompt
     from database.models import DocumentChunk
-    from agent_components.dual_chroma import get_chroma_db
+    from infrastructure.vector_store.dual_chroma import get_chroma_db
 
     payload = _json.loads(task.payload)
     doc_id = payload["doc_id"]
@@ -164,7 +164,7 @@ def _compensate_chroma_rebuild(session, task):
     """补偿 ChromaDB 重建：从 SQLite 全量重建 collection。"""
     import json as _json
     from database.models import DocumentChunk
-    from agent_components.dual_chroma import get_chroma_db
+    from infrastructure.vector_store.dual_chroma import get_chroma_db
     from ingest_v2 import _build_doc_search_text
 
     payload = _json.loads(task.payload)
@@ -188,7 +188,7 @@ def _compensate_api_search_text(session, task):
     """补偿 API 检索文本重建。"""
     import json as _json
     from database.models import Document
-    from agent_components.dual_chroma import get_chroma_db
+    from infrastructure.vector_store.dual_chroma import get_chroma_db
     from ingest_v2 import _build_api_search_text
 
     payload = _json.loads(task.payload)

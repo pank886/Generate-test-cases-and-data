@@ -212,8 +212,31 @@ for k in sorted(setup_key_owners):
         issues.append(
             f'setup 提取键名冲突：{k!r} 在 {len(owners)} 个块定义（{sorted(owners)}），跨文件引用会串键')
 
+# 8. baseInfo.url 前缀校验（2026-09-01 决策 task#14）：产物 url 必须精确匹配 DB documents.api_url，
+#    禁止 LLM 丢弃业务前缀（v9 getParentList 丢 /park-energy-electric-web/ 前缀 → 请求打到前端
+#    返回 HTML 页面）。DB 定义带前缀而产物丢前缀 → 报错；代码层 _normalize_base_urls 已接管补全，
+#    本检查作为守门兜底（防旧产物/手写文件）。
+_db_urls = set()
+_conn = sqlite3.connect(DB)
+for _r in _conn.execute("SELECT api_url FROM documents"):
+    if _r[0]:
+        _db_urls.add(str(_r[0]).strip().rstrip('/'))
+_conn.close()
+
+for fp in sorted(glob.glob(BASE + '/**/*.yaml', recursive=True)):
+    name = fp.replace('\\', '/').split('/SmartPower/')[-1]
+    data = yaml.safe_load(open(fp, encoding='utf-8'))
+    for i, block in enumerate(data or []):
+        u = str((block.get('baseInfo') or {}).get('url', '') or '').strip()
+        if not u:
+            continue
+        if u.rstrip('/') not in _db_urls:
+            issues.append(
+                f'{name} 块{i} baseInfo.url 不在接口定义中：{u!r}'
+                f'（可能丢了业务前缀，须与 DB api_url 精确匹配）')
+
 if issues:
     print('\n'.join(f'❌ {x}' for x in issues))
     print(f'\n发现 {len(issues)} 个问题')
 else:
-    print('✅ 唯一键动态化 + 引用变量化 + 引用键一致性 + input_extract 方向/路径 + 断言字段 + 提取键名唯一 全部通过')
+    print('✅ 唯一键动态化 + 引用变量化 + 引用键一致性 + input_extract 方向/路径 + 断言字段 + 提取键名唯一 + url前缀 全部通过')

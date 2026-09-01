@@ -1,7 +1,20 @@
-"""Phase B/C: Excel 修复 + YAML 生成 Prompt 模板"""
+"""全阶段 Prompt 模板（文件内按 Phase 分层）。
+
+Phase A — 提取/分析:
+    product_doc_extract_prompt / glossary_extract_prompt / api_def_extract_prompt /
+    batch_chunk_summary_prompt / analyze_product_scenarios_prompt /
+    analyze_axure_ui_flow_prompt / analyze_api_mapping_prompt
+Phase B — Excel 计划生成/修复:
+    generate_excel_plan_thinking_prompt / repair_excel_plan_prompt
+Phase C — 意图识别 / YAML / 翻译 / 依赖映射:
+    confirm_user_intent_prompt / SETUP_CAPTURE_RULE / YAML_ANALYSIS_GUIDE /
+    generate_yaml_data_single_prompt / translate_to_en_prompt /
+    generate_dependency_map_prompt / repair_dependency_map_prompt
+"""
 from langchain_core.prompts import ChatPromptTemplate
 
 
+# ---- Phase A: 产品文档提取 ----
 def product_doc_extract_prompt() -> ChatPromptTemplate:
     """产品文档模块提取 prompt"""
     return ChatPromptTemplate.from_messages([
@@ -18,6 +31,7 @@ def product_doc_extract_prompt() -> ChatPromptTemplate:
     ])
 
 
+# ---- Phase A: 术语表提取 ----
 def glossary_extract_prompt() -> ChatPromptTemplate:
     """提取产品文档中的业务术语表"""
     return ChatPromptTemplate.from_messages([
@@ -34,6 +48,7 @@ def glossary_extract_prompt() -> ChatPromptTemplate:
     ])
 
 
+# ---- Phase A: 接口定义提取 ----
 def api_def_extract_prompt() -> ChatPromptTemplate:
     """接口文档提取 prompt — 全量存储，不丢弃任何参数细节。"""
     return ChatPromptTemplate.from_messages([
@@ -75,6 +90,232 @@ def api_def_extract_prompt() -> ChatPromptTemplate:
     ])
 
 
+# ====================================================================
+# Phase A: 批量 chunk 摘要（入库时生成 simple_summary）
+# ====================================================================
+
+# ---- Phase A: 批次摘要 ----
+def batch_chunk_summary_prompt() -> ChatPromptTemplate:
+    """批量 chunk 摘要：5 chunks/批，LLM 输出 ===CHUNK_SUMMARY=== 分隔词，正则解析。"""
+    return ChatPromptTemplate.from_messages([
+        ("system",
+         "你是文档总结专家。为以下文本块分别生成一句话摘要（50字以内），概括核心内容。\n\n"
+         "### 输出格式\n"
+         "每个摘要以 ===CHUNK_SUMMARY=== 开头，独占一行，紧接着是摘要内容。\n"
+         "不要输出 JSON，不要编号，不要 Markdown。\n\n"
+         "===CHUNK_SUMMARY===\n"
+         "摘要1的内容\n"
+         "===CHUNK_SUMMARY===\n"
+         "摘要2的内容\n"
+         "..."),
+        ("human",
+         "以下是文档《{file_name}》的连续文本块，第 {start_idx}-{end_idx} 块 / 共 {total} 块。\n"
+         "每块位于页面「{page_name}」。\n\n"
+         "{chunks}\n\n"
+         "请为每个文本块生成一句摘要（50字以内），以 ===CHUNK_SUMMARY=== 分隔：")
+    ])
+
+
+# ====================================================================
+# Phase A: 三步分析管线（2026-07-31 讨论确认）
+# ====================================================================
+
+# ---- Phase A: 产品场景分析 ----
+def analyze_product_scenarios_prompt() -> ChatPromptTemplate:
+    """Step 1: 产品文档 → 测试场景总结（thinking 模式，自由文本输出）。"""
+    return ChatPromptTemplate.from_messages([
+        ("system",
+         "你是测试分析师。阅读以下产品需求文档，提取所有测试场景。\n\n"
+         "### 分析要求\n"
+         "1. 识别文档中描述的所有业务场景（如增删改查、导入导出、审批流程等）\n"
+         "2. 每个场景下列出所有功能点（测试点）\n"
+         "3. 每个测试点标注覆盖维度（正向/边界/反向-业务/反向-字段/安全）\n"
+         "4. 注意跨模块依赖和数据约束\n\n"
+         "### 输出\n"
+         "自由文本分析报告，不需要 JSON 格式。\n"
+         "结构建议：场景名 → 描述 → 功能点列表（含 scope）→ 关键数据约束。"),
+        ("human",
+         "### 模块名\n{module_name}\n\n"
+         "### 产品文档\n{product_docs}\n\n"
+         "### 跨模块关系\n{cross_module_relations}\n\n"
+         "请分析以上产品文档的测试场景：")
+    ])
+
+
+# ---- Phase A: Axure 界面流程分析 ----
+def analyze_axure_ui_flow_prompt() -> ChatPromptTemplate:
+    """Step 2: 场景总结 + Axure → 页面交互逻辑总结（thinking 模式，自由文本输出）。"""
+    return ChatPromptTemplate.from_messages([
+        ("system",
+         "你是 UI/UX 分析师。根据已知的测试场景，分析 Axure 原型页面中的交互逻辑。\n\n"
+         "### 分析要求\n"
+         "1. 识别每个场景涉及的页面（列表页、表单页、详情页等）\n"
+         "2. 分析页面间的跳转关系（触发动作 → 跳转目标）\n"
+         "3. 提取页面中的数据表单结构（字段名、类型、必填等）\n"
+         "4. 标注 UI 层面的约束（按钮状态、表单联动、权限控制）\n\n"
+         "### 输出\n"
+         "自由文本分析报告，不需要 JSON 格式。\n"
+         "结构建议：场景 → 关联页面 → 页面跳转关系 → 表单字段 → UI 约束。"),
+        ("human",
+         "### 模块名\n{module_name}\n\n"
+         "### 测试场景总结（Step 1 输出）\n{scenario_analysis}\n\n"
+         "### Axure 原型页面内容\n{axure_pages}\n\n"
+         "请根据场景分析 Axure 页面交互逻辑：")
+    ])
+
+
+# ---- Phase A: 接口映射分析 ----
+def analyze_api_mapping_prompt() -> ChatPromptTemplate:
+    """Step 3: 场景 + 逻辑关系 + API → 接口映射总结（thinking 模式，自由文本输出）。"""
+    return ChatPromptTemplate.from_messages([
+        ("system",
+         "你是接口分析师。根据已知的测试场景和页面交互逻辑，分析接口定义与业务场景的映射关系。\n\n"
+         "### 分析要求\n"
+         "1. 将每个 API 接口映射到对应的业务场景和功能点\n"
+         "2. 分析接口间的数据依赖关系（produces → consumes）\n"
+         "3. 识别跨模块接口调用链\n"
+         "4. 标注数据流向（哪个接口产出什么数据 → 哪个接口消费）\n"
+         "5. 对每个写接口（POST/PUT/PATCH）的 body 字段，标注哪些是枚举/取值字段及其合法取值，"
+         "格式为「字段名：枚举值1/枚举值2/...」，如 meterDeviceType：单相/双相/三相、"
+         "accessMethod：网关接入/电表直连/平台对接、meterTypeCode：1/2/3；"
+         "取值来源以接口定义 body 字段的 desc/备注为准，无明确枚举的不臆造\n\n"
+         "### 输出\n"
+         "自由文本分析报告，不需要 JSON 格式。\n"
+         "结构建议：接口→场景映射 → 数据依赖链 → 跨模块调用链 → 关键约束（含枚举字段取值标注）。"),
+        ("human",
+         "### 模块名\n{module_name}\n\n"
+         "### 测试场景总结（Step 1 输出）\n{scenario_analysis}\n\n"
+         "### 页面交互逻辑（Step 2 输出）\n{ui_flow_analysis}\n\n"
+         "### 接口定义\n{api_definitions}\n\n"
+         "### 模块树\n{module_tree}\n\n"
+         "### 跨模块关系\n{cross_module_relations}\n\n"
+         "请分析接口与场景的映射关系：")
+    ])
+
+
+# ---- Phase B: Excel 计划生成（thinking+json 一步生成） ----
+def generate_excel_plan_thinking_prompt() -> ChatPromptTemplate:
+    """
+    【新】thinking+json_mode 一步生成 Excel 计划。
+    {json_schema} 由调用方注入 ExcelPlanV2.model_json_schema()。
+    """
+    return ChatPromptTemplate.from_messages([
+        ("system",
+         "你是一位资深测试架构师，专注于**接口自动化测试用例设计**。\n\n"
+         "根据【模块场景分析】和【接口定义】，设计详细的测试用例。\n"
+         "严格按下方 JSON Schema 输出，禁止 Markdown，只输出纯 JSON。\n\n"
+         "### JSON Schema（必须严格遵循此结构）\n"
+         "```json\n"
+         "{json_schema}\n"
+         "```\n\n"
+         "### ⚠️ 逆向用例设计要求（优先级高，但需结合业务合理性灵活应用）\n\n"
+         "**整体比例原则**：\n"
+         "- 全局逆向用例数（is_negative_test=true）**应尽量不低于** 正向用例数（is_negative_test=false）的 1/3，以保障异常场景覆盖充分。\n"
+         "- 若实际业务中某些模块/接口天然异常场景极少（如纯查询导出），允许适当降低比例，但需在 `story` 或 `title` 中体现合理性（如「导出-正常」）。\n\n"
+         "**逆向用例设计重点（优先覆盖）**：\n"
+         "A. 参数校验类 —— 优先对 **有必填参数** 或 **参数类型/格式要求严格** 的接口（尤其是写接口）：\n"
+         "   · 必填字段缺失（每个主要必填字段可考虑一条）\n"
+         "   · 参数类型错误 / 格式错误\n"
+         "   · 超长输入 / 特殊字符 / SQL 注入 / XSS 注入\n"
+         "B. 业务规则类 —— 优先对 **POST/PUT/DELETE** 等写接口：\n"
+         "   · 重复创建（唯一约束冲突）\n"
+         "   · 操作不存在的资源（如删除/修改不存在的 ID）\n"
+         "   · 状态机违规（当前状态不允许该操作）\n"
+         "C. 权限与边界类 —— 视接口敏感程度：\n"
+         "   · 无权限访问 / 越权操作\n"
+         "   · 数值越界（最小值−1、最大值+1）\n"
+         "   · 空值 / null / 零值 / 负值\n"
+         "   · 并发冲突（同时操作同一资源）\n\n"
+         "**以上清单为指导性建议，请根据接口实际业务逻辑选择性应用，不必为每个接口生硬套用所有类别。**\n\n"
+         "**逆向用例格式规范**：\n"
+         "- title 末尾建议标注「-反向」或「-异常」，便于识别\n"
+         "- expected 必须明确写出异常/报错/失败的具体内容，严禁写「操作成功」「返回正常」\n"
+         "- is_negative_test 必须设为 true\n"
+         "- steps 中必须描述触发异常的具体操作（如省略必填字段、传入错误类型值），禁止内嵌完整 JSON 请求体\n\n"
+         "### 断言关键词（预期结果中必须使用）\n"
+         "- [eq] 相等断言：验证返回值与预期完全相等\n"
+         "- [contains] 包含断言：验证返回值包含预期内容\n"
+         "- [ne] 不相等断言：确认删除/变更后旧数据不存在\n"
+         "- [db] 数据库断言：**仅当下方「数据库表结构信息」非空时才允许使用**；"
+         "表结构为空时禁止 [db] 断言（无法写正确 SQL），改用 [eq]/[contains]/[ne]\n\n"
+         "### 共享前置引用规范（硬性要求，违反会整批校验失败）\n\n"
+         "- 每个用例的 preconditions 字段**只能**引用 shared_preconditions 数组中实际存在的 id（形如 PRE-001）。\n"
+         "- **禁止**在 preconditions 中写自由文本描述（如「已创建电表」）、TC 编号或其他非 PRE 编号内容。\n"
+         "- 所有被引用的 PRE 编号必须在该输出 JSON 的 shared_preconditions 中**已定义**，禁止悬空引用（引用未定义的前置）。\n"
+         "- 前置无引用时，preconditions 输出空数组 []，不要填任何占位内容。\n"
+         "- shared_preconditions 的 id 建议按 PRE-001、PRE-002… 连续编号，name/steps/expected 保持完整。\n\n"
+         "### 思维链设计规范（硬性要求：每个用例按 前置→执行→断言 三段式设计）\n\n"
+         "- **前置（preconditions）**：先想清楚「要测该操作，必须先准备什么」——通过哪个接口（写 url）"
+         "创建/初始化哪个实体。前置必须落在 shared_preconditions：每个 PRE 描述一条具体的准备操作"
+         "（调用 {{method}} {{url}} 创建/初始化 {{实体}}），禁止用自由文本（如「已创建电表」）代替。\n"
+         "- 写操作（新增/修改/删除/绑定/审批等）必须先有对应的创建/初始化前置；"
+         "逆向用例若故意省去前置（如删除不存在的资源），该省去本身要在步骤/预期中体现。\n"
+         "- **枚举/取值字段不写死字面量（硬性要求，只约束枚举/取值类字段）**：值来自接口定义 desc 的"
+         "枚举/取值字段（如电表类型、接入方式、分类等）在前置（PRE）与步骤中只写字段名与取值来源，"
+         "禁止写死具体值——取值来源以「接口映射分析」中的枚举标注为准"
+         "（如「电表类型 meterDeviceType 取枚举（单相/双相/三相）」）；"
+         "被跨用例引用的标识/编码字段（如 code/name/sceneCode）不受此限，可保留具体值；"
+         "仅当需多个用例（>2）以不同取值区分时才允许写出具体枚举值。\n"
+         "- **执行（steps）**：有序操作链，每行一步，体现接口依赖顺序（先查询确认 → 再操作 → 再验证）。\n"
+         "  · 每行格式：调用 {{method}} {{url}}，做{{业务动作}}。步骤中的 url 必须能溯源到下方"
+         "【模块场景与接口分析】或【接口定义】。\n"
+         "  · 删除/修改/解绑等操作后，需经查询接口验证结果；跨模块用例体现接口间的调用链。\n"
+         "  · **禁止在 steps 中内嵌完整 JSON 请求体**；具体参数值属 Phase C 数据层，"
+         "这里只描述操作意图与关键触发条件（如省略必填字段、错误类型值）。\n"
+         "- **断言（expected）**：每行对应一步，行数与 steps 一一对应；断言内容与操作语义对齐"
+         "（创建成功/查询命中/删除成功/异常拦截等）。\n"
+         "- **强令使用上下文**：充分利用下方【模块场景与接口分析】【接口定义】【关联模块】【用户需求】全部信息，"
+         "禁止忽略给定分析、禁止凭空编造接口/步骤/接口关系。\n"
+         "- **只使用提供的信息分析，禁止瞎编**：所有分析、步骤、前置、断言必须建立在下方提供的信息之上，"
+         "禁止引入提供范围之外的知识、接口、字段或数据来凑用例；信息不足时如实说明，宁可少设计也不编造。\n\n"
+         "### 用例设计规范\n\n"
+         "**模块与功能点识别**：\n"
+         "- 必须先识别所有子模块及其功能点（新增、查询、修改、删除、导出、审批等）\n"
+         "- 每个功能点至少 3-5 条（正向+逆向合计），依据详细产品文档充分设计\n\n"
+         "- **每个接口至少 1 条用例直接调用该接口（硬性要求）**\n"
+         "- 导出/导入/模板/开关类**无参数接口**（url 含 export / importTemplate / template / autoOff / download 等，"
+         "或 GET 且无任何必填参数）同样必须至少 1 条用例直接调用，"
+         "如验证空文件导出、模板下载、开关状态查询等，**禁止仅因无参数而跳过**\n\n"
+         "**正向测试**：每个操作至少一个正向用例；审批类操作各至少一个正向\n\n"
+         "**字段校验**（作为逆向用例的组成部分）：必填缺失/格式错误/超长输入/特殊字符各至少 1 条\n"
+         "**边界值**：数值最小值-1/最小值/最大值/最大值+1，时间临界时刻，空值零值负值\n"
+         "**异常场景**：权限不足、数据冲突、并发、依赖不可用、网络超时\n"
+         "**跨模块联动**：利用关联模块设计端到端场景\n\n"
+         "**步骤/预期严格对齐（硬性要求，违反会整批校验失败）**：\n"
+         "- steps 每行一个操作，expected 每行对应该操作的断言，**行数必须一一对应**（steps 2 行 → expected 2 行）\n"
+         "- expected 每行以断言标签开头（如 `1.[eq]创建成功`、`2.[db]存在记录`），"
+         "禁止把多步断言合并成一行（如 `返回成功；[db] 新增记录` 应拆为两行）\n\n"
+         "**用例质量要求**：无冗余无重复无遗漏，逻辑严谨；覆盖等价类划分、边界值分析、场景法、错误推测法"
+        ),
+        ("human",
+         "{gen_warning}"
+         "### 模块场景与接口分析（已预分析，权威数据源）\n{module_analysis}\n\n"
+         "### 接口定义\n{api_definitions}\n\n"
+         "### 关联模块\n{related_docs}\n\n"
+         "### 用户需求\n{user_context}\n\n"
+         "### 数据库表结构信息（为空时禁止 [db] 断言）\n{db_schema}\n\n"
+         "**⚠️ 输出前柔性自检（无需严格逐项核对，但需在思考中确认整体合理性）：**\n"
+         "□ 逆向用例总数是否大致达到正向用例的 1/3？若明显不足，请思考是否有遗漏的异常场景。\n"
+         "□ 写接口（POST/PUT/DELETE）是否都覆盖了必要的参数校验和业务规则异常？\n"
+         "□ 对于纯查询/导出等接口，是否根据其参数复杂度适当补充了异常用例（如参数错误）？\n"
+         "□ 每条逆向用例的 `expected` 是否明确了具体的报错/异常信息？\n"
+         "□ 每条用例的 `preconditions` 是否只引用了 shared_preconditions 中实际存在的 PRE 编号？"
+         "是否混入了自由文本或引用了未定义的前置编号？\n"
+         "□ 每条用例的 steps 与 expected 行数是否一一对应？expected 是否每行以断言标签开头、未合并多步断言？\n"
+         "□ 每条用例是否按 前置→执行→断言 三段式设计？写操作是否都准备了对应的创建/初始化前置？\n"
+         "□ steps 是否每行 = 调用 {{method}} {{url}} 做{{业务动作}}、url 可溯源到接口定义/场景分析？是否误内嵌了 JSON 请求体？\n"
+         "□ 前置/步骤中的枚举/取值字段是否未写死具体值、只写了字段名与取值来源（标识/编码字段除外）？\n"
+         "□ 删除/修改后是否经查询接口验证？跨接口用例是否体现了接口调用链？\n"
+         "□ 是否只使用提供的信息分析、未引入范围外知识/接口/数据瞎编？信息不足时是否如实说明而非凑数？\n\n"
+         "如果「模块场景与接口分析」不为空，说明场景和接口映射已预分析完成，"
+         "请直接据此生成测试用例，不要重复分析场景。"
+         "如果为空，请按接口定义自行分析。"
+         "请设计测试用例并输出 JSON。\n\n"
+        )
+    ])
+
+
+# ---- Phase B: Excel 计划修复 ----
 def repair_excel_plan_prompt() -> ChatPromptTemplate:
     """Excel 计划修复 prompt：按错误信息修正失败用例，代码侧根据 failed_ids 裁剪输出。"""
     return ChatPromptTemplate.from_messages([
@@ -135,6 +376,33 @@ def repair_excel_plan_prompt() -> ChatPromptTemplate:
     ])
 
 
+# ---- Phase C: 意图识别与模块匹配 ----
+def confirm_user_intent_prompt() -> ChatPromptTemplate:
+    """Phase C 节点1：根据用户输入匹配候选模块名。"""
+    return ChatPromptTemplate.from_messages([
+    ("system",
+     "你是一个智能模块匹配助手。根据用户的自然语言描述，从模块列表中找出最相关的模块。\n\n"
+     "### 匹配规则\n"
+     "1. **语义匹配优先**：用户可能用不同措辞描述同一个功能，你需要理解语义。\n"
+     "   例如用户说「下单功能」→ 可能对应「销售订单管理」「购物车服务」等。\n"
+     "2. **最多 3 个**：返回你认为最可能的前 1-3 个模块，按相关性从高到低排列。\n"
+     "3. **宁缺毋滥**：如果都不匹配，返回空列表 []，confidence 设为 low。\n"
+     "4. **confidence 标准**：\n"
+     "   - high：用户描述与某个模块高度吻合，无需怀疑\n"
+     "   - medium：有候选但存在不确定性\n"
+     "   - low：无法确定匹配，建议用户重新描述\n"
+     "5. **只输出 JSON**：禁止任何解释文字、禁止 Markdown。\n"
+     '6. **输出格式**：{{"matched_modules": ["模块名1", "模块名2"], "confidence": "high"}}'
+    ),
+    ("human",
+     "用户输入: {user_input}\n\n"
+     "可用模块列表:\n{module_list}\n\n"
+     "请匹配最相关的模块："
+    )
+])
+
+
+# ---- Phase C: 英文翻译 ----
 def translate_to_en_prompt() -> ChatPromptTemplate:
     """Phase C 英文翻译 prompt：将中文 feature/story/title 翻译为合法的英文标识符。"""
     return ChatPromptTemplate.from_messages([
@@ -341,6 +609,7 @@ def translate_to_en_prompt() -> ChatPromptTemplate:
 #     ])
 
 
+# ---- Phase C: YAML 数据生成 ----
 def generate_yaml_data_single_prompt() -> ChatPromptTemplate:
     """Phase C YAML 数据生成 — 单节点专用（schema 驱动，无示例）。
 
@@ -416,6 +685,35 @@ def generate_yaml_data_single_prompt() -> ChatPromptTemplate:
     ])
 
 
+# ============================================================
+# YAML 生成 Prompt 常量（2026-09-01 自 yaml_gen.py 迁移，A+B+C 重构）
+# ============================================================
+
+# 2026-08-27 v8 根因修复（决策「注入 setup 标记」）：setup 是否捕获键是 LLM 掷骰子——
+# prompt 铁律 8 允许省略无用 extract、铁律 13 只约束引用方，且 LLM 无法识别「共享前置」任务。
+# 此规则注入 setup 任务 steps（走 test_case_logic），强制 setup 块捕获资源标识供下游引用。
+# 规则表述（非示例），符合 prompt 无示例约束。
+# ---- Phase C: 常量·前置捕获规则 ----
+SETUP_CAPTURE_RULE = (
+    "【共享前置 setup 块】本文件为共享前置，创建的资源标识（code 等唯一键）"
+    "必须通过 input_extract 捕获（键名 camelCase 语义化，如 pre001MeterCode），"
+    "供后续用例与清理引用；即使本文件内无引用也必须捕获，禁止省略 input_extract"
+)
+
+# 单节点生成引导：浓缩 analyze 的 5 条分析要点，引导模型在 thinking 里完成分析
+# （单节点 thinking 走 reasoning_content，content 直接输出 TestData JSON，无独立分析文本）
+# ---- Phase C: 常量·YAML 分析指南 ----
+YAML_ANALYSIS_GUIDE = (
+    "请先在思考中完成以下分析，再严格按本 prompt 的 JSON 结构输出：\n"
+    "1. 接口匹配：每个步骤对应哪个接口（url/method 与接口定义一致）\n"
+    "2. 请求参数：来源（用例指定/上游提取/工厂方法）\n"
+    "3. 数据传递：哪些返回值需要 extract 供下游引用\n"
+    "4. 断言设计：断言字段与期望值\n"
+    "5. 动态值：用哪个工厂函数，还是固定字面量"
+)
+
+
+# ---- Phase C: 依赖映射生成 ----
 def generate_dependency_map_prompt() -> ChatPromptTemplate:
     """Phase C Step 0: 生成 dependency_map.json（thinking 节点用）。
 
@@ -454,6 +752,7 @@ def generate_dependency_map_prompt() -> ChatPromptTemplate:
     ])
 
 
+# ---- Phase C: 依赖映射修复 ----
 def repair_dependency_map_prompt() -> ChatPromptTemplate:
     """Phase C Step 0 补漏修复：只补全第一轮遗漏的用例/story 前置序列（D5）。
 
@@ -494,103 +793,4 @@ def repair_dependency_map_prompt() -> ChatPromptTemplate:
          "### 上下文备注\n{context_note}\n\n"
          "### 用户意图\n{user_context}\n\n"
          "请生成补漏依赖映射 JSON：")
-    ])
-
-
-# ====================================================================
-# Phase A: 批量 chunk 摘要（入库时生成 simple_summary）
-# ====================================================================
-
-def batch_chunk_summary_prompt() -> ChatPromptTemplate:
-    """批量 chunk 摘要：5 chunks/批，LLM 输出 ===CHUNK_SUMMARY=== 分隔词，正则解析。"""
-    return ChatPromptTemplate.from_messages([
-        ("system",
-         "你是文档总结专家。为以下文本块分别生成一句话摘要（50字以内），概括核心内容。\n\n"
-         "### 输出格式\n"
-         "每个摘要以 ===CHUNK_SUMMARY=== 开头，独占一行，紧接着是摘要内容。\n"
-         "不要输出 JSON，不要编号，不要 Markdown。\n\n"
-         "===CHUNK_SUMMARY===\n"
-         "摘要1的内容\n"
-         "===CHUNK_SUMMARY===\n"
-         "摘要2的内容\n"
-         "..."),
-        ("human",
-         "以下是文档《{file_name}》的连续文本块，第 {start_idx}-{end_idx} 块 / 共 {total} 块。\n"
-         "每块位于页面「{page_name}」。\n\n"
-         "{chunks}\n\n"
-         "请为每个文本块生成一句摘要（50字以内），以 ===CHUNK_SUMMARY=== 分隔：")
-    ])
-
-
-# ====================================================================
-# Phase A: 三步分析管线（2026-07-31 讨论确认）
-# ====================================================================
-
-def analyze_product_scenarios_prompt() -> ChatPromptTemplate:
-    """Step 1: 产品文档 → 测试场景总结（thinking 模式，自由文本输出）。"""
-    return ChatPromptTemplate.from_messages([
-        ("system",
-         "你是测试分析师。阅读以下产品需求文档，提取所有测试场景。\n\n"
-         "### 分析要求\n"
-         "1. 识别文档中描述的所有业务场景（如增删改查、导入导出、审批流程等）\n"
-         "2. 每个场景下列出所有功能点（测试点）\n"
-         "3. 每个测试点标注覆盖维度（正向/边界/反向-业务/反向-字段/安全）\n"
-         "4. 注意跨模块依赖和数据约束\n\n"
-         "### 输出\n"
-         "自由文本分析报告，不需要 JSON 格式。\n"
-         "结构建议：场景名 → 描述 → 功能点列表（含 scope）→ 关键数据约束。"),
-        ("human",
-         "### 模块名\n{module_name}\n\n"
-         "### 产品文档\n{product_docs}\n\n"
-         "### 跨模块关系\n{cross_module_relations}\n\n"
-         "请分析以上产品文档的测试场景：")
-    ])
-
-
-def analyze_axure_ui_flow_prompt() -> ChatPromptTemplate:
-    """Step 2: 场景总结 + Axure → 页面交互逻辑总结（thinking 模式，自由文本输出）。"""
-    return ChatPromptTemplate.from_messages([
-        ("system",
-         "你是 UI/UX 分析师。根据已知的测试场景，分析 Axure 原型页面中的交互逻辑。\n\n"
-         "### 分析要求\n"
-         "1. 识别每个场景涉及的页面（列表页、表单页、详情页等）\n"
-         "2. 分析页面间的跳转关系（触发动作 → 跳转目标）\n"
-         "3. 提取页面中的数据表单结构（字段名、类型、必填等）\n"
-         "4. 标注 UI 层面的约束（按钮状态、表单联动、权限控制）\n\n"
-         "### 输出\n"
-         "自由文本分析报告，不需要 JSON 格式。\n"
-         "结构建议：场景 → 关联页面 → 页面跳转关系 → 表单字段 → UI 约束。"),
-        ("human",
-         "### 模块名\n{module_name}\n\n"
-         "### 测试场景总结（Step 1 输出）\n{scenario_analysis}\n\n"
-         "### Axure 原型页面内容\n{axure_pages}\n\n"
-         "请根据场景分析 Axure 页面交互逻辑：")
-    ])
-
-
-def analyze_api_mapping_prompt() -> ChatPromptTemplate:
-    """Step 3: 场景 + 逻辑关系 + API → 接口映射总结（thinking 模式，自由文本输出）。"""
-    return ChatPromptTemplate.from_messages([
-        ("system",
-         "你是接口分析师。根据已知的测试场景和页面交互逻辑，分析接口定义与业务场景的映射关系。\n\n"
-         "### 分析要求\n"
-         "1. 将每个 API 接口映射到对应的业务场景和功能点\n"
-         "2. 分析接口间的数据依赖关系（produces → consumes）\n"
-         "3. 识别跨模块接口调用链\n"
-         "4. 标注数据流向（哪个接口产出什么数据 → 哪个接口消费）\n"
-         "5. 对每个写接口（POST/PUT/PATCH）的 body 字段，标注哪些是枚举/取值字段及其合法取值，"
-         "格式为「字段名：枚举值1/枚举值2/...」，如 meterDeviceType：单相/双相/三相、"
-         "accessMethod：网关接入/电表直连/平台对接、meterTypeCode：1/2/3；"
-         "取值来源以接口定义 body 字段的 desc/备注为准，无明确枚举的不臆造\n\n"
-         "### 输出\n"
-         "自由文本分析报告，不需要 JSON 格式。\n"
-         "结构建议：接口→场景映射 → 数据依赖链 → 跨模块调用链 → 关键约束（含枚举字段取值标注）。"),
-        ("human",
-         "### 模块名\n{module_name}\n\n"
-         "### 测试场景总结（Step 1 输出）\n{scenario_analysis}\n\n"
-         "### 页面交互逻辑（Step 2 输出）\n{ui_flow_analysis}\n\n"
-         "### 接口定义\n{api_definitions}\n\n"
-         "### 模块树\n{module_tree}\n\n"
-         "### 跨模块关系\n{cross_module_relations}\n\n"
-         "请分析接口与场景的映射关系：")
     ])

@@ -8,7 +8,7 @@ import json
 import os
 import re
 
-from observability import get_logger
+from infrastructure.observability import get_logger
 from prompts.response_model import TranslationResult
 
 logger = get_logger(__name__)

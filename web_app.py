@@ -17,7 +17,7 @@ try:
 except (AttributeError, ValueError):
     pass
 
-import config
+import infrastructure.config as config
 from web.app import app, logger
 
 

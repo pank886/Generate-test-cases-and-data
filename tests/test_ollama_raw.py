@@ -34,7 +34,7 @@ if _PROJECT_ROOT not in sys.path:
 import httpx
 
 # ---- Read config from .env / settings ----
-from settings import settings
+from infrastructure.settings import settings
 
 EMBEDDING_MODEL = settings.embedding_model or "bge-m3"
 EMBEDDING_URL = settings.embedding_url or "http://localhost:11434"

@@ -29,7 +29,7 @@ def _reset_db():
     import database as _db
     _db._ENGINE = None
     _db._SESSION_LOCAL = None
-    from agent_components import dual_chroma
+    from infrastructure.vector_store import dual_chroma
     dual_chroma._chroma_instance = None
     _db.DB_DIR = tempfile.mkdtemp()
     _db.DB_PATH = os.path.join(_db.DB_DIR, "test.db")
@@ -154,7 +154,7 @@ class TestNoLocalFile:
     def test_delete_after_physical_file_removed(self, client):
         """先删磁盘文件，再通过 API 删除，仍能清理干净。"""
         import os as _os
-        import config
+        import infrastructure.config as config
         _create_doc("cleanup.pdf")
 
         # 手动删除物理文件（模拟磁盘清理）
@@ -213,11 +213,11 @@ class TestChromaRetrySuccess:
     """_chroma_db 为 None 时创建延迟任务，模拟 5 分钟后重试成功。"""
 
     @patch("web.state._chroma_db", None)  # 2026-08-03：files.py 从 web.state 导入，patch 原 web.app 无效
-    @patch("config.CHROMA_RETRY_DELAY", 0.1)  # 100ms，不等 5 分钟
+    @patch("infrastructure.config.CHROMA_RETRY_DELAY", 0.1)  # 100ms，不等 5 分钟
     def test_retry_succeeds(self, client):
         """ChromaDB 不可用 → 延迟重试 → 成功。"""
         import asyncio
-        import config
+        import infrastructure.config as config
 
         _create_doc("chroma_retry.pdf")
         doc_id = f"test_chroma_retry.pdf"
@@ -247,8 +247,8 @@ class TestChromaRetryFail:
     """_chroma_db 为 None → 延迟重试也失败 → 输出日志和控制台。"""
 
     @patch("web.state._chroma_db", None)  # 2026-08-03：files.py 从 web.state 导入，patch 原 web.app 无效
-    @patch("config.CHROMA_RETRY_DELAY", 0.1)
-    @patch("agent_components.dual_chroma.get_chroma_db", side_effect=Exception("Ollama 未启动"))
+    @patch("infrastructure.config.CHROMA_RETRY_DELAY", 0.1)
+    @patch("infrastructure.vector_store.dual_chroma.get_chroma_db", side_effect=Exception("Ollama 未启动"))
     def test_retry_fails_with_console_output(self, mock_get_db, client, caplog):
         """ChromaDB 不可用 → 延迟重试也失败 → 记录失败日志。
 

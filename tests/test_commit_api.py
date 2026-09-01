@@ -18,7 +18,7 @@ from fastapi.testclient import TestClient
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
-import config
+import infrastructure.config as config
 
 
 # ============================================================
@@ -30,7 +30,7 @@ def _reset_db():
     import database as _db
     _db._ENGINE = None
     _db._SESSION_LOCAL = None
-    from agent_components import dual_chroma
+    from infrastructure.vector_store import dual_chroma
     dual_chroma._chroma_instance = None
     _db.DB_DIR = tempfile.mkdtemp()
     _db.DB_PATH = os.path.join(_db.DB_DIR, "test.db")

@@ -8,8 +8,8 @@ import json
 import os
 import re
 
-import config
-from observability import get_logger
+import infrastructure.config as config
+from infrastructure.observability import get_logger
 
 logger = get_logger(__name__)
 
@@ -49,7 +49,7 @@ class ExcelMixin:
         Returns:
             dependency_map.json 的绝对路径
         """
-        from observability import log_phase_header, log_thinking
+        from infrastructure.observability import log_phase_header, log_thinking
         from prompts.extraction_prompts import (
             generate_dependency_map_prompt, repair_dependency_map_prompt)
         from prompts.response_model import DependencyMap

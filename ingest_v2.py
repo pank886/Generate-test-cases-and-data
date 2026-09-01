@@ -41,9 +41,9 @@ from ingest import (
     process_axure_zip,
 )
 # ChromaDB 单例（测试通过 _ing.get_chroma_db 打 monkeypatch，需保持同引用）
-from agent_components.dual_chroma import get_chroma_db
+from infrastructure.vector_store.dual_chroma import get_chroma_db
 
-from observability import get_logger
+from infrastructure.observability import get_logger
 
 logger = get_logger(__name__)
 

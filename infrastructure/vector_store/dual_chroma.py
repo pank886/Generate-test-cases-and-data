@@ -16,9 +16,9 @@ logger = logging.getLogger(__name__)
 
 from langchain_chroma import Chroma
 from langchain_core.documents import Document
-from agent_components.fallback_embeddings import FallbackOllamaEmbeddings
+from infrastructure.vector_store.fallback_embeddings import FallbackOllamaEmbeddings
 
-from config import (
+from infrastructure.config import (
     CHROMA_DB_DIR,
     COLLECTION_DOC_SEARCH,
     EMBEDDING_MODEL,

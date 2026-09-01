@@ -3,7 +3,7 @@
 入库阶段自动检测 → 写入 annotations → 校验阶段按标识精准放行。
 
 用法:
-    from agent_components.api_annotations import ApiAnnotationRegistry
+    from infrastructure.annotations.api_annotations import ApiAnnotationRegistry
 
     # 入库阶段：对所有 API 跑检测
     for api in all_apis_dict:

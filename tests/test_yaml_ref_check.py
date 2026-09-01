@@ -8,7 +8,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from agent_components.generators.yaml_gen import _find_missing_yaml_refs
+from agent_components.validation.yaml_validator import _find_missing_yaml_refs
 
 
 class TestFindMissingYamlRefs:

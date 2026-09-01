@@ -22,7 +22,7 @@ def _reset_singletons():
     import database
     database._ENGINE = None
     database._SESSION_LOCAL = None
-    from agent_components import dual_chroma
+    from infrastructure.vector_store import dual_chroma
     dual_chroma._chroma_instance = None
     yield
 

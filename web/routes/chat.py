@@ -18,9 +18,9 @@ async def confirm_plan(excel_path: str = Form(None),
     module_name：模块作用域（模块绑定 + 关联模块绑定接口，2026-08-20 收敛）；
     可空——后台优先从计划目录 module_scope.json 读取。
     """
-    import config
+    import infrastructure.config as config
     from web.state import _phase_b_components, _create_task
-    from observability import get_logger
+    from infrastructure.observability import get_logger
 
     logger = get_logger(__name__)
     logger.info(">>> 测试计划已确认，开始生成测试文件...")
@@ -83,7 +83,7 @@ async def workflow_start(user_input: str = Form(...),
     """
     import time
     import uuid
-    from agent_components.graph_builder import _make_initial_state
+    from agent_components.graph.graph_builder import _make_initial_state
     from web.state import (
         _get_imported_files, _phase_b_graph, _phase_b_components,
         _vector_ready,
@@ -91,7 +91,7 @@ async def workflow_start(user_input: str = Form(...),
     )
 
     # 重建 LLM 客户端，避免复用上一个工作流残留的僵死连接池
-    from agent_components.nodes import reload_llm
+    from agent_components.graph.nodes import reload_llm
     reload_llm()
 
     if not user_input.strip():
@@ -204,7 +204,7 @@ async def workflow_confirm(session_id: str = Form(...),
 
     # 策略3: 都不匹配 → 当作新描述重新识别
     if not confirmed_module:
-        from agent_components.graph_builder import _make_initial_state
+        from agent_components.graph.graph_builder import _make_initial_state
         new_state = _make_initial_state(stripped)
         import asyncio
         try:

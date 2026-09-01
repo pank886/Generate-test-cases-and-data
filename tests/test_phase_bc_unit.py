@@ -14,7 +14,7 @@ from prompts.response_model import (
     TestCaseRow, SharedPrecondition, ExcelPlanV2, TranslationResult
 )
 from agent_components.generators import GenerationMixin
-from agent_components.nodes import ChatTestAgentGraph
+from agent_components.graph.nodes import ChatTestAgentGraph
 
 
 # ============================================================
@@ -1076,7 +1076,7 @@ class TestYamlSingleNodeFlag:
     @staticmethod
     def _agent(monkeypatch):
         from unittest.mock import Mock
-        import observability
+        import infrastructure.observability as observability
         agent = object.__new__(ChatTestAgentGraph)
         agent._read_excel_rows = lambda path: [{
             "feature": "设施管理", "story": "设施添加", "title": "新增设施-正向",
@@ -1097,7 +1097,7 @@ class TestYamlSingleNodeFlag:
 
     def test_true_selects_single_node(self, monkeypatch, tmp_path):
         """YAML_SINGLE_NODE=True → gen_func=_generate_one_yaml_single。"""
-        import config
+        import infrastructure.config as config
         monkeypatch.setattr(config, "YAML_SINGLE_NODE", True)
         agent, captured = self._agent(monkeypatch)
         agent._generate_all_yamls(
@@ -1108,7 +1108,7 @@ class TestYamlSingleNodeFlag:
     # YAML_SINGLE_NODE=False → gen_func=None 的路径。
     # def test_false_selects_two_stage(self, monkeypatch, tmp_path):
     #     """YAML_SINGLE_NODE=False → gen_func=None（两段式 _generate_one_yaml）。"""
-    #     import config
+    #     import infrastructure.config as config
     #     monkeypatch.setattr(config, "YAML_SINGLE_NODE", False)
     #     agent, captured = self._agent(monkeypatch)
     #     agent._generate_all_yamls(
@@ -1122,7 +1122,7 @@ class TestYamlSingleNodeGenerate:
     @staticmethod
     def _agent(monkeypatch, llm_text: str):
         from unittest.mock import Mock
-        import observability
+        import infrastructure.observability as observability
         agent = object.__new__(ChatTestAgentGraph)
         agent.llm = Mock()
         agent._invoke_think = Mock(return_value=llm_text)
@@ -1133,7 +1133,7 @@ class TestYamlSingleNodeGenerate:
 
     def test_single_node_writes_yaml_bypasses_structured(self, monkeypatch, tmp_path):
         """单节点一次调用生成合法 TestData JSON → 落盘；_invoke_structured 不被调用。"""
-        import config
+        import infrastructure.config as config
         monkeypatch.setattr(config, "YAML_SINGLE_NODE", True)
         yaml_json = json.dumps({
             "data": [{
@@ -1157,7 +1157,7 @@ class TestYamlSingleNodeGenerate:
 
     def test_single_node_messages_schema_in_system_not_human(self, monkeypatch, tmp_path):
         """单节点 prompt 分层：schema 固定入 system，human 只放可变内容、无示例字面量。"""
-        import config
+        import infrastructure.config as config
         monkeypatch.setattr(config, "YAML_SINGLE_NODE", True)
         yaml_json = json.dumps({
             "data": [{

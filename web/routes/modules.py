@@ -343,7 +343,7 @@ async def update_api_annotations(module_name: str, index: int, data: dict):
     """
     import json as _json
     from database.models import Document
-    from agent_components.dual_chroma import get_chroma_db
+    from infrastructure.vector_store.dual_chroma import get_chroma_db
     from ingest_v2 import _build_api_search_text
 
     annotations = data.get("annotations")
@@ -405,7 +405,7 @@ async def update_api_annotations(module_name: str, index: int, data: dict):
             logger.warning("ChromaDB 检索文本重建失败，创建补偿任务: %s", e)
             try:
                 from database.operations.compensation import CompensationOps
-                import config
+                import infrastructure.config as config
                 CompensationOps.create(
                     session, "api_search_text",
                     {"doc_id": target.id},
@@ -421,7 +421,7 @@ async def update_api_annotations(module_name: str, index: int, data: dict):
 @router.get("/{module_name}/annotation-types")
 async def get_annotation_types(module_name: str):
     """返回可选的 API 异常标识类型列表（前端下拉菜单）。"""
-    from agent_components.api_annotations import ApiAnnotationRegistry
+    from infrastructure.annotations.api_annotations import ApiAnnotationRegistry
     types = ApiAnnotationRegistry.get_types()
     return {
         "success": True,

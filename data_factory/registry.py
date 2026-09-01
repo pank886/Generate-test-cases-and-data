@@ -20,7 +20,7 @@ _prompt_cache: str | None = None
 
 
 def _registry_path() -> str:
-    import config
+    import infrastructure.config as config
     return os.path.join(config.BASE_DIR, "data_factory", "methods.yaml")
 
 

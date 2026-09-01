@@ -2,16 +2,17 @@
 
 所有配置由 settings.py 集中管理，本文件保留原有变量名以兼容现有 import。
 用法保持不变:
-    from config import CHROMA_DB_DIR, LLM_MODEL
-    import config
+    from infrastructure.config import CHROMA_DB_DIR, LLM_MODEL
+    import infrastructure.config as config
     print(config.WEB_PORT)
 """
 
 import os
-from settings import settings
+from infrastructure.settings import settings
 
 # 项目根目录绝对路径（供文件路径拼接使用，不受运行时 os.chdir() 影响）
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+# 本模块位于 infrastructure/ 子包内，需上溯两级到项目根
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 # 辅助：相对路径 → 基于 BASE_DIR 的绝对路径（空字符串拒绝处理，防止静默指向根目录）
 def _resolve_path(path: str) -> str:

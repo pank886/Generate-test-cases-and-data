@@ -8,35 +8,34 @@ from openpyxl import Workbook
 from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
 from openpyxl.utils import get_column_letter
 
-import config
-from observability import get_logger
-from agent_components.dual_chroma import get_chroma_db
-from agent_components.state import State
-from agent_components.llm_client import (
+import infrastructure.config as config
+from infrastructure.observability import get_logger
+from infrastructure.vector_store.dual_chroma import get_chroma_db
+from agent_components.graph.state import State
+from infrastructure.llm.client import (
     reload_llm,
     _get_llm,
     load_factory_methods,
     invoke_think,
     invoke_structured,
 )
-from agent_components.graph_logging import (
+from agent_components.graph.graph_logging import (
     split_thinking_sections,
     serialize_for_log,
     cleanup_logs,
     log_node_output,
 )
-from agent_components.prompt_builder import prepare_plan_prompt_vars
 from prompts.response_model import (
     ProperResponse,
     TestData,
-    ExcelPlan,
-    ExcelRow,
+    # ExcelPlan,   # 已注释（v1 休眠，运行时恒为 ExcelPlanV2）
+    # ExcelRow,    # 已注释（仅被 ExcelPlan v1 引用）
     ExcelPlanV2,
     SharedPrecondition,
     TestCaseRow,
     IntentConfirmation,
 )
-from prompts.definitions import PromptFactory
+# from prompts.definitions import PromptFactory  # 已注释（2026-09-01：PromptFactory 已并入 extraction_prompts.py 模块级函数，节点不再实例化）
 from agent_components.retrievers import RetrievalMixin
 from agent_components.generators import GenerationMixin
 
@@ -75,8 +74,6 @@ class ChatTestAgentGraph(RetrievalMixin, GenerationMixin):
     def __init__(self):
         self.llm = _get_llm()
 
-        self.prompt_factory = PromptFactory()
-
         self.dual_chroma = get_chroma_db()
 
         # 工作流日志累积器（同一次运行的所有节点共用一份文件）
@@ -98,13 +95,13 @@ class ChatTestAgentGraph(RetrievalMixin, GenerationMixin):
             gen_warning: 质量门禁重试时的系统警告文本（注入 prompt 开头，
                 首轮为空串，保持正常生成提示词不变）。
         """
-        from observability import log_phase_header
+        from infrastructure.observability import log_phase_header
         from prompts.response_model import ExcelPlanV2
         from agent_components.retrievers import _build_full_api_defs_text
         from database import get_session_ctx
         from database.operations import ModuleOps, BindingOps
         from database.operations.analysis import AnalysisOps
-        from agent_components.api_annotations import ApiAnnotationRegistry
+        from infrastructure.annotations.api_annotations import ApiAnnotationRegistry
 
         log_phase_header("Phase B — thinking+json 一步生成 Excel 计划")
         logger.info("\n🧠 一步生成 Excel 测试计划（thinking + json_object）...")
@@ -161,8 +158,9 @@ class ChatTestAgentGraph(RetrievalMixin, GenerationMixin):
         related_text = ", ".join(state.get("related_modules", [])) or "无"
         user_ctx = state.get("original_input", "")
 
-        # ── 2. 构造 prompt ──
-        prompt = self.prompt_factory.generate_excel_plan_thinking()
+        # ── 2. 构造 prompt（2026-09-01：PromptFactory → extraction_prompts 模块级函数）──
+        from prompts.extraction_prompts import generate_excel_plan_thinking_prompt
+        prompt = generate_excel_plan_thinking_prompt()
 
         # ── 3. thinking + json_object 调用（空 content 有限重试，走公共方法）──
         #    2026-08-03 P2：deepseek-v4-flash 偶发返回空 content，复用同一份输入重试
@@ -184,7 +182,7 @@ class ChatTestAgentGraph(RetrievalMixin, GenerationMixin):
         )
         _text = self._invoke_think(_think_llm, _messages, label="generate_plan_thinking")
         # 2026-08-12 修复：一步生成节点自 4a61792 起漏写 thinking 日志，恢复 thinking_trace.log 记录
-        from observability import log_thinking
+        from infrastructure.observability import log_thinking
         log_thinking("generate_plan_thinking", state.get("original_input", ""), _text,
                      prompt_label="generate_excel_plan_thinking")
 
@@ -205,17 +203,21 @@ class ChatTestAgentGraph(RetrievalMixin, GenerationMixin):
         logger.info("\n📊 正在生成 Excel 测试计划...")
 
         from prompts.extraction_prompts import repair_excel_plan_prompt
-        from agent_components.validator import validate_excel_file
-        from agent_components.plan_validator import ExcelPlanValidator
+        from agent_components.validation.case_validator import (
+            validate_excel_file,
+            ExcelPlanValidator,
+        )
 
-        prompt = self.prompt_factory.generate_excel_plan_node()
-        # Phase B prompt：只传接口概要（name/method/url/description），避免全量 JSON 撑爆 context
-        api_summaries = [
-            {"name": d.get("name", "?"), "method": d.get("method", "GET"),
-             "url": d.get("url", ""), "description": d.get("description", "")}
-            for d in (state.get("api_definitions") or [])
-        ]
-        all_apis_json = json.dumps(api_summaries, indent=2, ensure_ascii=False)
+        # 已注释（2026-09-01：generate_excel_plan_node prompt 在纯处理节点中构建后从未发 LLM，
+        # 属旧分段式生成残留；随 PromptFactory 迁移一并移除。api_summaries/all_apis_json 仅服务于该 prompt）
+        # prompt = self.prompt_factory.generate_excel_plan_node()
+        # # Phase B prompt：只传接口概要（name/method/url/description），避免全量 JSON 撑爆 context
+        # api_summaries = [
+        #     {"name": d.get("name", "?"), "method": d.get("method", "GET"),
+        #      "url": d.get("url", ""), "description": d.get("description", "")}
+        #     for d in (state.get("api_definitions") or [])
+        # ]
+        # all_apis_json = json.dumps(api_summaries, indent=2, ensure_ascii=False)
         # Phase C 快照：保留完整定义（新结构 header/body/return），存为 api_defs.json
         api_full_for_snapshot = [
             {
@@ -229,7 +231,7 @@ class ChatTestAgentGraph(RetrievalMixin, GenerationMixin):
             for d in (state.get("api_definitions") or [])
         ]
         # 接口异常标识自动检测
-        from agent_components.api_annotations import ApiAnnotationRegistry
+        from infrastructure.annotations.api_annotations import ApiAnnotationRegistry
         for api in api_full_for_snapshot:
             ApiAnnotationRegistry.apply_all(api)
         from database import get_session_ctx
@@ -238,15 +240,16 @@ class ChatTestAgentGraph(RetrievalMixin, GenerationMixin):
             tree = ModuleOps.get_tree(session)
         module_tree_json = json.dumps(tree, indent=2, ensure_ascii=False)
         test_analysis = state.get("test_point_analysis") or "（无）"
-        _sections = self._split_thinking_sections(test_analysis)
-        prompt_vars = {
-            "module_tree": module_tree_json,
-            "analysis_section": _sections["analysis"],
-            "shared_pre_section": _sections["preconditions"],
-            "cases_section": _sections["cases"],
-            "all_apis_info": all_apis_json,
-            "user_context": state["original_input"],
-        }
+        # 已注释（2026-09-01：prompt_vars 仅服务于上方已注释的 generate_excel_plan_node prompt，从未发 LLM）
+        # _sections = self._split_thinking_sections(test_analysis)
+        # prompt_vars = {
+        #     "module_tree": module_tree_json,
+        #     "analysis_section": _sections["analysis"],
+        #     "shared_pre_section": _sections["preconditions"],
+        #     "cases_section": _sections["cases"],
+        #     "all_apis_info": all_apis_json,
+        #     "user_context": state["original_input"],
+        # }
 
         # ── 数据源检测（2026-08 生成/处理解耦，方案3）：
         #    generate_excel_plan 为纯处理节点，只消费上游生成的 plan（thinking / 未来旧链路）。
@@ -491,7 +494,7 @@ class ChatTestAgentGraph(RetrievalMixin, GenerationMixin):
         valid_cases = _deduped
 
         if failed_details:
-            from observability import log_thinking
+            from infrastructure.observability import log_thinking
             error_parts = []
             for f_idx, f_dict, f_errs in failed_details:
                 error_parts.append(
@@ -666,7 +669,7 @@ class ChatTestAgentGraph(RetrievalMixin, GenerationMixin):
         file_ok, file_errors = validate_excel_file(excel_path)
         if not file_ok:
             logger.warning(f"   ⚠️ 文件校验失败: {len(file_errors)} 个错误")
-            from observability import log_thinking
+            from infrastructure.observability import log_thinking
             log_thinking("generate_excel_plan_FILE_FAIL",
                          state.get("original_input", "?"),
                          f"文件层校验失败（{n_confirmed} 行通过）\n文件: {excel_path}\n错误: {'; '.join(file_errors)}",
@@ -757,8 +760,29 @@ class ChatTestAgentGraph(RetrievalMixin, GenerationMixin):
         return split_thinking_sections(text)
 
     def _prepare_plan_prompt_vars(self, state: State) -> dict:
-        """生成/修复共用的 prompt 变量构造（实现见 prompt_builder.py）。"""
-        return prepare_plan_prompt_vars(self, state)
+        """生成/修复共用的 prompt 变量构造（单一数据源，原 prompt_builder.py）。
+
+        供生成节点与修复节点统一调用，保证 API 信息（概要）、模块树、分析段落
+        来自同一份来源；入参含 plan_source 数据源标注。
+        """
+        module_tree = state.get("module_tree_json") or "[]"
+        test_analysis = state.get("test_point_analysis") or "（无）"
+        _sections = self._split_thinking_sections(test_analysis)
+        api_summaries = [
+            {"name": d.get("name", "?"), "method": d.get("method", "GET"),
+             "url": d.get("url", ""), "description": d.get("description", "")}
+            for d in (state.get("api_definitions") or [])
+        ]
+        return {
+            "module_tree": module_tree,
+            "analysis_section": _sections["analysis"],
+            "shared_pre_section": _sections["preconditions"],
+            "cases_section": _sections["cases"],
+            "all_apis_info": json.dumps(api_summaries, indent=2, ensure_ascii=False),
+            "db_schema": config.DB_SCHEMA,  # 数据库表结构（占位，为空禁 [db]，2026-08-04 问题 2）
+            "plan_source": state.get("plan_source"),
+            "user_context": state.get("original_input", ""),
+        }
 
     @staticmethod
     def _serialize_for_log(obj):

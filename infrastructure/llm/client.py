@@ -3,7 +3,7 @@
 2026-08-07 大文件拆分：自 ``agent_components/nodes.py`` 56–76（reload_llm/_get_llm）
 与 920–1036（_invoke_think/_invoke_structured/_load_factory_methods）迁移。
 ``nodes.py`` 顶部 re-export ``reload_llm`` / ``_get_llm``，既有
-``from agent_components.nodes import reload_llm, _get_llm`` 用法不变。
+``from agent_components.graph.nodes import reload_llm, _get_llm`` 用法不变。
 """
 
 import json
@@ -12,9 +12,9 @@ from typing import Callable, Optional, Type
 
 from pydantic import BaseModel
 
-import config
-from observability import get_logger, log_thinking
-from agent_components.llm.deepseek import DeepSeekChatOpenAI
+import infrastructure.config as config
+from infrastructure.observability import get_logger, log_thinking
+from infrastructure.llm.deepseek import DeepSeekChatOpenAI
 
 logger = get_logger(__name__)
 
@@ -133,7 +133,7 @@ def _log_reasoning_content(result, label: str) -> None:
     reasoning = _extract_reasoning_content(result)
     if not reasoning:
         return
-    from observability import log_thinking
+    from infrastructure.observability import log_thinking
     log_thinking(f"{label} 思考内容", "", reasoning, prompt_label=label)
 
 
@@ -196,7 +196,7 @@ def invoke_structured(llm, prompt, model_class: Type[BaseModel], method_features
             if pre_validate and isinstance(result, dict):
                 result = pre_validate(result)
             if log_label:
-                from observability import log_thinking
+                from infrastructure.observability import log_thinking
                 _raw = result.model_dump() if hasattr(result, "model_dump") else str(result)
                 log_thinking(log_label, "", f"shared_preconditions={len(_raw.get('shared_preconditions',[]))}条, test_cases={len(_raw.get('test_cases',[]))}条\n{json.dumps(_raw, indent=2, ensure_ascii=False)[:8000]}",
                              prompt_label=log_label)

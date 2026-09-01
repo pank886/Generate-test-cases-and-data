@@ -20,11 +20,11 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import config
+import infrastructure.config as config
 from prompts.extraction_prompts import repair_excel_plan_prompt
 from prompts.response_model import ExcelPlanV2
-from agent_components.llm_client import _get_llm, invoke_structured
-from agent_components.nodes import METHOD_FEATURES
+from infrastructure.llm.client import _get_llm, invoke_structured
+from agent_components.graph.nodes import METHOD_FEATURES
 
 
 # ---- 内置样例（trace 缺失时的兜底，与线上真实 PRE 同构） ----

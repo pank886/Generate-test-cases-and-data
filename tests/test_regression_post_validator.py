@@ -13,7 +13,7 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from agent_components.post_validator import YamlPostValidator
+from agent_components.validation.yaml_validator import YamlPostValidator
 
 
 # ============================================================

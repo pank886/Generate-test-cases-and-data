@@ -1,23 +1,85 @@
-"""Excel 计划校验/拦截模块（Phase B 生成/处理解耦后独立管理）。
+"""用例生成检测（2026-09-01 校验包归位重构）。
 
-背景：校验逻辑原先散落在 nodes.py 的两份重复副本（首轮 / 重试），
-     2026-08 收敛为本模块，职责单一 + 便于单测。
+合并自 agent_components/validator.py（Excel/.py 文件层校验）与
+agent_components/plan_validator.py（Excel 计划校验），语义归属「用例生成检测」。
 
-职责：
-  1. validate()               —— 对 ExcelPlanV2 做字段/前置引用/步骤对齐/断言格式/URL 有效性校验
-  2. aggregate_block_reasons()—— 拦截原因按错误类型聚合：同类一条（含计数+受影响用例），
-                                 不同类各自一条，供 repair_excel_plan_prompt 的
-                                 {block_reasons} 占位符使用。
-
-设计要点：
-  - 8 类固定错误类型（ERR_TYPES），聚合按类型分组，杜绝逐条重复刷屏。
-  - URL 有效性校验（invalid_url）：步骤中接口路径未命中 api_definitions 任一真实接口
-    即视为疑似拼写错误；单段路径（如 /export、/login）同样不豁免。
-    校验器按入参 api_urls 可选启用，不传则不检查（纯确定性代码，不依赖 LLM）。
+纯 Python 代码校验，无 LLM 调用。校验失败返回具体错误列表，供自动修复循环使用。
 """
 
+import ast
+import os
 import re
-from typing import Any, Optional
+from typing import Any, List, Optional, Tuple
+
+
+FileValidationResult = Tuple[bool, List[str]]
+""" (passed: bool, errors: List[str]) — Excel/.py 文件层校验结果 """
+
+
+# ==================== Excel 文件层校验（原 validator.py） ====================
+
+VALID_ENABLED = {"Y", "N"}
+EXPECTED_HEADERS_SHEET1 = [
+    "@allure.epic", "@allure.feature", "@allure.story", "@allure.title",
+    "fixture等级", "用例编号", "前置步骤", "执行步骤", "预期结果",
+]
+EXPECTED_HEADERS_SHEET2 = [
+    "前置编号", "前置名称", "详细步骤", "预期结果", "关联用例",
+]
+
+
+def validate_excel_file(excel_path: str) -> FileValidationResult:
+    """校验 Excel 测试计划文件（双 Sheet）。"""
+    errors = []
+
+    if not os.path.exists(excel_path):
+        return False, ["文件不存在: " + excel_path]
+
+    try:
+        from openpyxl import load_workbook
+        wb = load_workbook(excel_path)
+    except Exception as e:
+        return False, [f"无法打开 Excel 文件: {e}"]
+
+    # Sheet 1
+    ws1 = wb.active
+    if ws1 is None:
+        return False, ["Excel 文件为空"]
+    h1 = [cell.value for cell in ws1[1]]
+    for i, expected in enumerate(EXPECTED_HEADERS_SHEET1):
+        if i >= len(h1) or h1[i] != expected:
+            errors.append(f"Sheet1 表头第{i+1}列应为'{expected}'，实际为'{h1[i] if i < len(h1) else '缺失'}'")
+    for row_idx, row in enumerate(ws1.iter_rows(min_row=2, values_only=True), start=2):
+        if row[0] is None:
+            continue
+        if not str(row[4] or "").strip():
+            errors.append(f"Sheet1 第{row_idx}行: fixture等级为空")
+        for ci, cn in [(0, "epic"), (1, "feature"), (2, "story"), (3, "title"),
+                        (7, "执行步骤")]:
+            v = row[ci]
+            if v is None or (isinstance(v, str) and not v.strip()):
+                errors.append(f"Sheet1 第{row_idx}行: {cn}为空")
+
+    # Sheet 2
+    if "共享前置" in wb.sheetnames:
+        ws2 = wb["共享前置"]
+        h2 = [cell.value for cell in ws2[1]]
+        for i, expected in enumerate(EXPECTED_HEADERS_SHEET2):
+            if i >= len(h2) or h2[i] != expected:
+                errors.append(f"Sheet2 表头第{i+1}列应为'{expected}'，实际为'{h2[i] if i < len(h2) else '缺失'}'")
+        for row_idx, row in enumerate(ws2.iter_rows(min_row=2, values_only=True), start=2):
+            if row[0] is None:
+                continue
+            for ci, cn in [(0, "前置编号"), (1, "前置名称"), (2, "详细步骤"), (3, "预期结果")]:
+                v = row[ci]
+                if v is None or (isinstance(v, str) and not v.strip()):
+                    errors.append(f"Sheet2 第{row_idx}行: {cn}为空")
+
+    wb.close()
+    return len(errors) == 0, errors
+
+
+# ==================== Excel 计划校验（原 plan_validator.py） ====================
 
 # 断言格式校验正则（与框架 generators._ASSERTION_PATTERN 一致：行内 [tag]，非行号前缀）
 _ASSERT_OK = re.compile(r"\[(eq|contains|ne|db)\]", re.IGNORECASE)

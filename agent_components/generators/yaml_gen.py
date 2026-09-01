@@ -5,16 +5,17 @@
 依赖宿主类提供: self.llm / self._invoke_think / self._invoke_structured /
                 self._load_factory_methods / self._log_node_output
 跨 Mixin 依赖: ExcelMixin / TranslationMixin / PyExportMixin / _helpers
+生成流程后处理: _repair_helpers（setup 键注入/teardown 容错/阶段合并）
+生成后静态校验: validation.case_validator / validation.yaml_validator（2026-09-01 归位）
 """
-import glob
 import json
 import os
 import re
 
 import yaml
 
-import config
-from observability import get_logger
+import infrastructure.config as config
+from infrastructure.observability import get_logger
 from prompts.response_model import TestData
 from agent_components.generators._helpers import (
     _summarize_error_patterns,
@@ -22,409 +23,31 @@ from agent_components.generators._helpers import (
     _write_fail_detail,
     _format_post_issues_for_prompt,
 )
+from agent_components.generators._repair_helpers import (
+    _parse_setup_extract_keys,
+    _inject_setup_keys_note,
+    _merge_stage_results,
+    _collect_stage_errors,
+    _filter_teardown_missing_pres,
+    _relax_teardown_validation,
+)
+from agent_components.validation.yaml_validator import (
+    _find_missing_yaml_refs,
+    _scan_missing_key_refs,
+)
+from prompts.extraction_prompts import (
+    SETUP_CAPTURE_RULE,
+    YAML_ANALYSIS_GUIDE,
+)
 
 logger = get_logger(__name__)
 
 
-# 2026-08-27 v8 根因修复（决策「注入 setup 标记」）：setup 是否捕获键是 LLM 掷骰子——
-# prompt 铁律 8 允许省略无用 extract、铁律 13 只约束引用方，且 LLM 无法识别「共享前置」任务。
-# 此规则注入 setup 任务 steps（走 test_case_logic），强制 setup 块捕获资源标识供下游引用。
-# 规则表述（非示例），符合 prompt 无示例约束。
-_SETUP_CAPTURE_RULE = (
-    "【共享前置 setup 块】本文件为共享前置，创建的资源标识（code 等唯一键）"
-    "必须通过 input_extract 捕获（键名 camelCase 语义化，如 pre001MeterCode），"
-    "供后续用例与清理引用；即使本文件内无引用也必须捕获，禁止省略 input_extract"
-)
-
-
-def _find_missing_yaml_refs(output_base: str, project_root: str) -> list:
-    """扫描 output_base 下所有 test_*.py 引用的 yaml，返回磁盘缺失清单。
-
-    引用路径形如 './testcase/<batch>/<feature>/<func>/test_data.yaml'
-    （pytest 从 project_root 运行），磁盘解析为 project_root + 相对路径。
-    2026-08-12 问题 3：_27 曾出现 .py 引用存在但磁盘缺失（空目录）未被拦截，
-    此处接入生成收尾，缺失文件禁止静默放行。
-    """
-    refs = []
-    for dp, _dn, fn in os.walk(output_base):
-        for f in fn:
-            if f.endswith(".py") and f.startswith("test_"):
-                _path = os.path.join(dp, f)
-                refs.extend(re.findall(r"'\./([^']+\.yaml)'",
-                                       open(_path, encoding="utf-8").read()))
-    missing = []
-    for r in sorted(set(refs)):
-        if not os.path.exists(os.path.join(project_root, r)):
-            missing.append(r)
-    return missing
-
-
-# ============================================================
-# 三阶段 key 状态传递（2026-08-27 三阶段化设计，见 changelog
-# 2026-08-27_three_stage_generation_state_discussion.md §5/§10）
-# ============================================================
-
-def _match_pre_label(case_name: str) -> str | None:
-    """从 setup 块的 case_name 解析 PRE 标签（兼容生成 / 手工两种命名风格）。
-
-    生成器命名: test_PRE001_add_meter_001 / test_PRE001_isolated_TC007_add_meter_001
-    对照组命名: PRE-001_创建测试电表B / PRE-001_isolated_TC-007_创建...
-    返回归一化标签: PRE-001 / PRE-001_isolated_TC-007；无法识别返回 None（D4 兜底）。
-    """
-    m = re.search(r"PRE[-_]?(\d+)", case_name)
-    if not m:
-        return None
-    label = f"PRE-{m.group(1)}"
-    iso = re.search(r"isolated[-_]?TC[-_]?(\d+)", case_name, re.IGNORECASE)
-    if iso:
-        label += f"_isolated_TC-{iso.group(1)}"
-    return label
-
-
-def _parse_setup_extract_keys(output_base: str, expected_pres: list) -> dict:
-    """扫描 setup_data/setup_*.yaml，按 case_name 中的 PRE 标识关联块，收集 input_extract 键。
-
-    返回 {"PRE-003": {"keys": {"ELEC_BIND": "$.json.code"}, "case_name": "..."}}。
-    base/isolated 变体按 _match_pre_label 归并/区分（isolated 独立成条目）。
-    D4 兜底：expected_pres 中无任何关联块、或块无 input_extract 的 PRE，
-    注入占位键 {pre_norm}_code = "__MISSING_KEY__" 并抛 Warning（下游提示用）。
-    结果同时写盘 `output_base/_setup_extract_keys.json`（跨阶段产物，M8 规则）。
-    """
-    result = {}
-    for fp in glob.glob(os.path.join(output_base, "**", "setup_data", "setup_*.yaml"),
-                        recursive=True):
-        try:
-            data = yaml.safe_load(open(fp, encoding="utf-8"))
-        except Exception:
-            continue
-        for block in data or []:
-            for tc in block.get("testCase", []):
-                cn = tc.get("case_name") or ""
-                pre_label = _match_pre_label(cn)
-                if not pre_label:
-                    continue
-                entry = result.setdefault(pre_label, {"keys": {}, "case_name": cn})
-                if not entry.get("case_name"):
-                    entry["case_name"] = cn
-                for k, v in (tc.get("input_extract") or {}).items():
-                    entry["keys"][k] = v
-    # D4：期望存在的 PRE 无任何提取键 → 占位 + 告警
-    for pid in expected_pres or []:
-        if pid not in result:
-            placeholder_key = _d4_placeholder_key(pid)
-            result[pid] = {"keys": {placeholder_key: "__MISSING_KEY__"},
-                           "case_name": f"({pid} setup 生成缺失)"}
-            logger.warning("⚠️ D4: %s 无 setup 块（code 提取缺失），注入占位键 %s = __MISSING_KEY__",
-                           pid, placeholder_key)
-        elif not result[pid]["keys"]:
-            placeholder_key = _d4_placeholder_key(pid)
-            result[pid]["keys"][placeholder_key] = "__MISSING_KEY__"
-            logger.warning("⚠️ D4: %s 的 setup 块无 input_extract，注入占位键 %s = __MISSING_KEY__",
-                           pid, placeholder_key)
-    _out = os.path.join(output_base, "_setup_extract_keys.json")
-    with open(_out, "w", encoding="utf-8") as f:
-        json.dump(result, f, ensure_ascii=False, indent=2)
-    logger.info("   🔑 setup 提取键 %d 组 → %s", len(result), _out)
-    return result
-
-
-def _d4_placeholder_key(pre_id: str) -> str:
-    """D4 占位键名：PRE-003 → pre003_code（确定性，便于下游引用与后校验识别）。"""
-    return re.sub(r"[^0-9A-Za-z]", "", pre_id).lower() + "_code"
-
-
-def _inject_setup_keys_note(tasks: list, setup_keys: dict, key_field: str) -> None:
-    """按任务的引用 PRE 过滤注入键名注解（D3），写入 row['_setup_keys_note']。
-
-    test 任务按 preconditions、teardown 任务按 _pre_ids 取相关 PRE，
-    只注入该 PRE 的提取键名，避免无关键混入（防止跨故事串用）。
-    注解含 __MISSING_KEY__ 标记 → 下游 prompt 感知缺失并给出兜底策略（D4）。
-    未引用任何 PRE 的任务不注入（无 setup 依赖）。
-    """
-    for row, _path in tasks:
-        ref_pres = row.get(key_field) or []
-        if isinstance(ref_pres, str):
-            ref_pres = [p.strip() for p in ref_pres.split(",")
-                        if p.strip().startswith("PRE-")]
-        ref_pres = {str(p).strip() for p in ref_pres}
-        if not ref_pres:
-            continue
-        included = [pid for pid in setup_keys if pid in ref_pres]
-        if not included:
-            continue
-        lines = ["### setup 已提取键（引用必须用下列键名）"]
-        for pid in included:
-            entry = setup_keys[pid]
-            for k, v in entry["keys"].items():
-                if v == "__MISSING_KEY__":
-                    marker = "（⚠️ __MISSING_KEY__：setup 提取失败，请改用硬编码占位值，或在预期结果标注预期失败）"
-                else:
-                    marker = ""
-                lines.append(f"- `{k}` = {v}（{pid} {entry['case_name']}）{marker}")
-        row["_setup_keys_note"] = "\n".join(lines)
-
-
-def _merge_stage_results(stage_results: list, error_entries: list,
-                         output_base: str, total: int) -> dict:
-    """三阶段 _run_yaml_rounds 结果合并：counts 求和、rounds 取 max。
-
-    rounds 用 max 而非求和：后校验轮触发条件 `result['rounds'] < YAML_REPAIR_ROUNDS`
-    与单次调用等价，不会因三阶段求和提前耗尽修复预算。
-    方案 A（2026-08-27 决策）：error_entries 已按阶段即时采集（防后阶段覆盖），
-    收尾拼接重写一次 _generation_errors.json，placeholder_id 重新编号防跨阶段冲突。
-    """
-    merged = {"total": total, "success": 0, "failed": 0,
-              "repaired": 0, "rounds": 0, "errors_file": None}
-    for r in stage_results:
-        merged["success"] += r.get("success", 0)
-        merged["failed"] += r.get("failed", 0)
-        merged["repaired"] += r.get("repaired", 0)
-        merged["rounds"] = max(merged["rounds"], r.get("rounds", 0))
-    if error_entries:
-        for n, e in enumerate(error_entries, 1):
-            e["placeholder_id"] = f"GEN-FAIL-{n:03d}"
-        errors_file = os.path.join(output_base, "_generation_errors.json")
-        with open(errors_file, "w", encoding="utf-8") as f:
-            json.dump(error_entries, f, ensure_ascii=False, indent=2)
-        merged["errors_file"] = errors_file
-    return merged
-
-
-def _collect_stage_errors(entries: list, r: dict) -> None:
-    """即时采集一轮 _run_yaml_rounds 的终态错误清单（转瞬即逝：下一阶段会覆盖同名文件）。"""
-    ef = r.get("errors_file")
-    if ef and os.path.exists(ef):
-        try:
-            entries.extend(json.loads(open(ef, encoding="utf-8").read()))
-        except Exception as e:
-            logger.warning("   ⚠️ 读取 %s 失败: %s", ef, e)
-
-
-_GET_EXTRACT_RE = re.compile(r"get_extract_data\(\s*['\"]([^'\"]+)['\"]\s*\)")
-
-
-def _scan_missing_key_refs(output_base: str, setup_keys: dict) -> list:
-    """D4 后校验（就地实现，2026-08-27 决策选项 1，不走 validate_all）。
-
-    扫描 test/teardown YAML（跳过 setup_*.yaml）中引用 __MISSING_KEY__ 的用例
-    → P1（需人工复核，不进修复轮——根因是 setup 生成失败，重生成无用）。
-    避开 2026-08-27 发现的后校验格式错位：validate_all 只处理 {data:[...]} dict，
-    而生成器写盘为顶层 list，故此处直接遍历 list 格式产物。
-    """
-    missing = {k for entry in setup_keys.values()
-               for k, v in entry["keys"].items() if v == "__MISSING_KEY__"}
-    if not missing:
-        return []
-    issues = []
-    for fp in glob.glob(os.path.join(output_base, "**", "*.yaml"), recursive=True):
-        rel = os.path.relpath(fp, output_base).replace("\\", "/")
-        if "/setup_data/setup_" in rel:
-            continue  # setup 自身不引用提取键
-        try:
-            data = yaml.safe_load(open(fp, encoding="utf-8"))
-        except Exception:
-            continue
-        for block in data or []:
-            for tc in block.get("testCase", []):
-                cn = tc.get("case_name", "")
-                text = str(tc.get("json") or "") + str(tc.get("validation") or "")
-                for key in _GET_EXTRACT_RE.findall(text):
-                    if key in missing:
-                        issues.append({
-                            "yaml_path": fp,  # 绝对/glob 路径，与 validate_all 一致
-                            "check": "missing_extract_key",
-                            "severity": "P1",
-                            "line": 0,
-                            "current": f"get_extract_data('{key}')",
-                            "expected": "setup 提取失败，需人工复核（改硬编码占位值或改断言）",
-                            "fix_hint": "D4: setup 未提取到该键（__MISSING_KEY__），该用例需人工复核修正",
-                            "case_name": cn,
-                        })
-    return issues
-
-
-def _filter_teardown_missing_pres(teardown_tasks: list, setup_keys: dict) -> None:
-    """teardown 对 __MISSING_KEY__ 的 PRE 跳过清理块（2026-08-27 用户决策，task #10）。
-
-    无提取键的 PRE 未创建可清理资源，占位删除必失败（v7 实测 PRE002_PLACEHOLDER_CODE）。
-    从任务源过滤：steps 去掉 `# 清理 {pid}` 行、_pre_ids 剔除缺失 PRE；
-    某任务全部 PRE 缺失 → 整任务移除（无清理可做）。在 setup_keys 解析后、
-    _inject_setup_keys_note 前调用，teardown 阶段只生成真实键 PRE 的删除块。
-    """
-    missing_pres = {pid for pid, entry in setup_keys.items()
-                    if any(v == "__MISSING_KEY__" for v in entry["keys"].values())}
-    if not missing_pres:
-        return
-    kept = []
-    for row, path in teardown_tasks:
-        steps = row.get("steps", "") or ""
-        lines = [ln for ln in steps.split("\n")
-                 if not any(ln.startswith(f"# 清理 {pid}:") for pid in missing_pres)]
-        steps_new = "\n".join(lines).strip("\n")
-        pre_ids = [pid for pid in (row.get("_pre_ids") or []) if pid not in missing_pres]
-        if not steps_new and not pre_ids:
-            logger.info("   🧹 teardown %s 全部 PRE 缺失提取键，跳过清理任务", path)
-            continue
-        row["steps"] = steps_new
-        row["_pre_ids"] = pre_ids
-        kept.append((row, path))
-    teardown_tasks[:] = kept
-
-
-def _relax_teardown_validation(output_base: str) -> None:
-    """teardown 删除块剥离严格断言（2026-08-27 用户决策「teardown 断言容错」，task #9）。
-
-    delete 类用例会消费 setup 资源（v7: delete_positive 删 isolated、delete_bound 删绑定电表），
-    teardown 收尾二次删除返回 retCode=0 → 严格 eq 断言必失败（v7 2 ERROR 之一）。
-    框架断言仅 eq/ne/contains/db，无集合/或语义可表达 retCode∈{0,1}；
-    teardown 语义是清理清扫（幂等）——delete 照发、不校验结果，剥断言为最优解。
-    在 teardown 阶段完成后调用（覆盖所有已写盘的 teardown_*.yaml）。
-
-    注意：框架 assert_result 要求 validation 必须是 list（base/apiutil.py
-    `tc.pop('validation', '未配置断言')` → None/缺键报 `'expected' 必须是一个列表`，
-    2026-08-27 v9 框架实测）。故剥断言 = 置空列表 `[]`（零断言），非删键。
-    """
-    for fp in glob.glob(os.path.join(output_base, "**", "teardown_*.yaml"), recursive=True):
-        try:
-            data = yaml.safe_load(open(fp, encoding="utf-8"))
-        except Exception:
-            continue
-        if not data:
-            continue
-        changed = False
-        for block in data:
-            for tc in block.get("testCase", []):
-                # 缺失或非空都置空列表：缺键时框架读默认字符串会报错（见上），
-                # 空列表 = 零断言，框架 isinstance(list) 通过。
-                if "validation" not in tc or tc.get("validation"):
-                    tc["validation"] = []
-                    changed = True
-        if changed:
-            # 与 _write_yaml_result 相同的序列化参数，保持产物格式一致
-            yaml_text = yaml.dump(
-                data, allow_unicode=True, indent=2, default_flow_style=False)
-            tmp_path = fp + ".tmp"
-            try:
-                os.remove(tmp_path)
-            except OSError:
-                pass
-            with open(tmp_path, "w", encoding="utf-8") as f:
-                f.write(yaml_text)
-            os.replace(tmp_path, fp)
-
-
-# 单节点生成引导：浓缩 analyze 的 5 条分析要点，引导模型在 thinking 里完成分析
-# （单节点 thinking 走 reasoning_content，content 直接输出 TestData JSON，无独立分析文本）
-YAML_ANALYSIS_GUIDE = (
-    "请先在思考中完成以下分析，再严格按本 prompt 的 JSON 结构输出：\n"
-    "1. 接口匹配：每个步骤对应哪个接口（url/method 与接口定义一致）\n"
-    "2. 请求参数：来源（用例指定/上游提取/工厂方法）\n"
-    "3. 数据传递：哪些返回值需要 extract 供下游引用\n"
-    "4. 断言设计：断言字段与期望值\n"
-    "5. 动态值：用哪个工厂函数，还是固定字面量"
-)
 
 
 class YamlMixin:
     """YAML 生成（thinking 分析 → json_mode 输出）+ 多轮修复循环"""
 
-    # ======================================================================
-    # 两段式 _generate_one_yaml 已注释（2026-08-24）。
-    # 原因：与单节点 _generate_one_yaml_single 重复，且其 prompt 含错误示例
-    #       （format_yaml_data_prompt 内 random_plates 车牌示例导致字段误用），
-    #       生成路径收敛为单节点一次调用。原代码见 git 历史，若需恢复：
-    #       git show HEAD:agent_components/generators/yaml_gen.py
-    # ======================================================================
-    # def _generate_one_yaml(self, row: dict, api_defs_json: str, user_ctx: str,
-    #                        output_path: str, repair_ctx: dict | None = None) -> str:
-    #     """Phase C V2 两段式 YAML 生成：thinking 分析 → json_mode 单次输出。
-    #
-    #     db_schema 读取 config.DB_SCHEMA（占位，为空时禁 db 断言，2026-08-04 问题 2）。
-    #
-    #     与 Phase B 的 analyze_test_points_raw → generate_excel_plan 模式一致：
-    #       - 第一阶段：thinking on，自由文本分析用例数据需求（全文落 thinking_trace.log）
-    #       - 第二阶段：thinking off + json_mode，输出结构化 YAML
-    #
-    #     校验失败不做 inline 重试（json_mode 无思考，原地重打无法纠正"信念型错误"）—— 直接抛异常，由 _run_yaml_rounds 登记后
-    #     进入轮末思考自查修复循环。
-    #
-    #     repair_ctx（修复轮时非 None）:
-    #       {prior_output, error_detail, error_pattern_summary, round_no, post_check_issues}
-    #     """
-    #     from prompts.extraction_prompts import (
-    #         analyze_yaml_data_prompt, format_yaml_data_prompt, repair_yaml_data_prompt,
-    #     )
-    #     from observability import log_thinking
-    #
-    #     db_schema = config.DB_SCHEMA  # 数据库表结构（占位，为空禁 db 断言，2026-08-04 问题 2）
-    #     factory_methods_text = self._load_factory_methods()
-    #     test_case_logic = f"执行步骤: {row['steps']}\n预期结果: {row.get('expected', '')}"
-    #     case_label = (
-    #         f"{row.get('case_id') or os.path.basename(os.path.dirname(output_path))}"
-    #         f" | {os.path.basename(os.path.dirname(output_path))}/{os.path.basename(output_path)}"
-    #     )
-    #
-    #     # === 阶段 1：thinking 分析（首轮=需求分析 / 修复轮=带错误上下文自查） ===
-    #     if repair_ctx:
-    #         think_prompt = repair_yaml_data_prompt()
-    #         prompt_vars = dict(
-    #             api_definitions=api_defs_json,
-    #             test_case_logic=test_case_logic,
-    #             user_context=user_ctx,
-    #             data_factory_methods=factory_methods_text,
-    #             db_schema=db_schema,
-    #             error_pattern_summary=repair_ctx.get("error_pattern_summary", ""),
-    #             prior_output=repair_ctx.get("prior_output", ""),
-    #             error_detail=repair_ctx.get("error_detail", ""),
-    #             post_check_issues=repair_ctx.get("post_check_issues", ""),
-    #         )
-    #         node_label = f"repair_yaml_data_ROUND{repair_ctx.get('round_no', 2)}"
-    #         prompt_label = "repair_yaml_data_prompt"
-    #     else:
-    #         think_prompt = analyze_yaml_data_prompt()
-    #         prompt_vars = dict(
-    #             api_definitions=api_defs_json,
-    #             test_case_logic=test_case_logic,
-    #             user_context=user_ctx,
-    #             data_factory_methods=factory_methods_text,
-    #             db_schema=db_schema,
-    #         )
-    #         node_label = "analyze_yaml_data"
-    #         prompt_label = "analyze_yaml_data_prompt"
-    #
-    #     llm_kwargs = {"extra_body": {"thinking": {"type": "enabled"}}}
-    #     bound_llm = self.llm.bind(**llm_kwargs)
-    #     # 空 content 有限重试（公共方法 _invoke_think，复用同一输入重试 config.MAX_RETRIES 次）
-    #     analysis = self._invoke_think(
-    #         bound_llm, think_prompt.format_messages(**prompt_vars), label=node_label)
-    #
-    #     # Phase C 思考全文与 Phase B 同规格写入 thinking_trace.log
-    #     log_thinking(node_label, case_label, analysis, prompt_label=prompt_label)
-    #
-    #     # === 阶段 2：json_mode 结构化输出（max_retries=0，失败即抛给登记器） ===
-    #     format_prompt = format_yaml_data_prompt()
-    #
-    #     # ── 构建 pre_validate 闭包（共享方法，单节点复用，避免两路径漂移）──
-    #     inject_annotations = self._build_annotation_injector(api_defs_json)
-    #
-    #     # db_schema 为空 → 禁 db 断言（TestData.validate_no_db_when_no_schema，2026-08-04 问题 2）
-    #     from prompts.response_model import set_db_schema_empty
-    #     set_db_schema_empty(not bool(db_schema))
-    #
-    #     result = self._invoke_structured(format_prompt, TestData,
-    #         max_retries=0,
-    #         method="json_mode",
-    #         pre_validate=inject_annotations,
-    #         data_analysis=analysis,
-    #         api_definitions=api_defs_json,
-    #         test_case_logic=test_case_logic,
-    #         user_context=user_ctx,
-    #         data_factory_methods=factory_methods_text,
-    #         db_schema=db_schema,
-    #     )
-    #
-    #     # ── 写盘管线（共享方法：路径参数替换 + 导出接管 + 序列化原子写盘）──
-    #     return self._write_yaml_result(result, output_path)
 
     # ------------------------------------------------------------------
     # 共享助手（单节点 _generate_one_yaml_single 专用；原两段式共用说明见 git 历史）
@@ -505,6 +128,41 @@ class YamlMixin:
         os.replace(tmp_path, output_path)
         return output_path
 
+    def _normalize_base_urls(self, result, api_defs_json: str) -> None:
+        """URL 前缀保真（2026-09-01 task#15，决策「代码层接管」）。
+
+        v9 实测 getParentList 生成 url 丢 /park-energy-electric-web/ 前缀 → 请求打到
+        前端服务器返回 HTML。prompt 既有「url 逐字一致」规则已被 LLM 违反（2026-08-21
+        也曾手工补前缀），故改为代码层确定性接管：对每个 baseInfo.url，在注入的
+        api_defs 中找「以此为后缀」的接口 URL；命中唯一更长的 DB 版本时用 DB 版本替换
+        （即补回 LLM 丢弃的业务前缀）。
+
+        安全守则：
+          - 产物 url 已是 DB 完整 url → 无更长的后缀候选 → 不改（幂等）。
+          - 后缀命中多个候选（歧义，如裸路径本就存在）→ 跳过不改，宁缺毋滥。
+          - 路径参数 url（含 {code} 字面量）后缀不匹配其它接口 → 不改。
+        """
+        if not api_defs_json or api_defs_json.strip() == "[]":
+            return
+        try:
+            apis = json.loads(api_defs_json)
+        except ValueError:
+            return
+        if not isinstance(apis, list):
+            return
+        db_urls = [
+            str(a.get("url", "") or "").strip().rstrip("/")
+            for a in apis if a.get("url")
+        ]
+        for step in result.data:
+            cur = str(step.baseInfo.get("url", "") or "").strip().rstrip("/")
+            if not cur:
+                continue
+            longer = [u for u in db_urls
+                      if u != cur and u.endswith(cur)]
+            if len(longer) == 1:
+                step.baseInfo["url"] = longer[0]
+
     def _generate_one_yaml_single(self, row: dict, api_defs_json: str, user_ctx: str,
                                   output_path: str, repair_ctx: dict | None = None) -> str:
         """单节点 YAML 生成：thinking + json_object 一次调用生成 TestData。
@@ -521,7 +179,7 @@ class YamlMixin:
         （原 YAML_SINGLE_NODE 两段式开关随两段式一并注释，`_generate_all_yamls` 恒走本方法。）
         """
         from prompts.extraction_prompts import generate_yaml_data_single_prompt
-        from observability import log_thinking
+        from infrastructure.observability import log_thinking
 
         db_schema = config.DB_SCHEMA  # 数据库表结构（占位，为空禁 db 断言，2026-08-04 问题 2）
         factory_methods_text = self._load_factory_methods()
@@ -581,6 +239,9 @@ class YamlMixin:
         from prompts.response_model import set_db_schema_empty
         set_db_schema_empty(not bool(db_schema))
         result = TestData.model_validate(parsed)
+
+        # 2026-09-01 task#15：URL 前缀代码层接管（LLM 丢业务前缀，prompt 规则不可靠）
+        self._normalize_base_urls(result, api_defs_json)
 
         return self._write_yaml_result(result, output_path)
 
@@ -680,9 +341,9 @@ class YamlMixin:
                             # teardown 阶段按 setup 提取键 + delete 接口定义自行生成。
                             teardown_lines.append(f"# 清理 {pid}: {pre['name']}")
 
-                    # 2026-08-27 v8 根因修复：setup 捕获键前置规则（见 _SETUP_CAPTURE_RULE）。
+                    # 2026-08-27 v8 根因修复：setup 捕获键前置规则（见 SETUP_CAPTURE_RULE）。
                     # 注入 setup 任务 steps → LLM 可知「这是共享前置」且必须 output_extract。
-                    setup_text = _SETUP_CAPTURE_RULE + "\n" + "\n".join(setup_lines)
+                    setup_text = SETUP_CAPTURE_RULE + "\n" + "\n".join(setup_lines)
                     teardown_text = "\n".join(teardown_lines)
 
                     setup_yaml = os.path.join(setup_dir, f"setup_{class_slug}.yaml")
@@ -769,7 +430,7 @@ class YamlMixin:
         result = _merge_stage_results(stage_results, stage_error_entries, output_base, total)
 
         # --- YAML 后校验（纯代码，不放 LLM）---
-        from agent_components.post_validator import YamlPostValidator
+        from agent_components.validation.yaml_validator import YamlPostValidator
         validator = YamlPostValidator()
         post_issues = validator.validate_all(output_base)
         # D4 后校验（就地实现，选项 1）：扫描 test/teardown 引用 __MISSING_KEY__ 的用例 → P1
@@ -849,7 +510,7 @@ class YamlMixin:
             repair_rounds: 修复轮数覆盖（默认 config.YAML_REPAIR_ROUNDS）
             post_check_issues: YAML 后校验发现的问题列表（直接注入修复轮）
         """
-        from observability import log_phase_header, log_thinking, get_thinking_logger
+        from infrastructure.observability import log_phase_header, log_thinking, get_thinking_logger
         from web.tasks import _BoundedThreadPoolExecutor
         from concurrent.futures import as_completed
         from prompts.response_model import ValidationInterceptor

@@ -472,3 +472,128 @@ setup 任务 steps 含标记、无标记行为不变。
 
 > ⚠️ 说明：两项检查均为**静态告警**（校验器降级替代，不进运行流程）。v9 已生成的 tou 用例含 4 个
 > 臆造断言（框架实测 FAIL），需下轮重生成或人工修；静态检查从源头拦截后续同类问题。
+
+---
+
+## §15 V9 遗留问题解决方案设计（2026-09-01，用户四项决策已确认）
+
+### 15.1 背景
+
+v9 框架结果 9 FAILED / 11 PASSED / 0 ERROR。本设计对 9 个 FAIL + PRE-002 键名冲突逐项定位根因，
+区分「生成器可修」「后端缺陷」「接口契约数据缺漏」，并给出处置方案。用户已确认全部 4 项决策。
+
+### 15.2 根因调查结论（逐用例实证）
+
+#### A. getParentList URL 缺前缀（生成器可修 → 决策：代码层接管 + 静态检查）
+
+- **产物** `test_get_parent_meter_list_positive`：baseInfo.url = `/electricMeter/getParentList`（丢
+  `/park-energy-electric-web/` 前缀）→ 请求打到前端服务器 → 返回 HTML 页面 → 断言 JSONPath
+  `$.data` 匹配失败。
+- **实证**：DB `documents.api_url` = `/park-energy-electric-web/electricMeter/getParentList`（完整前缀）；
+  `_load_all_api_defs` 注入 api_defs_json 直接读该字段 → **LLM 看到了完整 URL 仍丢弃前缀**。
+- 既有 prompt 规则「url 必须与接口序列中的 url 逐字一致」已被 LLM 违反（非首次，2026-08-21 也手工补过
+  前缀）→ 仅靠 prompt 规则不可靠，需**代码层确定性接管**。
+
+#### B. tou_positive 4 个断言字段（接口契约数据缺漏 → 决策：记数据缺漏 + 产物修复）
+
+- **产物**：add 成功后 getList 断言 `contains $.data: sharpElectricity/peakElectricity/flatElectricity/valleyElectricity`，
+  4 断言全失败（getList 返回 data 为电表对象数组，无这些字段）。
+- **数据来源链条**（查生成 thinking 证实，非 LLM 臆造）：
+  1. DB 接口定义：getList **请求参数**含 `sharpElectricity` 等（分项初始读数筛选条件）；
+     add 用 `initDetailList`（`elepayTypeCode: sharp/peak/flat/valley/value`）。
+  2. 测试计划 TC-002（excel）引用 `sharpElectricity` 命名分项初始读数，预期「分时电表展示尖峰平谷
+     分项初始读数」。
+  3. 生成 LLM 照抄进 getList 的 `contains $.data: sharpElectricity` 断言（thinking 中把请求参数名
+     当返回字段用）。
+  4. **实测** getList 返回 data 项 `initDetailList:null` → 后端 getList **不返回分项初始读数**。
+- **本质**：getList 返回定义未标注「分项初始读数是否/如何返回」→ **接口文档不清晰**。
+  铁律 9 的「断言字段取自返回定义」LLM 无从遵守（返回定义缺该结构信息）。
+
+#### C. precision 文案臆造（接口契约数据缺漏 → 决策：记数据缺漏）
+
+- **产物** `test_add_meter_initial_reading_precision_negative`：断言 `contains $.msg: 读数最多保留2位小数`，
+  实际返回 `{"retCode":0,"msg":"fail","data":"初始电量格式不正确"}` → 断言失败。
+- **数据来源链条**：测试计划 TC-012 预期结果直接写死「提示读数最多保留2位小数」；生成 LLM 在 thinking
+  中**明确意识到**接口返回契约未定义失败 msg 值，但判断「B 用例预期结果是用户输入，不算臆造」→ 照抄。
+- **实证矛盾**：后端**有**精度校验（拒绝 3 位小数），但错误文案在 **data** 字段（`初始电量格式不正确`），
+  非 msg；DB `api_returns` msg 标注「失败时返回 fail，后端无具体失败文案」与实测不符。
+- **本质**：add 接口失败返回契约标注不准确（失败文案实际在 data，且具体文案未记录）→ **接口文档不清晰**。
+
+#### D. B 类 6 项（后端缺陷，既有 → 决策：剔除 + 记缺陷）
+
+| 用例 | 后端缺陷 | 实测 |
+|------|---------|------|
+| invalid_category | 无枚举校验 | retCode=1/msg=success（接受 meterTypeCode='0'） |
+| billing_not_selected | 无必填校验 | retCode=1/msg=success（接受缺 payConfigCode） |
+| gateway_protocol_not_selected | 无必填校验 | retCode=1/msg=success（接受缺 accessType） |
+| delete_meter_bound_billing | 允许删除绑定电表 | retCode=1/msg=success |
+| get_list_invalid_page | 无分页参数校验 | msg=success（接受 pageNum=0/-1） |
+| get_list_invalid_sort | 无排序参数校验 | msg=success（接受 sortKey=2） |
+
+- 测试意图合理但后端未实现校验，生成即失败，持续浪费轮次 → 从负向用例清单剔除 + 记录缺陷，等后端修复后重新加入。
+
+### 15.3 已确认决策汇总
+
+| # | 决策点 | 结论 |
+|---|--------|------|
+| 1 | B 类 6 项处置 | **剔除 + 记缺陷**（沿用 32/35 模式） |
+| 2 | getParentList URL 前缀根治 | **代码层接管**（yaml_gen 后处理后缀匹配补前缀）+ 静态检查补 URL 校验 |
+| 3 | precision 文案臆造 | **记数据缺漏**（接口失败返回契约标注不准确） |
+| 4 | tou 断言字段 | **记数据缺漏 + 产物修复**（删 4 断言，getList 不返回分项字段） |
+
+### 15.4 执行计划（含测试设计）
+
+1. **URL 前缀代码层接管**：`yaml_gen.py` 后处理 baseInfo.url 与注入 api_defs 后缀匹配补前缀；
+   静态检查 `_check_37_unique_keys.py` 补「url 与 DB api_url 精确匹配」校验（task#14）。
+   - 测试：单测（给定 api_defs + 丢前缀产物 → 断言补全）；静态检查单测（丢前缀 url → 拦）。
+2. **B 类 6 项剔除 + 记缺陷**：从测试计划/生成范围剔除；记录缺陷到 changelog 待处理清单。
+3. **precision/tou 数据缺漏记录**：DB api_returns 补 add 失败返回结构标注（失败文案在 data）；
+   getList 返回定义补分项结构说明（实测不返回 → 标注）。
+4. **产物修复**：tou 删 4 断言（保留 add 成功 + getList 查到电表）；precision 断言改 `eq retCode: 0`。
+5. **回归**：17 个现有单测 + 重生成后框架回归（预期 9 FAIL 收敛）。
+
+### 15.5 待处理清单（2026-09-01 记录）
+
+#### B 类：后端缺陷（6 项，已从生成清单剔除，等后端修复后重新加入）
+
+| TC | 用例 | 后端缺陷 | 实测返回 |
+|----|------|---------|---------|
+| — | invalid_category | add 无枚举校验 | 接受 meterTypeCode='0'，retCode=1/msg=success |
+| — | billing_not_selected | add 无必填校验 | 接受缺 payConfigCode，retCode=1/msg=success |
+| — | gateway_protocol_not_selected | add 无必填校验 | 接受缺 accessType，retCode=1/msg=success |
+| — | delete_meter_bound_billing | delete 允许删除绑定电表 | retCode=1/msg=success |
+| — | get_list_invalid_page | getList 无分页参数校验 | 接受 pageNum=0/-1，msg=success |
+| — | get_list_invalid_sort | getList 无排序参数校验 | 接受 sortKey=2，msg=success |
+
+#### 数据缺漏：接口契约标注（2026-09-01 已补 DB 标注）
+
+| 接口 | 缺漏 | 处置 |
+|------|------|------|
+| add | 失败返回契约标注不准确：原标注「失败无具体失败文案」，实测失败文案在 data 字段（`初始电量格式不正确`） | 已更新 DB api_returns msg/data 标注 |
+| getList | 返回定义未标注分项初始读数结构：实测 `initDetailList:null`，不返回分项明细 | 已更新 DB api_returns data 标注 |
+| — | 测试计划 TC-012 期望值「读数最多保留2位小数」与后端真实文案不符 | 待修正测试计划（数据维护） |
+| — | 测试计划 TC-002 用 `sharpElectricity` 命名分项字段并断言 getList 返回 | 待修正测试计划（数据维护） |
+| — | 无电表明细接口可验证分项初始读数保存 | 接口能力缺口，待后端补充 |
+
+> ⚠️ 数据来源调查结论（2026-09-01）：tou/precision 的「臆造断言」非 LLM 捏造——LLM 忠实抄写测试计划
+> 期望值（TC-012「读数最多保留2位小数」、TC-002「sharpElectricity 等」），而测试计划期望值与后端真实
+> 契约不符。生成 thinking 实证（thinking_trace.log 3095-3318/5414-5487）：LLM 明确意识到接口返回契约
+> 未定义失败 msg 值，但判断「B 用例预期结果是用户输入，不算臆造」而照抄 → 根因是接口文档不清晰，
+> 非 prompt/schema 缺陷。
+
+### 15.6 产物修复完成状态（2026-09-01 复核）
+
+| 产物 | 修复内容 | 静态检查 |
+|------|---------|---------|
+| test_add_meter_tou_positive/test_data.yaml | 删 4 条臆造断言（sharp/peak/flat/valley）保留 add 成功 + getList 查到电表 | ✅ |
+| test_get_parent_meter_list_positive/test_data.yaml | URL 补业务前缀 `/park-energy-electric-web/electricMeter/getParentList` | ✅ |
+| setup_data/setup_smart_power.yaml + teardown_smart_power.yaml | PRE-002 提取键 `pre001MeterCode/Name` → `pre002MeterCode/Name`（消除与 PRE_001 串键）；teardown 改删 `pre002MeterCode` | ✅ |
+| test_add_meter_initial_reading_precision_negative | **按决策保持原样**（数据缺漏留证，不做产物修复） | — |
+
+> 产物修复改动已备份至 `backups/v9_products_20260901/`（移出 SmartPower 检查树，避免污染静态检查 glob）。
+
+#### 修复前产物快照（备份）
+- `backups/v9_products_20260901/tou_positive.yaml` — 修复前含 4 条臆造断言
+- `backups/v9_products_20260901/get_parent_list.yaml` — 修复前 URL 丢前缀
+
+静态检查全量通过（唯一键动态化/引用变量化/引用键一致性/input_extract 方向路径/断言字段/提取键名唯一/url 前缀 8 项，0 问题）。

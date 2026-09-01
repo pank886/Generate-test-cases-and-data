@@ -11,7 +11,7 @@ import threading
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 
-from observability import set_trace_id, get_logger
+from infrastructure.observability import set_trace_id, get_logger
 
 logger = get_logger(__name__)
 
@@ -30,7 +30,7 @@ class _BoundedThreadPoolExecutor(ThreadPoolExecutor):
         return future
 
 
-import config as _config
+import infrastructure.config as _config
 _MAX_WORKERS = _config.TASK_MAX_WORKERS
 _executor = _BoundedThreadPoolExecutor(max_workers=_MAX_WORKERS, max_queue=_config.TASK_MAX_QUEUE)
 
@@ -264,7 +264,7 @@ def _load_all_api_defs(doc_ids: list[str] | set[str] | None = None) -> list[dict
     """
     from database import get_session_ctx
     from database.models import Document as DocModel
-    from agent_components.api_annotations import ApiAnnotationRegistry
+    from infrastructure.annotations.api_annotations import ApiAnnotationRegistry
 
     apis = []
     try:
@@ -304,14 +304,14 @@ async def _confirm_plan_bg(task_id: str, excel_path: str | None,
     空时由 _resolve_api_defs 回退读取计划目录 module_scope.json。
     """
     import glob
-    import config
+    import infrastructure.config as config
 
     from web.state import _phase_b_components, _update_task, _chroma_db
 
     set_trace_id(task_id)
 
     # 重建 LLM 客户端，避免复用上一个工作流残留的僵死连接池
-    from agent_components.nodes import reload_llm
+    from agent_components.graph.nodes import reload_llm
     reload_llm()
 
     try:
@@ -353,7 +353,7 @@ async def _confirm_plan_bg(task_id: str, excel_path: str | None,
             product_docs_json = "[]"
             try:
                 if _chroma_db is not None:
-                    from agent_components.dual_chroma import get_chroma_db
+                    from infrastructure.vector_store.dual_chroma import get_chroma_db
                     db = get_chroma_db()
                     docs = db.search_product_docs(
                         query=user_ctx,
@@ -487,7 +487,7 @@ async def _resume_workflow_bg(task_id: str, session_id: str, state: dict):
     使用 _phase_b_graph.astream() 逐节点上报进度，前端实时可见。
     """
     import os as _os
-    import config
+    import infrastructure.config as config
     from web.state import _phase_b_graph, _update_task
 
     set_trace_id(task_id)
@@ -612,13 +612,13 @@ async def _analyze_module_scenarios_3step_bg(task_id: str, module_name: str):
     每步 thinking 模式，1 次 LLM 调用，输出自由文本。
     """
     from web.state import _update_task
-    from agent_components.nodes import reload_llm, _get_llm
+    from agent_components.graph.nodes import reload_llm, _get_llm
     from prompts.extraction_prompts import (
         analyze_product_scenarios_prompt,
         analyze_axure_ui_flow_prompt,
         analyze_api_mapping_prompt,
     )
-    import config as _cfg
+    import infrastructure.config as _cfg
 
     set_trace_id(task_id)
     reload_llm()

@@ -66,7 +66,7 @@ class TestApiDocExtraction:
 
     def test_4_search_committed_apis(self):
         """检索已入库的接口定义"""
-        from agent_components.dual_chroma import get_chroma_db
+        from infrastructure.vector_store.dual_chroma import get_chroma_db
         db = get_chroma_db()
         results = db.search_api_defs("健身房设施", k=5)
         assert len(results) > 0, "应检索到至少 1 条接口定义"
@@ -103,7 +103,7 @@ class TestProductDocIngestion:
 
     def test_3_search_product_docs(self):
         """检索已入库的产品文档"""
-        from agent_components.dual_chroma import get_chroma_db
+        from infrastructure.vector_store.dual_chroma import get_chroma_db
         db = get_chroma_db()
         results = db.search_product_docs("健身房预约", k=5)
         assert len(results) > 0, "应检索到产品文档片段"

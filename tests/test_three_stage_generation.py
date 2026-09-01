@@ -25,7 +25,7 @@ from agent_components.generators.yaml_gen import (
     _filter_teardown_missing_pres,
     _relax_teardown_validation,
 )
-from agent_components.nodes import ChatTestAgentGraph
+from agent_components.graph.nodes import ChatTestAgentGraph
 
 # 与盘上 setup 产物同构的构造 YAML（顶层 list + case_name 前缀 + input_extract）
 _SETUP_YAML = """\
@@ -421,3 +421,66 @@ class TestTeardownRobustness:
             encoding="utf-8")
         _relax_teardown_validation(str(tmp_path))
         assert "retCode" in f.read_text(encoding="utf-8")
+
+class TestNormalizeBaseUrls:
+    """URL 前缀代码层接管（2026-09-01 task#15）：LLM 丢业务前缀 → 后缀匹配补全。
+
+    v9 实测 getParentList 丢 /park-energy-electric-web/ 前缀 → 请求打到前端返回 HTML。
+    """
+
+    class _Step:
+        def __init__(self, url: str):
+            self.baseInfo = {"url": url}
+
+    class _Result:
+        def __init__(self, urls: list):
+            self.data = [TestNormalizeBaseUrls._Step(u) for u in urls]
+
+    def _call(self, urls, api_defs):
+        from agent_components.generators.yaml_gen import YamlMixin
+        r = self._Result(urls)
+        YamlMixin._normalize_base_urls(object(), r, json.dumps(api_defs))
+        return [s.baseInfo["url"] for s in r.data]
+
+    def test_restores_dropped_business_prefix(self):
+        """v9 实证：LLM 丢 /park-energy-electric-web/ 前缀 → 后缀匹配补回。"""
+        out = self._call(
+            ["/electricMeter/getParentList"],
+            [{"url": "/park-energy-electric-web/electricMeter/getParentList"},
+             {"url": "/park-energy-electric-web/electricMeter/add"}],
+        )
+        assert out == ["/park-energy-electric-web/electricMeter/getParentList"]
+
+    def test_idempotent_when_already_full_url(self):
+        """产物 url 已是 DB 完整 url → 不改（幂等）。"""
+        out = self._call(
+            ["/park-energy-electric-web/electricMeter/getList"],
+            [{"url": "/park-energy-electric-web/electricMeter/getList"}],
+        )
+        assert out == ["/park-energy-electric-web/electricMeter/getList"]
+
+    def test_ambiguous_short_suffix_skips(self):
+        """超短路径后缀命中多个不同接口 → 歧义跳过，宁缺毋滥。"""
+        out = self._call(
+            ["/getList"],
+            [{"url": "/park-energy-electric-web/electricMeter/getList"},
+             {"url": "/collectionNotice/getList"},
+             {"url": "/collectionLetter/getList"}],
+        )
+        assert out == ["/getList"]
+
+    def test_no_suffix_match_keeps_original(self):
+        """产物路径本就是 DB 里无前缀的接口（如 getPage）→ 不动。"""
+        out = self._call(
+            ["/electricMeter/getPage"],
+            [{"url": "/electricMeter/getPage"},
+             {"url": "/park-energy-electric-web/electricMeter/getList"}],
+        )
+        assert out == ["/electricMeter/getPage"]
+
+    def test_empty_api_defs_noop(self):
+        """api_defs 为空/为 [] → 不处理（兼容无接口定义调用方）。"""
+        assert self._call(["/electricMeter/getParentList"], []) == \
+            ["/electricMeter/getParentList"]
+        assert self._call(["/electricMeter/getParentList"], "[]") == \
+            ["/electricMeter/getParentList"]

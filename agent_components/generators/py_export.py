@@ -7,8 +7,8 @@
 import os
 import re
 
-import config
-from observability import get_logger
+import infrastructure.config as config
+from infrastructure.observability import get_logger
 
 logger = get_logger(__name__)
 

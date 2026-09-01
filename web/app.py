@@ -16,9 +16,9 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 from starlette.types import ASGIApp, Receive, Scope, Send
 
-import config
+import infrastructure.config as config
 from database import init_db
-from observability import get_logger, init_logging, set_trace_id, generate_trace_id
+from infrastructure.observability import get_logger, init_logging, set_trace_id, generate_trace_id
 
 # ----------------------------------------------------------------
 # 日志初始化
@@ -232,7 +232,7 @@ async def lifespan(app: FastAPI):
     # 3. ChromaDB + Ollama（带重试）
     for attempt in (1, 2, 3):
         try:
-            from agent_components.dual_chroma import get_chroma_db
+            from infrastructure.vector_store.dual_chroma import get_chroma_db
             _state._chroma_db = get_chroma_db()
             print("[startup] DualChromaDB + Ollama 连接已就绪")
             break
@@ -252,7 +252,7 @@ async def lifespan(app: FastAPI):
 
     # 3. Agent 初始化（Phase B 工作流 + Phase C 生成组件）
     logger.info(">>> 启动智能测试助手 Web 服务 ...")
-    from agent_components.graph_builder import build_workflow
+    from agent_components.graph.graph_builder import build_workflow
     _state._phase_b_graph, _state._phase_b_components = build_workflow()
 
     # 4. 恢复已导入文件列表（以 SQLite 为唯一数据源）

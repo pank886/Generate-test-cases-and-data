@@ -257,7 +257,7 @@ async def get_page_image_file(doc_id: str, image_path: str):
     image_path 对新数据=原文件名（如 u37.png），对旧数据=相对 PAGE_IMAGES_DIR 路径。
     """
     import os as _os
-    import config as _config
+    import infrastructure.config as _config
     from fastapi.responses import FileResponse, Response
     from database.models import PageImage
 

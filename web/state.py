@@ -9,7 +9,7 @@ import time as _time
 import uuid
 from datetime import datetime
 
-from observability import get_logger
+from infrastructure.observability import get_logger
 
 logger = get_logger(__name__)
 
@@ -70,7 +70,7 @@ _task_store_lock = asyncio.Lock()
 
 async def _create_task() -> str:
     """创建一个新任务并返回 task_id，顺带清理过期任务。"""
-    import config as _config
+    import infrastructure.config as _config
     now = datetime.now()
     ttl = _config.TASK_TTL_SECONDS
     task_id = uuid.uuid4().hex

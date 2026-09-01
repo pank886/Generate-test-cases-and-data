@@ -17,7 +17,7 @@ from prompts.extraction_prompts import (
     analyze_api_mapping_prompt,
     repair_excel_plan_prompt,
 )
-from prompts.definitions import PromptFactory
+from prompts.extraction_prompts import generate_excel_plan_thinking_prompt
 
 
 def _render_api_mapping() -> str:
@@ -34,7 +34,7 @@ def _render_api_mapping() -> str:
 
 
 def _render_plan_thinking() -> str:
-    pt = PromptFactory().generate_excel_plan_thinking()
+    pt = generate_excel_plan_thinking_prompt()
     msgs = pt.format_messages(
         json_schema=json.dumps({"type": "object"}, ensure_ascii=False),
         module_analysis="【模块场景与接口分析】",

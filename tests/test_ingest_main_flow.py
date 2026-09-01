@@ -35,7 +35,7 @@ def _reset_singletons():
     database._ENGINE = None
     database._SESSION_LOCAL = None
     # 重置 ChromaDB 单例
-    from agent_components import dual_chroma
+    from infrastructure.vector_store import dual_chroma
     dual_chroma._chroma_instance = None
     yield
 
@@ -49,7 +49,7 @@ def mock_llm():
 
     def _make_mock(return_value):
         patcher = patch(
-            "agent_components.nodes.ChatTestAgentGraph._invoke_structured",
+            "agent_components.graph.nodes.ChatTestAgentGraph._invoke_structured",
             return_value=return_value,
         )
         mock = patcher.start()
@@ -62,8 +62,8 @@ def mock_llm():
 @pytest.fixture
 def mock_chroma():
     """Mock ChromaDB 双集合。"""
-    from agent_components.dual_chroma import DualChromaDB
-    with patch("agent_components.dual_chroma.get_chroma_db") as m:
+    from infrastructure.vector_store.dual_chroma import DualChromaDB
+    with patch("infrastructure.vector_store.dual_chroma.get_chroma_db") as m:
         fake_db = MagicMock(spec=DualChromaDB)
         fake_db.search_product_docs.return_value = []
         fake_db.search_api_defs.return_value = []

@@ -19,7 +19,7 @@ from urllib.parse import unquote
 
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
-import config
+import infrastructure.config as config
 
 logger = logging.getLogger(__name__)
 

@@ -1,6 +1,6 @@
 """SQLite 文档/块/术语持久化 + 补偿回滚。"""
 
-from observability import get_logger
+from infrastructure.observability import get_logger
 
 logger = get_logger(__name__)
 

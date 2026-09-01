@@ -1,20 +1,25 @@
-"""YAML 生成后快速验证，纯代码，不放 LLM。
+"""YAML 数据生成检测（2026-09-01 校验包归位重构）。
 
-挂在 Phase C _generate_all_yamls 返回后、ValidationInterceptor 写报告前。
-产出结构化错误信息，可被 _run_yaml_rounds 修复轮直接消费。
+合并自 agent_components/post_validator.py（YAML 生成后快速验证）与
+_repair_helpers.py 迁移的生成后校验函数（_find_missing_yaml_refs 引用完整性 /
+_scan_missing_key_refs D4 缺失键扫描），语义归属「YAML 数据生成检测」。
+
+纯代码，不放 LLM。产出结构化错误信息，可被 _run_yaml_rounds 修复轮直接消费。
 """
 
+import glob
 import os
 import re
-import glob as _glob
-import yaml as _yaml
 
-from observability import get_logger
+import yaml
+
+from infrastructure.observability import get_logger
 
 logger = get_logger(__name__)
 
 _PLACEHOLDER_RE = re.compile(r'\$\{[^}]+\}')
 _VALID_OPS = {"eq", "contains", "ne", "db"}
+_GET_EXTRACT_RE = re.compile(r"get_extract_data\(\s*['\"]([^'\"]+)['\"]\s*\)")
 
 
 class YamlPostValidator:
@@ -30,11 +35,11 @@ class YamlPostValidator:
         """遍历所有 YAML 文件，执行全部注册的检查项。"""
         issues: list[dict] = []
         pattern = os.path.join(output_dir, "**", "*.yaml")
-        yaml_files = _glob.glob(pattern, recursive=True)
+        yaml_files = glob.glob(pattern, recursive=True)
         for path in yaml_files:
             try:
                 with open(path, encoding="utf-8") as f:
-                    data = _yaml.safe_load(f) or {}
+                    data = yaml.safe_load(f) or {}
             except Exception:
                 continue
             if not isinstance(data, dict) or "data" not in data:
@@ -185,3 +190,68 @@ class YamlPostValidator:
         single = s.count("'") - s.count("\\'")
         double = s.count('"') - s.count('\\"')
         return single % 2 == 1 or double % 2 == 1
+
+
+# ==================== 生成后引用/缺失键校验（迁移自 _repair_helpers.py） ====================
+
+
+def _find_missing_yaml_refs(output_base: str, project_root: str) -> list:
+    """扫描 output_base 下所有 test_*.py 引用的 yaml，返回磁盘缺失清单。
+
+    引用路径形如 './testcase/<batch>/<feature>/<func>/test_data.yaml'
+    （pytest 从 project_root 运行），磁盘解析为 project_root + 相对路径。
+    2026-08-12 问题 3：_27 曾出现 .py 引用存在但磁盘缺失（空目录）未被拦截，
+    此处接入生成收尾，缺失文件禁止静默放行。
+    """
+    refs = []
+    for dp, _dn, fn in os.walk(output_base):
+        for f in fn:
+            if f.endswith(".py") and f.startswith("test_"):
+                _path = os.path.join(dp, f)
+                refs.extend(re.findall(r"'\./([^']+\.yaml)'",
+                                       open(_path, encoding="utf-8").read()))
+    missing = []
+    for r in sorted(set(refs)):
+        if not os.path.exists(os.path.join(project_root, r)):
+            missing.append(r)
+    return missing
+
+
+def _scan_missing_key_refs(output_base: str, setup_keys: dict) -> list:
+    """D4 后校验（就地实现，2026-08-27 决策选项 1，不走 validate_all）。
+
+    扫描 test/teardown YAML（跳过 setup_*.yaml）中引用 __MISSING_KEY__ 的用例
+    → P1（需人工复核，不进修复轮——根因是 setup 生成失败，重生成无用）。
+    避开 2026-08-27 发现的后校验格式错位：validate_all 只处理 {data:[...]} dict，
+    而生成器写盘为顶层 list，故此处直接遍历 list 格式产物。
+    """
+    missing = {k for entry in setup_keys.values()
+               for k, v in entry["keys"].items() if v == "__MISSING_KEY__"}
+    if not missing:
+        return []
+    issues = []
+    for fp in glob.glob(os.path.join(output_base, "**", "*.yaml"), recursive=True):
+        rel = os.path.relpath(fp, output_base).replace("\\", "/")
+        if "/setup_data/setup_" in rel:
+            continue  # setup 自身不引用提取键
+        try:
+            data = yaml.safe_load(open(fp, encoding="utf-8"))
+        except Exception:
+            continue
+        for block in data or []:
+            for tc in block.get("testCase", []):
+                cn = tc.get("case_name", "")
+                text = str(tc.get("json") or "") + str(tc.get("validation") or "")
+                for key in _GET_EXTRACT_RE.findall(text):
+                    if key in missing:
+                        issues.append({
+                            "yaml_path": fp,  # 绝对/glob 路径，与 validate_all 一致
+                            "check": "missing_extract_key",
+                            "severity": "P1",
+                            "line": 0,
+                            "current": f"get_extract_data('{key}')",
+                            "expected": "setup 提取失败，需人工复核（改硬编码占位值或改断言）",
+                            "fix_hint": "D4: setup 未提取到该键（__MISSING_KEY__），该用例需人工复核修正",
+                            "case_name": cn,
+                        })
+    return issues

@@ -5,11 +5,11 @@ import os
 import uuid
 from datetime import datetime
 
-import config
+import infrastructure.config as config
 from fastapi import APIRouter, UploadFile, File, Form, BackgroundTasks
 from fastapi.responses import JSONResponse
 
-from observability import get_logger
+from infrastructure.observability import get_logger
 from ingest_v2 import process_api_doc_extract, commit_api_docs as _commit
 
 logger = get_logger(__name__)
@@ -120,7 +120,7 @@ async def extract_api_code(file_path: str = Form(""), module_name: str = Form(""
         return JSONResponse(status_code=400,
                             content={"success": False, "message": "文件不存在"})
     try:
-        from agent_components.api_annotations import ApiAnnotationRegistry
+        from infrastructure.annotations.api_annotations import ApiAnnotationRegistry
         full_text = _extract_text(file_path).strip()
         if not full_text:
             return JSONResponse(status_code=400,

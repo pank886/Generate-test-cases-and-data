@@ -5,7 +5,7 @@
 /api/embeddings 端点，对上层调用方完全透明。
 
 用法 — 直接替换 langchain_ollama.OllamaEmbeddings：
-    from agent_components.fallback_embeddings import FallbackOllamaEmbeddings
+    from infrastructure.vector_store.fallback_embeddings import FallbackOllamaEmbeddings
     embeddings = FallbackOllamaEmbeddings(model="bge-m3", base_url="http://localhost:11434")
 """
 

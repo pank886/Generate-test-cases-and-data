@@ -226,27 +226,28 @@ class ExcelPlanV2(BaseModel):
 
 
 # ============================================================
-# Excel 测试计划 V1（保留兼容）
+# Excel 测试计划 V1 —— 已注释（2026-09-01 评审：v1 休眠，运行时 excel_plan 恒为 ExcelPlanV2；
+# ExcelRow 唯一消费者是 v1 的 rows 字段，一并注释。运行确认无影响后删除本块。）
+# 恢复方法：去掉各行 # 前缀并还原 class 名即可。
 # ============================================================
-
-class ExcelRow(BaseModel):
-    """Excel 测试计划中的一行 = 一个测试用例"""
-    project_name: str = Field(description="项目名称，如 VehicleAccess")
-    allure_epic: str = Field(description="Allure Epic 层级")
-    module_name: str = Field(description="模块/类名（相同场景的用例填入相同值），如 TestParkingFree")
-    allure_feature: str = Field(description="Allure Feature 层级")
-    allure_story: str = Field(description="Allure Story 层级（场景标题）")
-    fixture_level: str = Field(description="fixture等级，如 danyuan，多个用逗号分隔")
-    case_name: str = Field(description="用例方法名，如 test_CarEntry_001")
-    steps: List[str] = Field(description="执行步骤列表，steps[0] 含前置清空信息，如 '前置清空:园区数据已清理'")
-    test_data_yaml: str = Field(description="测试数据 YAML 文件名（单文件），如 testCarEntry_001.yaml")
-    enabled: str = Field(description="是否启用，Y 或 N")
-
-
-class ExcelPlan(BaseModel):
-    """完整的 Excel 测试计划"""
-    rows: List[ExcelRow] = Field(description="测试计划行数据列表")
-    file_name: str = Field(default="test_plan.xlsx", description="输出的 Excel 文件名")
+# class ExcelRow(BaseModel):
+#     """Excel 测试计划中的一行 = 一个测试用例"""
+#     project_name: str = Field(description="项目名称，如 VehicleAccess")
+#     allure_epic: str = Field(description="Allure Epic 层级")
+#     module_name: str = Field(description="模块/类名（相同场景的用例填入相同值），如 TestParkingFree")
+#     allure_feature: str = Field(description="Allure Feature 层级")
+#     allure_story: str = Field(description="Allure Story 层级（场景标题）")
+#     fixture_level: str = Field(description="fixture等级，如 danyuan，多个用逗号分隔")
+#     case_name: str = Field(description="用例方法名，如 test_CarEntry_001")
+#     steps: List[str] = Field(description="执行步骤列表，steps[0] 含前置清空信息，如 '前置清空:园区数据已清理'")
+#     test_data_yaml: str = Field(description="测试数据 YAML 文件名（单文件），如 testCarEntry_001.yaml")
+#     enabled: str = Field(description="是否启用，Y 或 N")
+#
+#
+# class ExcelPlan(BaseModel):
+#     """完整的 Excel 测试计划"""
+#     rows: List[ExcelRow] = Field(description="测试计划行数据列表")
+#     file_name: str = Field(default="test_plan.xlsx", description="输出的 Excel 文件名")
 
 
 
@@ -676,7 +677,7 @@ class StepData(BaseModel):
             base["method"] = method.lower()
 
         # 2. url 规范化（复用 normalize_api_url：去域名 + 去 query + 去尾斜杠，保留大小写）
-        from agent_components.api_annotations import normalize_api_url
+        from infrastructure.annotations.api_annotations import normalize_api_url
         url = base.get("url")
         if isinstance(url, str) and url.strip():
             _norm = normalize_api_url(url)
@@ -730,7 +731,7 @@ class StepData(BaseModel):
         _literal = re.search(r'\{(\w+)\}', url)
         if _literal:
             # has_path_params 激活 → 放行 {xxx} 字面量（由代码层替换为 ${get_extract_data}）
-            from agent_components.api_annotations import ApiAnnotationRegistry
+            from infrastructure.annotations.api_annotations import ApiAnnotationRegistry
             if not ApiAnnotationRegistry.is_active(annotations, "has_path_params"):
                 rule = "url含字面量路径参数"
                 msg = (
@@ -1080,33 +1081,35 @@ class TestData(BaseModel):
 
 # ============================================================
 # 场景数据规划（Phase C YAML 生成 — 数据依赖分析）
+#   已注释（2026-09-01 评审：真死代码，全仓零引用，运行确认后删除）
 # ============================================================
 
-class DataPlanStep(BaseModel):
-    """单步 API 调用的数据规划"""
-    api_name: str = Field(description="接口名称")
-    data_values: Dict[str, Any] = Field(description="请求数据（json 字段内容）")
-    form_data: Optional[Dict[str, Any]] = Field(default=None, description="form-data 参数")
-    query_params: Optional[Dict[str, Any]] = Field(default=None, description="URL query 参数")
-    extract_rules: Optional[Dict[str, str]] = Field(default=None, description="从响应提取数据规则，key=字段名, value=jsonpath")
-    input_extract: Optional[Dict[str, str]] = Field(default=None, description="从请求参数提取规则")
-    assertions: List[Dict[str, Any]] = Field(default=[], description="断言规则，如 [{\"eq\": {\"code\": 0}}]")
-    data_factory_calls: Optional[List[str]] = Field(default=None, description="需使用的工厂方法")
+# class DataPlanStep(BaseModel):
+#     """单步 API 调用的数据规划"""
+#     api_name: str = Field(description="接口名称")
+#     data_values: Dict[str, Any] = Field(description="请求数据（json 字段内容）")
+#     form_data: Optional[Dict[str, Any]] = Field(default=None, description="form-data 参数")
+#     query_params: Optional[Dict[str, Any]] = Field(default=None, description="URL query 参数")
+#     extract_rules: Optional[Dict[str, str]] = Field(default=None, description="从响应提取数据规则，key=字段名, value=jsonpath")
+#     input_extract: Optional[Dict[str, str]] = Field(default=None, description="从请求参数提取规则")
+#     assertions: List[Dict[str, Any]] = Field(default=[], description="断言规则，如 [{\"eq\": {\"code\": 0}}]")
+#     data_factory_calls: Optional[List[str]] = Field(default=None, description="需使用的工厂方法")
 
 
 # ============================================================
 # 测试点分析（Phase C 产出）
+#   已注释（2026-09-01 评审：真死代码，全仓零引用，运行确认后删除）
 # ============================================================
 
-class TestPointItem(BaseModel):
-    """单个测试点"""
-    module: str = Field(description="所属模块")
-    scenario: str = Field(description="测试场景标题")
-    description: str = Field(description="测试点详细描述，包含前置条件和预期结果")
-    priority: str = Field(description="优先级: P0/P1/P2/P3")
-    test_type: str = Field(description="测试类型: 功能/边界/异常/兼容")
-    related_requirement: Optional[str] = Field(default=None, description="关联的产品需求点说明")
-    risk: Optional[bool] = Field(default=None, description="高风险填 true，否则 false")
+# class TestPointItem(BaseModel):
+#     """单个测试点"""
+#     module: str = Field(description="所属模块")
+#     scenario: str = Field(description="测试场景标题")
+#     description: str = Field(description="测试点详细描述，包含前置条件和预期结果")
+#     priority: str = Field(description="优先级: P0/P1/P2/P3")
+#     test_type: str = Field(description="测试类型: 功能/边界/异常/兼容")
+#     related_requirement: Optional[str] = Field(default=None, description="关联的产品需求点说明")
+#     risk: Optional[bool] = Field(default=None, description="高风险填 true，否则 false")
 
 
 # ============================================================

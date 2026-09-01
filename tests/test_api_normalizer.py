@@ -3,7 +3,7 @@
 覆盖: 去域名 / 去 query / 去尾斜杠 / 保留大小写 / 路径参数字面量 / 幂等。
 """
 
-from agent_components.api_annotations import normalize_api_url
+from infrastructure.annotations.api_annotations import normalize_api_url
 
 
 class TestNormalizeApiUrl:

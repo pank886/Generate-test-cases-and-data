@@ -122,7 +122,7 @@ Phase C — Generation（确认计划 → 生成 .py + .yaml）
 | YAML 格式化（单次，无 inline 重试） | json_mode | ❌ | TestData（占位符/三选一/空列表校验内置） |
 | .py 生成 | 纯代码组装 | — | —（不经 LLM） |
 
-> DeepSeek V4 的 thinking 控制通过声明式 `METHOD_FEATURES` 配置表管理（`agent_components/nodes.py`）：
+> DeepSeek V4 的 thinking 控制通过声明式 `METHOD_FEATURES` 配置表管理（`agent_components/graph/nodes.py`）：
 > - `function_calling` / `json_mode` / `json_schema` 均不支持 thinking
 > - `free_text` 支持 thinking（分析节点）
 > - 未知 method 自动禁用 thinking 并记日志警告
@@ -154,7 +154,7 @@ pip install -r requirements.txt
 
 ### 配置
 
-配置分为两层（`settings.py` 顶部有详细说明）：
+配置分为两层（`infrastructure/settings.py` 顶部有详细说明）：
 
 **① `.env` — 模型地址与 API Key**（敏感信息 / 环境差异）
 
@@ -177,7 +177,7 @@ DEEP_MODEL=deepseek-v4-pro
 ENABLE_THINKING=true
 ```
 
-**② `settings.py` — 其余可调参数**（.env 不生效）
+**② `infrastructure/settings.py` — 其余可调参数**（.env 不生效）
 
 启动前必须配置**输出路径**（缺失则启动报错）：
 
@@ -186,7 +186,7 @@ pycharm_misc = "C:\\path\\to\\your\\pycharm\\project"   # 目标项目根路径
 testcase_base = "testcase"                               # 输出子目录名
 ```
 
-其他常用参数（直接改 `settings.py` 中各 Field 的 default）：
+其他常用参数（直接改 `infrastructure/settings.py` 中各 Field 的 default）：
 - `chunk_size` / `chunk_overlap` / `retrieval_k` — 切分与检索
 - `excel_repair_attempts` / `yaml_repair_rounds` / `yaml_failure_circuit_breaker` — 修复与熔断
 - `yaml_concurrency` / `task_max_workers` / `task_max_queue` — 并发
@@ -256,11 +256,23 @@ python web_app.py
 Generate-test-cases-and-data/
 ├── web_app.py                    # Web 入口（Uvicorn，输入 q 停止）
 ├── main.py                       # CLI 入口（已废弃，提示使用 Web）
-├── config.py                     # 配置兼容层（薄包装 settings.py）
-├── settings.py                   # Pydantic Settings 配置中心（调参 + 输出路径）
 ├── ingest_v2.py                  # Phase A 摄取兼容入口（re-export ingest/ 包 + CLI）
-├── observability.py              # 结构化 JSON 日志 + trace_id
 ├── requirements.txt
+│
+├── infrastructure/               # 纯基础设施（无业务逻辑）
+│   ├── __init__.py               # 空（不 re-export）
+│   ├── config.py                 # 配置兼容层（薄包装 settings.py）
+│   ├── settings.py               # Pydantic Settings 配置中心（调参 + 输出路径）
+│   ├── observability.py          # 结构化 JSON 日志 + trace_id
+│   ├── annotations/
+│   │   └── api_annotations.py    # 接口标注注册表（ApiAnnotationRegistry）
+│   ├── llm/
+│   │   ├── base.py               # BaseCompatibleChatOpenAI
+│   │   ├── client.py             # LLM 客户端单例
+│   │   └── deepseek.py           # DeepSeekChatOpenAI 适配器
+│   └── vector_store/
+│       ├── dual_chroma.py        # ChromaDB 封装（统一 doc_search 集合）
+│       └── fallback_embeddings.py # Embedding 兜底
 │
 ├── web/                          # FastAPI Web 应用
 │   ├── app.py                    # 应用工厂 + lifespan 生命周期 + 中间件
@@ -278,30 +290,25 @@ Generate-test-cases-and-data/
 │       └── doc_binding.py        # 文档绑定业务逻辑
 │
 ├── agent_components/             # AI 核心组件
-│   ├── nodes.py                  # LangGraph 节点方法（ChatTestAgentGraph）+ METHOD_FEATURES
-│   ├── graph_builder.py          # 工作流图构建（LangGraph StateGraph）
-│   ├── state.py                  # LangGraph 状态定义
 │   ├── retrievers.py             # 多跳检索节点（RetrievalMixin）
+│   ├── axure_parser.py           # Axure 原型解析器
+│   ├── graph/                    # Phase B 工作流
+│   │   ├── __init__.py
+│   │   ├── nodes.py              # LangGraph 节点方法（ChatTestAgentGraph）+ METHOD_FEATURES
+│   │   ├── graph_builder.py      # 工作流图构建（LangGraph StateGraph）
+│   │   ├── state.py              # LangGraph 状态定义
+│   │   └── graph_logging.py      # 工作流日志累积器
 │   ├── generators/               # Phase C 生成器（GenerationMixin 组合层）
 │   │   ├── __init__.py           #   组合层 + re-export
 │   │   ├── excel.py              #   Excel 读取 + dependency_map（ExcelMixin）
 │   │   ├── translation.py        #   英文翻译 + 幂等性（TranslationMixin）
 │   │   ├── py_export.py          #   pytest 脚本生成（PyExportMixin）
 │   │   ├── yaml_gen.py           #   YAML 生成 + 修复循环（YamlMixin）
-│   │   └── _helpers.py           #   修复循环辅助函数
-│   ├── llm/
-│   │   ├── base.py               # BaseCompatibleChatOpenAI
-│   │   └── deepseek.py           # DeepSeekChatOpenAI 适配器
-│   ├── llm_client.py             # LLM 客户端单例
-│   ├── dual_chroma.py            # ChromaDB 封装（统一 doc_search 集合）
-│   ├── fallback_embeddings.py    # Embedding 兜底
-│   ├── api_annotations.py        # 接口标注注册表（ApiAnnotationRegistry）
-│   ├── plan_validator.py         # Excel 计划校验器（ExcelPlanValidator，9 类错误聚合）
-│   ├── validator.py              # Excel 文件层校验（openpyxl 读回）
-│   ├── post_validator.py         # YAML 后校验（YamlPostValidator）
-│   ├── axure_parser.py           # Axure 原型解析器
-│   ├── prompt_builder.py         # Prompt 构建辅助
-│   └── graph_logging.py          # 工作流日志累积器
+│   │   ├── _helpers.py           #   修复循环辅助函数
+│   │   └── _repair_helpers.py    #   YAML 修复轮辅助函数
+│   └── validation/               # Phase C 校验器
+│       ├── case_validator.py     # Excel 计划校验器（ExcelPlanValidator）+ 文件层校验
+│       └── yaml_validator.py     # YAML 后校验（YamlPostValidator）
 │
 ├── ingest/                       # Phase A 文档摄取（2026-08 大文件拆分）
 │   ├── extractors.py             # 文本提取（PyPDF / docx / markdown + 图片）
@@ -311,8 +318,9 @@ Generate-test-cases-and-data/
 │   └── storage.py                # SQLite 落库 + Chroma 向量化
 │
 ├── prompts/
-│   ├── definitions.py            # PromptFactory（Prompt 文本）
-│   ├── extraction_prompts.py     # 提取 / 修复 prompt
+│   ├── __init__.py               # 包导出
+│   ├── definitions.py            # 遗留注释容器（PromptFactory 已并入 extraction_prompts.py，确认后删除）
+│   ├── extraction_prompts.py     # 全阶段 Prompt（Phase A/B/C 文件内分层）
 │   └── response_model.py         # Pydantic 响应模型（ExcelPlanV2 / TestData 等）
 │
 ├── data_factory/                 # 测试数据工厂
@@ -330,14 +338,12 @@ Generate-test-cases-and-data/
 │       ├── bindings.py           #   BindingOps（去重绑定）
 │       ├── glossary.py           #   GlossaryOps
 │       ├── analysis.py           #   AnalysisOps（模块场景分析）
+│       ├── api_ops.py            #   ApiOps（接口定义 CRUD）
 │       └── compensation.py       #   CompensationOps（补偿任务队列）
 │
 ├── infra/
 │   ├── start_ollama.bat          # Ollama 启动检查（CPU 模式）
 │   └── Modelfile                 # bge-m3-cpu CPU 模式模型文件
-│
-├── scripts/
-│   └── migrate_chroma_to_sqlite.py   # ChromaDB → SQLite 迁移脚本
 │
 ├── static/
 │   ├── app.js                    # 前端主逻辑
@@ -356,12 +362,18 @@ Generate-test-cases-and-data/
 │   ├── test_phase_c_api.py           # Phase C /confirm-plan API（产物质量校验）
 │   ├── test_phase_c_autofix.py       # Phase C 自动修复
 │   ├── test_plan_validator.py        # ExcelPlanValidator 单测
-│   ├── test_new_node_evaluation.py   # 新节点评估
+│   ├── test_thinking_log.py          # thinking 日志回归
+│   ├── test_quality_gate.py          # 质量门禁（首轮 <50% 全量重生成）
+│   ├── test_enum_prompt_rules.py     # 枚举字面量 prompt 规则
 │   ├── test_commit_api.py / test_delete_file.py / test_doc_binding.py
 │   ├── test_files_bindings_api.py / test_key_flows.py / test_llm_adapter.py
 │   ├── test_ollama_raw.py / test_orphan_detection.py / test_yaml_db_export.py
-│   └── test_regression_*.py          # 回归（axure/extraction/generators/import_smoke/
-│                                     #   operations/post_validator）
+│   ├── test_regression_*.py          # 回归（axure/extraction/generators/import_smoke/
+│   │                                 #   operations/post_validator/yapi_json_import）
+│   ├── tools/                        # 一次性检验辅助工具（批次校验/修复/诊断，不参与系统运行）
+│   │   ├── migrate_chroma_to_sqlite.py  # ChromaDB → SQLite 迁移（不追踪）
+│   │   └── *.py                      # yaml_* / fix_* / diag_* / analyze_* 辅助脚本
+│   └── backups/                      # 生成数据快照（不追踪）
 │
 ├── data/                         # 运行时数据（gitignored）
 │   ├── app.db                    # SQLite 数据库（事实源）
@@ -478,7 +490,7 @@ generate_excel_plan 纯处理节点
 2. **补偿 worker**：LLM 摘要失败 / Chroma 重建等异步任务写入 `compensation_tasks` 表，独立线程轮询重试（默认 3 次）。
 3. **文件删除延迟重试**：ChromaDB 删除失败后延迟（默认 300s）异步重试。
 4. **数据真实性门禁（规则 M8）**：接口定义快照 `api_defs.json` 缺失/为空时，Phase C 显式阻断，禁止空定义盲写 YAML。
-5. **历史迁移**：从旧 Chroma 双集合迁移可运行 `python scripts/migrate_chroma_to_sqlite.py`。
+5. **历史迁移**：从旧 Chroma 双集合迁移可运行 `python tests/tools/migrate_chroma_to_sqlite.py`。
 
 ---
 
@@ -494,6 +506,13 @@ generate_excel_plan 纯处理节点
 ---
 
 ## 最新变更
+
+**2026-09-01**
+
+- **目录重构（infrastructure/ 归位 + 子包提取）** — 纯基础设施下沉 `infrastructure/`（config/settings/observability + `annotations/` + `llm/` + `vector_store/`）；Phase B 工作流提取为 `agent_components/graph/` 子包（nodes/graph_builder/state/graph_logging）；校验器归拢 `agent_components/validation/`（case_validator=ExcelPlanValidator / yaml_validator=YamlPostValidator）；`prompt_builder.py` 合并进 `graph/nodes.py` 私有方法
+- **prompts 收尾** — `prompts/definitions.py` 的 PromptFactory 并入 `extraction_prompts.py`（文件内 Phase 分层）；旧分段式生成方法（generate_excel_plan_node / analyze_test_points_raw）注释废弃
+- **一次性工具迁入 tests/** — `scripts/migrate_chroma_to_sqlite.py` → `tests/tools/`，`backups/` → `tests/backups/`（均不追踪）
+- **apikey.py 防误提交** — 加入 `.gitignore`（本地 API Key 入口，绝不入库）
 
 **2026-08-07**
 

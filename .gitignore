@@ -3,6 +3,9 @@
 venv/
 .env
 
+# 本地 API Key 入口（绝不提交）
+apikey.py
+
 # IDE
 .idea/
 .vscode/
@@ -80,3 +83,7 @@ wheels/
 
 
 
+
+# 一次性迁移工具 + 生成数据备份（不追踪，项目结束后统一清理）
+tests/tools/migrate_chroma_to_sqlite.py
+tests/backups/

@@ -11,7 +11,7 @@ from typing import Any
 import openai
 from langchain_core.outputs import ChatResult
 
-from agent_components.llm.base import BaseCompatibleChatOpenAI
+from infrastructure.llm.base import BaseCompatibleChatOpenAI
 
 logger = logging.getLogger(__name__)
 

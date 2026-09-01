@@ -15,7 +15,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from prompts.response_model import TestCaseRow as PlanTestCaseRow, SharedPrecondition, ExcelPlanV2
-from agent_components.plan_validator import (
+from agent_components.validation.case_validator import (
     ExcelPlanValidator,
     extract_url_paths,
     match_api_template,

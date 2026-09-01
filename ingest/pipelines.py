@@ -6,15 +6,15 @@ from pathlib import Path
 
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
-from observability import get_logger
-from agent_components.dual_chroma import get_chroma_db
-from agent_components.nodes import ChatTestAgentGraph
+from infrastructure.observability import get_logger
+from infrastructure.vector_store.dual_chroma import get_chroma_db
+from agent_components.graph.nodes import ChatTestAgentGraph
 from prompts.response_model import DocModuleExtract, ApiDefExtract
 from prompts.extraction_prompts import (
     product_doc_extract_prompt,
     api_def_extract_prompt,
 )
-import config
+import infrastructure.config as config
 
 from ingest.extractors import _extract_text, _docx_img_dir, _safe_doc_id
 from ingest.storage import (
@@ -46,7 +46,7 @@ def process_product_doc(file_path: str, progress_cb=None) -> dict:
         progress_cb: 可选，进度回调 (0~100, message)
     """
     cb = progress_cb or (lambda p, m: None)
-    from observability import log_phase_header
+    from infrastructure.observability import log_phase_header
     log_phase_header("Phase A — 文档摄入与向量化")
     logger.info(f"\n{'=' * 60}")
     logger.info(f"[Phase A] 处理产品文档: {os.path.basename(file_path)}")
@@ -294,7 +294,7 @@ def process_api_doc_extract(file_path: str, default_module: str = None,
             all_apis.extend(apis)
 
     # ---- D1: 提取后统一规范化 url（白名单/合并去重/入库共用同形）----
-    from agent_components.api_annotations import normalize_api_url
+    from infrastructure.annotations.api_annotations import normalize_api_url
     for a in all_apis:
         a["url"] = normalize_api_url(a.get("url", ""))
 
@@ -354,7 +354,7 @@ def commit_api_docs(file_path: str, module_name: str, apis: list[dict],
     logger.info(f"[Phase A] 入库 {len(apis)} 个接口文档")
 
     # D1: 写入前统一规范化 url（SQLite api_url / file_name / doc_id / 检索文本共用同形）
-    from agent_components.api_annotations import normalize_api_url
+    from infrastructure.annotations.api_annotations import normalize_api_url
     for api in apis:
         api["url"] = normalize_api_url(api.get("url", ""))
 
@@ -378,7 +378,7 @@ def commit_api_docs(file_path: str, module_name: str, apis: list[dict],
         method = api.get("method", "?")
         doc_id = _safe_doc_id("api", file_name, module_name, method, url, api_name)
         # ★ 自动标注 API 异常标识（is_export / has_path_params 等）
-        from agent_components.api_annotations import ApiAnnotationRegistry
+        from infrastructure.annotations.api_annotations import ApiAnnotationRegistry
         ApiAnnotationRegistry.apply_all(api)
         doc_ids.append(doc_id)
         docs_to_insert.append(Document(

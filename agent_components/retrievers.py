@@ -3,10 +3,10 @@ import json
 import os
 from datetime import datetime
 
-import config
-from observability import get_logger
-from agent_components.dual_chroma import get_chroma_db
-from agent_components.state import State
+import infrastructure.config as config
+from infrastructure.observability import get_logger
+from infrastructure.vector_store.dual_chroma import get_chroma_db
+from agent_components.graph.state import State
 from prompts.response_model import IntentConfirmation
 
 logger = get_logger(__name__)
@@ -373,7 +373,9 @@ class RetrievalMixin:
             }
 
         # LLM 语义匹配（解析失败时降级为"未匹配"，不抛 500 中断流程）
-        prompt = self.prompt_factory.confirm_user_intent()
+        # 2026-09-01：PromptFactory → extraction_prompts 模块级函数
+        from prompts.extraction_prompts import confirm_user_intent_prompt
+        prompt = confirm_user_intent_prompt()
         try:
             result = self._invoke_structured(
                 prompt, IntentConfirmation,
@@ -542,84 +544,84 @@ class RetrievalMixin:
         logger.info(f"   => 汇总: {len(all_docs)} 文档片段, {len(api_defs)} 个接口")
         return {"product_docs": all_docs, "api_definitions": api_defs}
 
-    # ---- 节点 5：测试点分析 ----
-
-    def _analyze_test_points_raw(self, state: State):
-        """Phase B — 测试点原始分析（thinking 节点）：输出自由文本分析报告。
-
-        优先路径：module_analysis 存在 → 注入预分析结果，跳过 product_docs。
-        降级路径：module_analysis 不存在 → 全量 product_docs（旧逻辑）。
-        """
-        from observability import log_phase_header
-        log_phase_header("Phase B — 测试点分析")
-        logger.info("\n🧠 分析测试场景（深度思考）...")
-        prompt = self.prompt_factory.analyze_test_points_raw()
-
-        # ── 优先/降级：查询 module_analysis ──
-        confirmed_module = state.get("confirmed_module", "")
-        analysis_text = ""
-        try:
-            from database import get_session_ctx
-            from database.operations import ModuleOps
-            from database.operations.analysis import AnalysisOps
-            with get_session_ctx() as session:
-                mod = ModuleOps.get_by_name(session, confirmed_module)
-                if mod:
-                    record = AnalysisOps.get_by_module_id(session, mod.id)
-                    if record:
-                        # 三步分析文本优先，旧 analysis_json 降级兼容
-                        parts = []
-                        if getattr(record, 'scenario_analysis', None):
-                            parts.append("### 测试场景分析\n" + record.scenario_analysis)
-                        if getattr(record, 'ui_flow_analysis', None):
-                            parts.append("### 页面交互逻辑\n" + record.ui_flow_analysis)
-                        if getattr(record, 'api_analysis', None):
-                            parts.append("### 接口映射分析\n" + record.api_analysis)
-                        if parts:
-                            analysis_text = "\n\n".join(parts)
-                        elif record.analysis_json:
-                            analysis_text = record.analysis_json
-                        logger.info(f"   📋 命中 module_analysis（{len(analysis_text)} 字符），走优先路径")
-        except Exception:
-            logger.warning("   ⚠️ module_analysis 查询失败，走降级路径", exc_info=True)
-
-        # ── 优先路径：跳过 product_docs ──
-        if analysis_text:
-            docs_text = ""  # 不注入全量产品文档
-        else:
-            logger.info("   📄 无 module_analysis，走降级路径（全量原文）")
-            docs_text = "\n\n".join(
-                f"[{d.get('module', d.get('source', '?'))}] {d.get('content', '')}"
-                for d in state.get("product_docs", [])
-            )
-
-        related_text = ", ".join(state.get("related_modules", [])) or "无"
-
-        # ── 构造完整 API 定义文本（从 SQLite 查全量，非 ChromaDB 摘要）──
-        apis_text = _build_full_api_defs_text(state.get("api_definitions", []))
-        logger.info(f"   => API 定义文本: {len(apis_text)} 字符")
-
-        # 显式控制 thinking 开关
-        llm_kwargs = {}
-        if config.ENABLE_THINKING:
-            llm_kwargs["extra_body"] = {"thinking": {"type": "enabled"}}
-        else:
-            llm_kwargs["extra_body"] = {"thinking": {"type": "disabled"}}
-        bound_llm = self.llm.bind(temperature=0.6, **llm_kwargs)
-        # 空 content 有限重试（公共方法 _invoke_think，复用同一输入，重试 config.MAX_RETRIES 次）
-        analysis = self._invoke_think(
-            bound_llm,
-            prompt.format_messages(
-                user_context=state["original_input"],
-                module_analysis=analysis_text or "无",
-                product_docs=docs_text,
-                related_docs=related_text,
-                api_definitions=apis_text,
-            ),
-            label="analyze_test_points_raw",
-        )
-        logger.info(f"   => 测试场景分析完成（{len(analysis)} 字符）")
-        from observability import log_thinking
-        log_thinking("analyze_test_points_raw", state["original_input"], analysis, prompt_label="analyze_test_points_raw_prompt")
-        return {"test_point_analysis": analysis}
-
+#     # ---- 节点 5：测试点分析 ----
+#
+#     def _analyze_test_points_raw(self, state: State):
+#         """Phase B — 测试点原始分析（thinking 节点）：输出自由文本分析报告。
+#
+#         优先路径：module_analysis 存在 → 注入预分析结果，跳过 product_docs。
+#         降级路径：module_analysis 不存在 → 全量 product_docs（旧逻辑）。
+#         """
+#         from infrastructure.observability import log_phase_header
+#         log_phase_header("Phase B — 测试点分析")
+#         logger.info("\n🧠 分析测试场景（深度思考）...")
+#         prompt = self.prompt_factory.analyze_test_points_raw()
+#
+#         # ── 优先/降级：查询 module_analysis ──
+#         confirmed_module = state.get("confirmed_module", "")
+#         analysis_text = ""
+#         try:
+#             from database import get_session_ctx
+#             from database.operations import ModuleOps
+#             from database.operations.analysis import AnalysisOps
+#             with get_session_ctx() as session:
+#                 mod = ModuleOps.get_by_name(session, confirmed_module)
+#                 if mod:
+#                     record = AnalysisOps.get_by_module_id(session, mod.id)
+#                     if record:
+#                         # 三步分析文本优先，旧 analysis_json 降级兼容
+#                         parts = []
+#                         if getattr(record, 'scenario_analysis', None):
+#                             parts.append("### 测试场景分析\n" + record.scenario_analysis)
+#                         if getattr(record, 'ui_flow_analysis', None):
+#                             parts.append("### 页面交互逻辑\n" + record.ui_flow_analysis)
+#                         if getattr(record, 'api_analysis', None):
+#                             parts.append("### 接口映射分析\n" + record.api_analysis)
+#                         if parts:
+#                             analysis_text = "\n\n".join(parts)
+#                         elif record.analysis_json:
+#                             analysis_text = record.analysis_json
+#                         logger.info(f"   📋 命中 module_analysis（{len(analysis_text)} 字符），走优先路径")
+#         except Exception:
+#             logger.warning("   ⚠️ module_analysis 查询失败，走降级路径", exc_info=True)
+#
+#         # ── 优先路径：跳过 product_docs ──
+#         if analysis_text:
+#             docs_text = ""  # 不注入全量产品文档
+#         else:
+#             logger.info("   📄 无 module_analysis，走降级路径（全量原文）")
+#             docs_text = "\n\n".join(
+#                 f"[{d.get('module', d.get('source', '?'))}] {d.get('content', '')}"
+#                 for d in state.get("product_docs", [])
+#             )
+#
+#         related_text = ", ".join(state.get("related_modules", [])) or "无"
+#
+#         # ── 构造完整 API 定义文本（从 SQLite 查全量，非 ChromaDB 摘要）──
+#         apis_text = _build_full_api_defs_text(state.get("api_definitions", []))
+#         logger.info(f"   => API 定义文本: {len(apis_text)} 字符")
+#
+#         # 显式控制 thinking 开关
+#         llm_kwargs = {}
+#         if config.ENABLE_THINKING:
+#             llm_kwargs["extra_body"] = {"thinking": {"type": "enabled"}}
+#         else:
+#             llm_kwargs["extra_body"] = {"thinking": {"type": "disabled"}}
+#         bound_llm = self.llm.bind(temperature=0.6, **llm_kwargs)
+#         # 空 content 有限重试（公共方法 _invoke_think，复用同一输入，重试 config.MAX_RETRIES 次）
+#         analysis = self._invoke_think(
+#             bound_llm,
+#             prompt.format_messages(
+#                 user_context=state["original_input"],
+#                 module_analysis=analysis_text or "无",
+#                 product_docs=docs_text,
+#                 related_docs=related_text,
+#                 api_definitions=apis_text,
+#             ),
+#             label="analyze_test_points_raw",
+#         )
+#         logger.info(f"   => 测试场景分析完成（{len(analysis)} 字符）")
+#         from infrastructure.observability import log_thinking
+#         log_thinking("analyze_test_points_raw", state["original_input"], analysis, prompt_label="analyze_test_points_raw_prompt")
+#         return {"test_point_analysis": analysis}
+#

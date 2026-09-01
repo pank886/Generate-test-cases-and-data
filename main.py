@@ -2,8 +2,8 @@
 """CLI 入口：智能测试助手命令行版"""
 import sys
 
-from observability import get_logger
-from agent_components.graph_builder import build_workflow
+from infrastructure.observability import get_logger
+from agent_components.graph.graph_builder import build_workflow
 
 logger = get_logger(__name__)
 

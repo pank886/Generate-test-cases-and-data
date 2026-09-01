@@ -39,7 +39,7 @@ class TestApiAnnotationRegistry:
 
     def test_builtin_types_registered(self):
         """启动时 is_export / has_path_params 应已自动注册。"""
-        from agent_components.api_annotations import ApiAnnotationRegistry
+        from infrastructure.annotations.api_annotations import ApiAnnotationRegistry
         types = ApiAnnotationRegistry.get_types()
         keys = {t.key for t in types}
         assert "is_export" in keys
@@ -59,7 +59,7 @@ class TestApiAnnotationRegistry:
     ])
     def test_is_export_detection(self, url, name, expected):
         """按 URL/name 关键词检测导出/导入类接口。"""
-        from agent_components.api_annotations import ApiAnnotationRegistry
+        from infrastructure.annotations.api_annotations import ApiAnnotationRegistry
         t = next(d for d in ApiAnnotationRegistry.get_types() if d.key == "is_export")
         matched, meta = t.detector({"url": url, "name": name})
         assert matched == expected
@@ -76,7 +76,7 @@ class TestApiAnnotationRegistry:
     ])
     def test_has_path_params_detection(self, url, expected, param_count):
         """按 URL {xxx} 模式检测 RESTful 路径参数接口。"""
-        from agent_components.api_annotations import ApiAnnotationRegistry
+        from infrastructure.annotations.api_annotations import ApiAnnotationRegistry
         t = next(d for d in ApiAnnotationRegistry.get_types() if d.key == "has_path_params")
         matched, meta = t.detector({"url": url, "name": "test"})
         assert matched == expected
@@ -87,7 +87,7 @@ class TestApiAnnotationRegistry:
 
     def test_apply_all_both_types(self):
         """一个接口同时命中两个检测器 → annotations 含两个 key。"""
-        from agent_components.api_annotations import ApiAnnotationRegistry
+        from infrastructure.annotations.api_annotations import ApiAnnotationRegistry
         api = {"url": "/bill/export/{type}", "name": "导出账单"}
         ApiAnnotationRegistry.apply_all(api)
         ann = api.get("annotations", {})
@@ -101,7 +101,7 @@ class TestApiAnnotationRegistry:
 
     def test_apply_all_no_match(self):
         """不命中任何检测器 → annotations 不出现。"""
-        from agent_components.api_annotations import ApiAnnotationRegistry
+        from infrastructure.annotations.api_annotations import ApiAnnotationRegistry
         api = {"url": "/user/add", "name": "新增用户"}
         ApiAnnotationRegistry.apply_all(api)
         ann = api.get("annotations")
@@ -110,7 +110,7 @@ class TestApiAnnotationRegistry:
 
     def test_apply_all_preserves_manual(self):
         """人工标注（source: manual）不被 auto 检测覆盖。"""
-        from agent_components.api_annotations import ApiAnnotationRegistry
+        from infrastructure.annotations.api_annotations import ApiAnnotationRegistry
         api = {
             "url": "/user/query", "name": "查询用户",
             "annotations": {
@@ -126,19 +126,19 @@ class TestApiAnnotationRegistry:
 
     def test_is_active_true(self):
         """active=true 返回 True。"""
-        from agent_components.api_annotations import ApiAnnotationRegistry
+        from infrastructure.annotations.api_annotations import ApiAnnotationRegistry
         annotations = {"is_export": {"active": True, "source": "auto"}}
         assert ApiAnnotationRegistry.is_active(annotations, "is_export") is True
 
     def test_is_active_false(self):
         """active=false 返回 False。"""
-        from agent_components.api_annotations import ApiAnnotationRegistry
+        from infrastructure.annotations.api_annotations import ApiAnnotationRegistry
         annotations = {"is_export": {"active": False, "source": "manual"}}
         assert ApiAnnotationRegistry.is_active(annotations, "is_export") is False
 
     def test_is_active_missing_key(self):
         """不存在的 key 返回 False。"""
-        from agent_components.api_annotations import ApiAnnotationRegistry
+        from infrastructure.annotations.api_annotations import ApiAnnotationRegistry
         assert ApiAnnotationRegistry.is_active(None, "is_export") is False
         assert ApiAnnotationRegistry.is_active({}, "is_export") is False
         assert ApiAnnotationRegistry.is_active(
@@ -147,7 +147,7 @@ class TestApiAnnotationRegistry:
 
     def test_is_active_null_annotations(self):
         """annotations=None → is_active 返回 False。"""
-        from agent_components.api_annotations import ApiAnnotationRegistry
+        from infrastructure.annotations.api_annotations import ApiAnnotationRegistry
         assert ApiAnnotationRegistry.is_active(None, "is_export") is False
 
 
@@ -311,90 +311,93 @@ class TestAnalysisOps:
 # ═══════════════════════════════════════════════════════════════════
 # 3. Phase B 优先/降级路径
 # ═══════════════════════════════════════════════════════════════════
+# 3. Phase B 优先/降级路径 — 已注释（2026-09-01：_analyze_test_points_raw 旧分段式生成废弃，
+#    测试类 TestPhaseBPriorityDegradation 一并注释，运行确认后删除）
+# ═══════════════════════════════════════════════════════════════════
 
-class TestPhaseBPriorityDegradation:
-    """retrievers.py: _analyze_test_points_raw 改造
-
-    注：这些测试需要完整的 DB + ChromaDB mock 链路，且核心逻辑仅为
-    if/else 分支，标记 skip。优先/降级逻辑的正确性可通过代码审查验证。
-    """
-
-    @pytest.mark.skip(reason="需要完整 DB mock 链路（get_session_ctx + ModuleOps + AnalysisOps），"
-                            "核心逻辑为简单 if/else，代码审查即可验证")
-    def test_priority_path_injects_analysis_not_product_docs(self):
-        """module_analysis 存在 → 注入 module_analysis + api_definitions，跳过 product_docs。"""
-        from agent_components.retrievers import RetrievalMixin
-        state = {
-            "original_input": "测试智慧用电",
-            "confirmed_module": "智慧用电",
-            "product_docs": [{"content": "不应该出现的内容"}],
-            "api_definitions": [{"name": "API1", "url": "/api/test", "method": "GET"}],
-            "related_modules": [],
-        }
-        mixin = RetrievalMixin()
-        mixin.prompt_factory = MagicMock()
-        mixin.llm = MagicMock()
-        mixin.llm.bind.return_value.invoke.return_value = MagicMock(
-            content="分析结果",
-        )
-        mock_prompt = MagicMock()
-        mock_prompt.format_messages.return_value = []
-        mixin.prompt_factory.analyze_test_points_raw.return_value = mock_prompt
-
-        with patch('agent_components.retrievers.logger'), \
-             patch('agent_components.retrievers.config') as mock_cfg, \
-             patch('observability.log_phase_header'), \
-             patch('observability.log_thinking'):
-            mock_cfg.ENABLE_THINKING = False
-
-            def _load_mock(module_name):
-                return json.dumps({"api_analysis": [], "scenario_analysis": []})
-            mixin._load_module_analysis = _load_mock
-
-            result = mixin._analyze_test_points_raw(state)
-            assert "test_point_analysis" in result
-            call_kwargs = mock_prompt.format_messages.call_args.kwargs
-            assert "module_analysis" in call_kwargs
-            # product_docs 在优先路径中应为空字符串
-            assert call_kwargs.get("product_docs") == ""
-
-    @pytest.mark.skip(reason="需要完整 DB mock 链路，核心逻辑为简单 if/else")
-    def test_degradation_path_when_no_analysis(self):
-        """module_analysis 不存在 → 走全量原文降级路径。"""
-        from agent_components.retrievers import RetrievalMixin
-        state = {
-            "original_input": "测试智慧用电",
-            "confirmed_module": "智慧用电",
-            "product_docs": [{"content": "产品文档内容"}],
-            "api_definitions": [{"name": "API1", "url": "/api/test", "method": "GET"}],
-            "related_modules": [],
-        }
-        mixin = RetrievalMixin()
-        mixin.prompt_factory = MagicMock()
-        mixin.llm = MagicMock()
-        mixin.llm.bind.return_value.invoke.return_value = MagicMock(
-            content="分析结果",
-        )
-        mock_prompt = MagicMock()
-        mock_prompt.format_messages.return_value = []
-        mixin.prompt_factory.analyze_test_points_raw.return_value = mock_prompt
-
-        with patch('agent_components.retrievers.logger'), \
-             patch('agent_components.retrievers.config') as mock_cfg, \
-             patch('observability.log_phase_header'), \
-             patch('observability.log_thinking'):
-            mock_cfg.ENABLE_THINKING = False
-
-            # 无 module_analysis
-            mixin._load_module_analysis = lambda name: None
-
-            result = mixin._analyze_test_points_raw(state)
-            assert "test_point_analysis" in result
-            call_kwargs = mock_prompt.format_messages.call_args.kwargs
-            assert "product_docs" in call_kwargs
-            assert call_kwargs["product_docs"] != ""
-
-
+# class TestPhaseBPriorityDegradation:
+#     """retrievers.py: _analyze_test_points_raw 改造
+#
+#     注：这些测试需要完整的 DB + ChromaDB mock 链路，且核心逻辑仅为
+#     if/else 分支，标记 skip。优先/降级逻辑的正确性可通过代码审查验证。
+#     """
+#
+#     @pytest.mark.skip(reason="需要完整 DB mock 链路（get_session_ctx + ModuleOps + AnalysisOps），"
+#                             "核心逻辑为简单 if/else，代码审查即可验证")
+#     def test_priority_path_injects_analysis_not_product_docs(self):
+#         """module_analysis 存在 → 注入 module_analysis + api_definitions，跳过 product_docs。"""
+#         from agent_components.retrievers import RetrievalMixin
+#         state = {
+#             "original_input": "测试智慧用电",
+#             "confirmed_module": "智慧用电",
+#             "product_docs": [{"content": "不应该出现的内容"}],
+#             "api_definitions": [{"name": "API1", "url": "/api/test", "method": "GET"}],
+#             "related_modules": [],
+#         }
+#         mixin = RetrievalMixin()
+#         mixin.prompt_factory = MagicMock()
+#         mixin.llm = MagicMock()
+#         mixin.llm.bind.return_value.invoke.return_value = MagicMock(
+#             content="分析结果",
+#         )
+#         mock_prompt = MagicMock()
+#         mock_prompt.format_messages.return_value = []
+#         mixin.prompt_factory.analyze_test_points_raw.return_value = mock_prompt
+#
+#         with patch('agent_components.retrievers.logger'), \
+#              patch('agent_components.retrievers.config') as mock_cfg, \
+#              patch('infrastructure.observability.log_phase_header'), \
+#              patch('infrastructure.observability.log_thinking'):
+#             mock_cfg.ENABLE_THINKING = False
+#
+#             def _load_mock(module_name):
+#                 return json.dumps({"api_analysis": [], "scenario_analysis": []})
+#             mixin._load_module_analysis = _load_mock
+#
+#             result = mixin._analyze_test_points_raw(state)
+#             assert "test_point_analysis" in result
+#             call_kwargs = mock_prompt.format_messages.call_args.kwargs
+#             assert "module_analysis" in call_kwargs
+#             # product_docs 在优先路径中应为空字符串
+#             assert call_kwargs.get("product_docs") == ""
+#
+#     @pytest.mark.skip(reason="需要完整 DB mock 链路，核心逻辑为简单 if/else")
+#     def test_degradation_path_when_no_analysis(self):
+#         """module_analysis 不存在 → 走全量原文降级路径。"""
+#         from agent_components.retrievers import RetrievalMixin
+#         state = {
+#             "original_input": "测试智慧用电",
+#             "confirmed_module": "智慧用电",
+#             "product_docs": [{"content": "产品文档内容"}],
+#             "api_definitions": [{"name": "API1", "url": "/api/test", "method": "GET"}],
+#             "related_modules": [],
+#         }
+#         mixin = RetrievalMixin()
+#         mixin.prompt_factory = MagicMock()
+#         mixin.llm = MagicMock()
+#         mixin.llm.bind.return_value.invoke.return_value = MagicMock(
+#             content="分析结果",
+#         )
+#         mock_prompt = MagicMock()
+#         mock_prompt.format_messages.return_value = []
+#         mixin.prompt_factory.analyze_test_points_raw.return_value = mock_prompt
+#
+#         with patch('agent_components.retrievers.logger'), \
+#              patch('agent_components.retrievers.config') as mock_cfg, \
+#              patch('infrastructure.observability.log_phase_header'), \
+#              patch('infrastructure.observability.log_thinking'):
+#             mock_cfg.ENABLE_THINKING = False
+#
+#             # 无 module_analysis
+#             mixin._load_module_analysis = lambda name: None
+#
+#             result = mixin._analyze_test_points_raw(state)
+#             assert "test_point_analysis" in result
+#             call_kwargs = mock_prompt.format_messages.call_args.kwargs
+#             assert "product_docs" in call_kwargs
+#             assert call_kwargs["product_docs"] != ""
+#
+#
 # ═══════════════════════════════════════════════════════════════════
 # 4. Phase C — pre_validate 钩子 + _annotations 注入
 # ═══════════════════════════════════════════════════════════════════
@@ -761,7 +764,7 @@ class TestEdgeCases:
         因此任意 active=True 的 key 都返回 True。校验器只会查已知的 key，
         所以未知 key 不会产生实际影响。
         """
-        from agent_components.api_annotations import ApiAnnotationRegistry
+        from infrastructure.annotations.api_annotations import ApiAnnotationRegistry
         annotations = {
             "unknown_type": {"active": True, "source": "auto"},
             "has_path_params": {"active": True, "source": "auto",
@@ -806,7 +809,7 @@ class TestEdgeCases:
 
     def test_all_inactive_annotations_no_bypass(self):
         """所有 annotations 的 active=false → 完全等同于无 annotations。"""
-        from agent_components.api_annotations import ApiAnnotationRegistry
+        from infrastructure.annotations.api_annotations import ApiAnnotationRegistry
         annotations = {
             "is_export": {"active": False, "source": "manual"},
             "has_path_params": {"active": False, "source": "manual"},

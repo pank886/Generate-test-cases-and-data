@@ -26,13 +26,13 @@ class TestResponseModelImports:
         assert TestCase is not None
 
     def test_import_plan_models(self):
-        """ExcelPlan / DependencyMap / DataPlanStep 可导入。"""
+        """ExcelPlanV2 / DependencyMap 可导入（DataPlanStep 已注释：真死代码）。"""
         from prompts.response_model import (
-            ExcelPlanV2, DependencyMap, DataPlanStep
+            ExcelPlanV2, DependencyMap,  # DataPlanStep 已注释（真死代码）
         )
         assert ExcelPlanV2 is not None
         assert DependencyMap is not None
-        assert DataPlanStep is not None
+        # assert DataPlanStep is not None  # 已注释（真死代码）
 
     def test_import_api_models(self):
         """ApiDefinition / ApiDefExtract 可导入。"""
@@ -86,7 +86,7 @@ class TestGeneratorsImports:
 
 
 # ============================================================
-# 3. agent_components.nodes — 拆分后可能变 package
+# 3. agent_components.graph.nodes — LangGraph 子包
 # ============================================================
 
 class TestNodesImports:
@@ -94,12 +94,12 @@ class TestNodesImports:
 
     def test_import_chat_test_agent_graph(self):
         """ChatTestAgentGraph 可导入。"""
-        from agent_components.nodes import ChatTestAgentGraph
+        from agent_components.graph.nodes import ChatTestAgentGraph
         assert ChatTestAgentGraph is not None
 
     def test_import_reload_llm(self):
         """reload_llm 可导入。"""
-        from agent_components.nodes import reload_llm
+        from agent_components.graph.nodes import reload_llm
         assert reload_llm is not None
 
 
@@ -167,12 +167,12 @@ class TestOtherKeyImports:
 
     def test_import_post_validator(self):
         """YamlPostValidator 可导入。"""
-        from agent_components.post_validator import YamlPostValidator
+        from agent_components.validation.yaml_validator import YamlPostValidator
         assert YamlPostValidator is not None
 
     def test_import_dual_chroma(self):
         """DualChromaDB 可导入。"""
-        from agent_components.dual_chroma import DualChromaDB, get_chroma_db
+        from infrastructure.vector_store.dual_chroma import DualChromaDB, get_chroma_db
         assert DualChromaDB is not None
         assert get_chroma_db is not None
 
@@ -181,23 +181,27 @@ class TestOtherKeyImports:
         from data_factory.registry import get_validation_rules
         assert get_validation_rules is not None
 
-    def test_import_prompt_factory(self):
-        """PromptFactory 可导入。"""
-        from prompts.definitions import PromptFactory
-        assert PromptFactory is not None
+    def test_import_relocated_prompt_functions(self):
+        """迁移后模块级 prompt 函数可导入（PromptFactory 已并入 extraction_prompts.py）。"""
+        from prompts.extraction_prompts import (
+            generate_excel_plan_thinking_prompt,
+            confirm_user_intent_prompt,
+        )
+        assert generate_excel_plan_thinking_prompt is not None
+        assert confirm_user_intent_prompt is not None
 
     def test_import_config(self):
         """config 模块可导入。"""
-        import config
+        import infrastructure.config as config
         assert config.BASE_DIR is not None
         assert hasattr(config, "PYCHARM_MISC")
 
     def test_import_observability(self):
         """observability 模块可导入。"""
-        from observability import get_logger
+        from infrastructure.observability import get_logger
         assert get_logger is not None
 
     def test_import_settings(self):
         """settings 模块可导入。"""
-        from settings import settings
+        from infrastructure.settings import settings
         assert settings is not None

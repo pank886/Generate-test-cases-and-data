@@ -34,7 +34,7 @@ def _reset_db():
     _db._SESSION_LOCAL = None
 
     # mock ChromaDB 单例防跨测试污染
-    from agent_components import dual_chroma
+    from infrastructure.vector_store import dual_chroma
     dual_chroma._chroma_instance = None
 
     # 指向临时数据库

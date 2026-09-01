@@ -8,7 +8,7 @@ import copy
 import pytest
 from langchain_core.outputs import ChatResult
 
-from agent_components.llm.deepseek import DeepSeekChatOpenAI
+from infrastructure.llm.deepseek import DeepSeekChatOpenAI
 
 
 # ======================================================================
@@ -280,7 +280,7 @@ class TestInvokeThinkReasoning:
     def test_reasoning_label_logs_tagged_node(self, monkeypatch):
         """有 reasoning_label → 落 ``{label}_thinking`` 节点，且不落 ``{label} 思考内容``。"""
         from unittest.mock import Mock
-        import agent_components.llm_client as llm_client
+        import infrastructure.llm.client as llm_client
         llm = self._fake_llm('{"data": []}', "先思考，再输出 JSON。")
         mock_log = Mock()
         monkeypatch.setattr(llm_client, "log_thinking", mock_log)
@@ -298,7 +298,7 @@ class TestInvokeThinkReasoning:
     def test_no_reasoning_label_keeps_generic_path(self, monkeypatch):
         """无 reasoning_label → 维持 ``{label} 思考内容`` 通用路径（行为不变）。"""
         from unittest.mock import Mock
-        import agent_components.llm_client as llm_client
+        import infrastructure.llm.client as llm_client
         llm = self._fake_llm("ok", None)
         mock_generic = Mock()
         monkeypatch.setattr(llm_client, "_log_reasoning_content", mock_generic)
@@ -312,7 +312,7 @@ class TestInvokeThinkReasoning:
     def test_reasoning_label_empty_content_retries(self, monkeypatch):
         """content 空但 reasoning 非空 → 仍触发空响应重试；监测照常记录。"""
         from unittest.mock import Mock
-        import agent_components.llm_client as llm_client
+        import infrastructure.llm.client as llm_client
         calls = {"n": 0}
 
         def invoke(messages):

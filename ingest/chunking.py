@@ -1,6 +1,6 @@
 """切块 + 摘要生成 + 检索文本构建。"""
 
-from observability import get_logger
+from infrastructure.observability import get_logger
 
 logger = get_logger(__name__)
 
@@ -27,8 +27,8 @@ def _generate_batch_summaries(doc_id: str, chunks: list[str], file_name: str,
     LLM 输出 ===CHUNK_SUMMARY=== 分隔词，正则匹配解析。
     """
     import re
-    import config
-    from agent_components.nodes import _get_llm
+    import infrastructure.config as config
+    from agent_components.graph.nodes import _get_llm
     from prompts.extraction_prompts import batch_chunk_summary_prompt
     from database import get_session_ctx
     from database.models import DocumentChunk
@@ -111,7 +111,7 @@ def _build_api_search_text(api: dict) -> str:
             返回值: {ret_name}{ret_type}; ..."
     """
     name = api.get("name", "")
-    from agent_components.api_annotations import normalize_api_url
+    from infrastructure.annotations.api_annotations import normalize_api_url
     url = normalize_api_url(api.get("url", ""))
     method = api.get("method", "?").upper()
     desc = api.get("description", name)

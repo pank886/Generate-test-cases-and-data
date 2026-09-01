@@ -120,7 +120,7 @@ class TestPhaseCInitialized:
     def test_workflow_graph_builds(self):
         """build_workflow()（Phase B 图）应正常构建返回 graph + components。"""
         # 直接测试函数本身可用
-        from agent_components.graph_builder import build_workflow
+        from agent_components.graph.graph_builder import build_workflow
         graph, components = build_workflow()
         assert graph is not None, "build_workflow() 应返回 graph"
         assert components is not None, "build_workflow() 应返回 components"
@@ -198,8 +198,6 @@ class TestIntentConfirmationFallback:
 
         mixin = RetrievalMixin()
         mixin._invoke_structured = MagicMock(side_effect=RuntimeError("LLM 解析失败"))
-        mixin.prompt_factory = MagicMock()
-        mixin.prompt_factory.confirm_user_intent = MagicMock(return_value="prompt")
 
         state = {"user_input": "测试", "workflow_status": "PENDING"}
 

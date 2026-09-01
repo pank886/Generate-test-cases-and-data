@@ -274,28 +274,28 @@ class TestHasUnmatchedQuotes:
 
     def test_matched_quotes(self):
         """配对引号返回 False。"""
-        from agent_components.post_validator import YamlPostValidator
+        from agent_components.validation.yaml_validator import YamlPostValidator
         assert YamlPostValidator._has_unmatched_quotes("'hello'") is False
         assert YamlPostValidator._has_unmatched_quotes('"world"') is False
 
     def test_unmatched_single_quote(self):
         """不配对单引号返回 True。"""
-        from agent_components.post_validator import YamlPostValidator
+        from agent_components.validation.yaml_validator import YamlPostValidator
         assert YamlPostValidator._has_unmatched_quotes("it's a test") is True
 
     def test_unmatched_double_quote(self):
         """不配对双引号返回 True。"""
-        from agent_components.post_validator import YamlPostValidator
+        from agent_components.validation.yaml_validator import YamlPostValidator
         assert YamlPostValidator._has_unmatched_quotes('"broken') is True
 
     def test_no_quotes(self):
         """无引号返回 False。"""
-        from agent_components.post_validator import YamlPostValidator
+        from agent_components.validation.yaml_validator import YamlPostValidator
         assert YamlPostValidator._has_unmatched_quotes("no quotes here") is False
 
     def test_escaped_quotes_not_counted(self):
         """转义引号不计入。"""
-        from agent_components.post_validator import YamlPostValidator
+        from agent_components.validation.yaml_validator import YamlPostValidator
         assert YamlPostValidator._has_unmatched_quotes(
             "it\\'s a test"  # 无配对的 '
         ) is False

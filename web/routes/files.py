@@ -3,11 +3,11 @@
 import os as _os
 import time as _time
 
-import config
+import infrastructure.config as config
 from fastapi import APIRouter, UploadFile, File, Form, BackgroundTasks
 from fastapi.responses import JSONResponse
 
-from observability import get_logger
+from infrastructure.observability import get_logger
 
 logger = get_logger(__name__)
 
@@ -170,7 +170,7 @@ async def delete_file(filename: str = Form(...)):
                 BindingOps.delete_bindings_for_doc(session, doc_id)
                 DocOps.delete_document(session, doc_id)
         except Exception as e:
-            from observability import get_logger
+            from infrastructure.observability import get_logger
             get_logger(__name__).error("SQLite 清理失败: %s", e)
             return JSONResponse(status_code=500,
                                 content={"success": False,
@@ -184,7 +184,7 @@ async def delete_file(filename: str = Form(...)):
             async def _retry_chroma_delete(did: str):
                 await asyncio.sleep(config.CHROMA_RETRY_DELAY)
                 try:
-                    from agent_components.dual_chroma import get_chroma_db
+                    from infrastructure.vector_store.dual_chroma import get_chroma_db
                     db = get_chroma_db()
                     db.delete_by_doc_id(did)
                     print(f"[delete-file] ChromaDB 延迟删除成功: {did}")
@@ -211,7 +211,7 @@ async def delete_file(filename: str = Form(...)):
         await _remove_imported_file(filename)
         return {"success": True, "message": f"已删除 '{filename}'"}
     except Exception as e:
-        from observability import get_logger
+        from infrastructure.observability import get_logger
         get_logger(__name__).error("删除失败: %s", e)
         return JSONResponse(status_code=500,
                             content={"success": False, "message": str(e)})
@@ -223,7 +223,7 @@ async def uploaded_files():
     from database import get_session_ctx
     from database.operations import DocOps
     from web.state import _get_imported_files
-    from observability import get_logger
+    from infrastructure.observability import get_logger
 
     db_files = []
     try:
@@ -262,7 +262,7 @@ async def uploaded_files():
 @router.post("/open-file")
 async def open_file(file_path: str = Form(...)):
     """打开本地文件（仅限 TESTCASE_BASE 目录下）。"""
-    import config
+    import infrastructure.config as config
     base = _os.path.abspath(config.TESTCASE_BASE)
     abs_path = _os.path.abspath(file_path)
     if not abs_path.startswith(base):
@@ -280,7 +280,7 @@ async def open_file(file_path: str = Form(...)):
 @router.get("/download-file")
 async def download_file(path: str = ""):
     """下载生成的文件（Excel / PY / YAML）。"""
-    import config
+    import infrastructure.config as config
     from fastapi.responses import FileResponse
     if not path or not _os.path.exists(path):
         return JSONResponse(status_code=404,
@@ -308,7 +308,7 @@ async def download_file(path: str = ""):
 @router.get("/file-content")
 async def get_file_content(path: str = ""):
     """读取文件内容（供前端查看/编辑）。"""
-    import config
+    import infrastructure.config as config
     if not path or not _os.path.exists(path):
         return JSONResponse(status_code=404,
                             content={"success": False, "message": "文件不存在"})
@@ -350,7 +350,7 @@ async def get_file_content(path: str = ""):
 @router.post("/file-save")
 async def save_file_content(data: dict):
     """保存修改后的文件内容。"""
-    import config
+    import infrastructure.config as config
     path = data.get("path", "")
     content = data.get("content", "")
     if not path:

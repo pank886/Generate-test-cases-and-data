@@ -14,7 +14,6 @@ prompt_label=generate_excel_plan_thinking）。
 import contextlib
 import os
 import sys
-import types
 from unittest.mock import Mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -23,7 +22,7 @@ from langchain_core.prompts import ChatPromptTemplate
 
 from prompts.response_model import ExcelPlanV2
 from prompts.response_model import TestCaseRow as _TestCaseRow
-from agent_components.nodes import ChatTestAgentGraph
+from agent_components.graph.nodes import ChatTestAgentGraph
 
 
 def _plan_json() -> str:
@@ -48,8 +47,9 @@ class TestThinkingLog:
             ("human", "{gen_warning}### M\n{module_analysis}\n{api_definitions}\n"
                       "{related_docs}\n{user_context}\n{db_schema}"),
         ])
-        agent.prompt_factory = types.SimpleNamespace(
-            generate_excel_plan_thinking=lambda: tpl)
+        monkeypatch.setattr(
+            "prompts.extraction_prompts.generate_excel_plan_thinking_prompt",
+            lambda: tpl)
         agent._invoke_think = Mock(return_value=llm_text)
 
         from database.operations import ModuleOps
@@ -60,7 +60,7 @@ class TestThinkingLog:
 
     def test_thinking_logged_with_raw_output(self, monkeypatch):
         """核心回归：一步生成节点把 LLM 原始输出写入 thinking 日志。"""
-        import observability
+        import infrastructure.observability as observability
         mock_log = Mock()
         monkeypatch.setattr(observability, "log_thinking", mock_log)
 

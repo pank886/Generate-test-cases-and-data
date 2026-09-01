@@ -6,7 +6,7 @@
   3. 每个 HTTP 请求自动生成 trace_id，贯穿所有日志
 
 用法:
-    from observability import get_logger
+    from infrastructure.observability import get_logger
     logger = get_logger(__name__)
     logger.info("处理完成: %d 个文本块", count)
 
@@ -25,7 +25,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-from config import LOG_DIR, LOG_LEVEL
+from infrastructure.config import LOG_DIR, LOG_LEVEL
 
 # ====== trace_id 上下文变量 ======
 _trace_id_var: ContextVar[str] = ContextVar("trace_id", default="")

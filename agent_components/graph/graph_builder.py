@@ -1,8 +1,8 @@
 """LangGraph 图构建"""
 from langgraph.graph import StateGraph, START, END
 
-from agent_components.state import State
-from agent_components.nodes import ChatTestAgentGraph
+from agent_components.graph.state import State
+from agent_components.graph.nodes import ChatTestAgentGraph
 
 
 def _make_initial_state(user_input: str) -> dict:
@@ -59,7 +59,7 @@ def build_workflow():
     Returns:
         (graph, components) 元组，供 API 层管理多轮会话
     """
-    from agent_components.state import State
+    from agent_components.graph.state import State
     components = ChatTestAgentGraph()
 
     builder = StateGraph(State)
@@ -68,7 +68,8 @@ def build_workflow():
     builder.add_node("retrieve_product_docs", lambda state: components._retrieve_product_docs(state))
     builder.add_node("extract_related_modules", lambda state: components._extract_related_modules(state))
     builder.add_node("retrieve_related_data", lambda state: components._retrieve_related_data(state))
-    builder.add_node("analyze_test_points_raw", lambda state: components._analyze_test_points_raw(state))
+    # 已注释（2026-09-01：analyze_test_points_raw 旧分段式生成废弃，方法已注释，节点注册一并移除）
+    # builder.add_node("analyze_test_points_raw", lambda state: components._analyze_test_points_raw(state))
     builder.add_node("generate_excel_plan", lambda state: components._generate_excel_plan_node(state))
     # 新节点：thinking+json_mode 一步生成（只生成不落盘；失败时无 plan → 处理节点 requires_review）
     def _generate_plan_thinking_safe(state: dict) -> dict:
@@ -110,7 +111,7 @@ def build_workflow():
     builder.add_edge("generate_plan_thinking", "generate_excel_plan")
     builder.add_edge("generate_excel_plan", END)
     # analyze_test_points_raw 旧链路兜底：见 changelog/2026-08-02_old_generation_fallback.md，暂未启用
-    # （节点保留定义不连边；未来旧链路 = analyze 生成 plan → 处理节点）
+    # （2026-09-01：该方法已随 PromptFactory 迁移注释废弃，节点注册一并移除；未来若恢复旧链路需重新实现）
 
     graph = builder.compile()
     return graph, components

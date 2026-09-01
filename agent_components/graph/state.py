@@ -1,7 +1,7 @@
 """LangGraph 工作流状态定义"""
 from typing import Optional, TypedDict, List
 
-from prompts.response_model import ProperResponse, ExcelPlan
+from prompts.response_model import ProperResponse  # ExcelPlan 已注释（v1 休眠，运行时 excel_plan 恒为 ExcelPlanV2）
 
 
 class State(TypedDict):
@@ -11,7 +11,7 @@ class State(TypedDict):
     original_input: str
     context: str
     response_obj: "ProperResponse"
-    excel_plan: Optional["ExcelPlan"]
+    # excel_plan: Optional["ExcelPlan"]  # 已注释：v1 休眠；运行时该键恒为 ExcelPlanV2（nodes 写入）
     excel_path: Optional[str]
     output_dir: Optional[str]  # 本次生成的输出目录
     requires_review: Optional[bool]  # generate_excel_plan 重试耗尽时标记需人工审查
