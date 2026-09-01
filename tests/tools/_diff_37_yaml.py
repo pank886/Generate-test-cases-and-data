@@ -7,11 +7,14 @@
 import os
 import io
 import json
+from pathlib import Path
 import yaml
 
+# 脚本已迁移至 tests/tools/，输出路径改为基于项目根推导
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
 BASE_C = r'C:/Users/damai/PycharmMiscProject/testcase/园区基线/智慧用电_37/SmartPower'
 BASE_N = r'C:/Users/damai/PycharmMiscProject/testcase/园区基线/智慧用电_37_regenerated/SmartPower'
-OUT = r'E:/Generate-test-cases-and-data/logs/yaml_diff_37.md'
+OUT = str(PROJECT_ROOT / 'logs/yaml_diff_37.md')
 
 lines = []
 

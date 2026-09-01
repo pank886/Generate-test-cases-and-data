@@ -13,6 +13,10 @@ import logging
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
 sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
 
+# 脚本已迁移至 tests/tools/，根目录不在默认 sys.path：显式加入项目根
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, PROJECT_ROOT)
+
 import config  # noqa: E402  (loads settings + .env)
 
 logging.basicConfig(level=logging.INFO,
