@@ -91,7 +91,7 @@ async def _process_file_bg(task_id: str, file_path: str, ext: str,
                 progress_cb=lambda p, m: _progress(10 + int(p * 0.8), m),
             )
             count = result.get("chunks", 0)
-            source = {".docx": "Word 文档", ".pdf": "PDF 文档"}.get(ext, "文档")
+            source = {".docx": "Word 文档", ".pdf": "PDF 文档", ".xlsx": "Excel 文档"}.get(ext, "文档")
 
         await _update_task(task_id, progress=90,
                            message=f"{source} 处理完成：{count} 个文本块")
@@ -478,8 +478,392 @@ async def _confirm_plan_bg(task_id: str, excel_path: str | None,
 
 
 # ========================================================================
+# Phase C 独立重跑（仅 YAML 数据生成，2026-09-09）
+#   - 入口：对话工作流「Phase C 项」/phase-c/start → /workflow/confirm（flow=phase_c）
+#   - 范围：只跑 _generate_all_yamls（读 test_plan.xlsx + api_defs.json + 约定 context 文件），
+#     不生成 .py、不重算 dependency_map.json
+#   - user_context 注入：模块目录约定文件 phase_c_user_context.md（放 test_plan.xlsx 旁）
+# ========================================================================
+
+def _list_phase_c_module_dirs(testcase_base: str) -> list[str]:
+    """列出可单独重跑 Phase C 的模块目录（含 test_plan.xlsx + api_defs.json + context 文件）。
+
+    TESTCASE_BASE 下模块目录可能按域分组多级嵌套（如 `园区基线/智慧停车/`），故递归扫描：
+    - 目录名含 .bak / _backup / _regenerated（历史备份/重生成克隆）→ 跳过整个子树；
+    - 目录含 test_plan.xlsx（模块根）→ 满足 api_defs.json + phase_c_user_context.md 门槛则
+      收录，不再下钻（其子目录是 YAML/setup 输出，非独立模块）；
+    - 否则作为分组目录递归下钻。
+    以模块目录存在 `phase_c_user_context.md` 为门槛（该文件即本次要注入的 user_context，
+    没有它单独重跑无意义）。返回目录绝对路径列表（basename 即模块名，用于前端候选展示）。
+    """
+    if not testcase_base or not os.path.isdir(testcase_base):
+        return []
+
+    def _excluded(name: str) -> bool:
+        return (name.startswith((".", "~"))
+                or any(tok in name for tok in (".bak", "_backup", "_regenerated")))
+
+    def _walk(directory: str, out: list[str]) -> None:
+        try:
+            entries = sorted(os.listdir(directory))
+        except OSError:
+            return
+        for name in entries:
+            if _excluded(name):
+                continue
+            full = os.path.join(directory, name)
+            if not os.path.isdir(full):
+                continue
+            if os.path.exists(os.path.join(full, "test_plan.xlsx")):
+                # 模块根：门槛齐备才收录；不递归（子目录为输出产物）
+                if (os.path.exists(os.path.join(full, "api_defs.json"))
+                        and os.path.exists(os.path.join(full, "phase_c_user_context.md"))):
+                    out.append(full)
+            else:
+                _walk(full, out)
+
+    dirs: list[str] = []
+    _walk(testcase_base, dirs)
+    return dirs
+
+
+def _read_phase_c_user_ctx(module_dir: str) -> str:
+    """读取模块目录约定文件 phase_c_user_context.md，缺失返回空串。"""
+    if not module_dir:
+        return ""
+    path = os.path.join(module_dir, "phase_c_user_context.md")
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return f.read()
+    except OSError:
+        return ""
+
+
+async def _phase_c_rerun_bg(task_id: str, module_dir: str, session_id: str = ""):
+    """Phase C 独立重跑：仅 YAML 数据生成（_generate_all_yamls）。
+
+    module_dir：模块目录（含 test_plan.xlsx / api_defs.json / phase_c_user_context.md）。
+    不调用 _generate_py_file / _generate_dependency_map —— 该分支的语义就是只重跑数据。
+    session_id：Phase C 工作流会话，完成后清理（非空时）。
+    """
+    import infrastructure.config as config
+
+    from web.state import _phase_b_components, _update_task
+
+    set_trace_id(task_id)
+
+    # 重建 LLM 客户端，避免复用上一个工作流残留的僵死连接池
+    from agent_components.graph.nodes import reload_llm
+    reload_llm()
+
+    try:
+        excel_path = os.path.join(module_dir, "test_plan.xlsx")
+        if not os.path.exists(excel_path):
+            await _update_task(task_id, status="failed",
+                               error=f"模块目录缺少 test_plan.xlsx: {module_dir}")
+            return
+
+        if not _phase_b_components:
+            await _update_task(task_id, status="failed",
+                               error="组件未初始化")
+            return
+
+        # 规则 M8：接口定义缺失必须显式阻断，禁止空定义盲写 YAML
+        api_defs_path = os.path.join(module_dir, "api_defs.json")
+        if not os.path.exists(api_defs_path):
+            await _update_task(
+                task_id, status="failed",
+                error="模块目录缺少 api_defs.json，请先执行 Phase B 生成测试计划后再确认",
+            )
+            return
+        with open(api_defs_path, "r", encoding="utf-8") as f:
+            api_defs_json = f.read()
+
+        # 约定文件 → user_context（缺失则空串）
+        user_ctx = _read_phase_c_user_ctx(module_dir)
+
+        await _update_task(task_id, status="running", progress=15,
+                           message="正在重新生成 YAML 数据文件（Phase C 独立重跑）...")
+
+        # 心跳：YAML 生成耗时长，避免前端轮询超时
+        import time as _time
+        _heartbeat_stop = False
+
+        async def _heartbeat():
+            nonlocal _heartbeat_stop
+            _t0 = _time.time()
+            while not _heartbeat_stop:
+                await asyncio.sleep(10)
+                if _heartbeat_stop:
+                    break
+                elapsed = int(_time.time() - _t0)
+                await _update_task(
+                    task_id, progress=55,
+                    message=f"正在重新生成 YAML 数据文件...（{elapsed}s）",
+                )
+
+        hb_task = asyncio.create_task(_heartbeat())
+        try:
+            yaml_result = await asyncio.to_thread(
+                _phase_b_components._generate_all_yamls,
+                excel_path, api_defs_json, user_ctx,
+            )
+        finally:
+            _heartbeat_stop = True
+            hb_task.cancel()
+            try:
+                await hb_task
+            except asyncio.CancelledError:
+                pass
+
+        msg = f"Phase C 独立重跑完成（仅 YAML）"
+        if yaml_result["total"] > 0:
+            msg += f" | YAML: {yaml_result['success']}/{yaml_result['total']} 个"
+            if yaml_result.get("repaired"):
+                msg += f"（含自查修复 {yaml_result['repaired']} 个）"
+            if yaml_result.get("failed"):
+                msg += (f"，仍失败 {yaml_result['failed']} 个"
+                        f"（详见 _generation_errors.json 与 logs/thinking_trace.log）")
+
+        result = {
+            "success": True,
+            "message": msg,
+            "reply": msg,
+            "yaml_success": yaml_result["success"],
+            "yaml_total": yaml_result["total"],
+            "yaml_repaired": yaml_result.get("repaired", 0),
+            "yaml_failed": yaml_result.get("failed", 0),
+            "yaml_rounds": yaml_result.get("rounds", 0),
+            "errors_file": yaml_result.get("errors_file"),
+            "excel_path": excel_path,
+            "output_dir": module_dir,
+        }
+
+        await _update_task(task_id, status="completed", progress=100,
+                           message="YAML 数据文件重新生成完成", result=result)
+
+    except Exception as e:
+        logger.error("❌ Phase C 独立重跑失败: %s", e)
+        await _update_task(task_id, status="failed", error=str(e))
+    finally:
+        if session_id:
+            from web.state import _workflow_sessions, _workflow_sessions_lock
+            async with _workflow_sessions_lock:
+                _workflow_sessions.pop(session_id, None)
+
+
+async def _selective_phase_c_rerun_bg(task_id: str, module_dir: str,
+                                      junit_path: str | None = None,
+                                      log_path: str | None = None,
+                                      run_ts: str | None = None,
+                                      session_id: str = ""):
+    """Phase C 定向重跑（2026-09-09）：只重生成「实际失败 + 导致失败的上游」YAML。
+
+    依据模块目录逐 YAML `.last_run.json`（read_last_run_records，只留最新 cohort）选点：
+      - test 仅 verdict==failed 重生成其 test_data（body 真跑过且失败）；
+      - setup 仅 verdict∈(broken,failed) 重生成（上游根因）；
+      - broken-by-setup 的 test_data 不重生成（body 未执行），excluded_broken 信息性回填。
+    失败事实注入：`{user_context}` = 静态 phase_c_user_context.md + 该文件自己的失败摘要
+    （build_failure_digest → ctx_overrides 逐文件注入，非全量日志）。
+    无落点兜底：仅当模块无任何 .last_run.json 且给了 junit_path → ingest_run_results 引导一次；
+    仍无 → failed。不改执行框架；不碰 .py / dependency_map；teardown 本轮不涉及（0）。
+    """
+    import infrastructure.config as config  # noqa: F401  （与全量分支一致，保留 config 引用语义）
+
+    from web.state import _phase_b_components, _update_task
+
+    set_trace_id(task_id)
+
+    # 重建 LLM 客户端，避免复用上一个工作流残留的僵死连接池
+    from agent_components.graph.nodes import reload_llm
+    reload_llm()
+
+    try:
+        excel_path = os.path.join(module_dir, "test_plan.xlsx")
+        if not os.path.exists(excel_path):
+            await _update_task(task_id, status="failed",
+                               error=f"模块目录缺少 test_plan.xlsx: {module_dir}")
+            return
+
+        if not _phase_b_components:
+            await _update_task(task_id, status="failed",
+                               error="组件未初始化")
+            return
+
+        # 规则 M8：接口定义缺失必须显式阻断，禁止空定义盲写 YAML
+        api_defs_path = os.path.join(module_dir, "api_defs.json")
+        if not os.path.exists(api_defs_path):
+            await _update_task(
+                task_id, status="failed",
+                error="模块目录缺少 api_defs.json，请先执行 Phase B 生成测试计划后再确认",
+            )
+            return
+        with open(api_defs_path, "r", encoding="utf-8") as f:
+            api_defs_json = f.read()
+
+        # 静态规则上下文（约定文件，缺失空串）
+        static_ctx = _read_phase_c_user_ctx(module_dir)
+
+        from agent_components.run_results import (
+            build_failure_digest,
+            ingest_run_results,
+            read_last_run_records,
+            select_rerun_targets,
+        )
+
+        records = read_last_run_records(module_dir)
+        if not records and junit_path:
+            # 兜底引导：模块从未摄取过落点且本次给了 junit → 先摄取一次（不伪造数据）
+            records = ingest_run_results(module_dir, junit_path, log_path, run_ts)
+        if not records:
+            await _update_task(
+                task_id, status="failed",
+                error="模块目录无 .last_run.json 落点，请先运行摄取驱动"
+                      "（有作用/PhaseC/_ingest_phase_c_run_sidecars.py）或传入 junit_path",
+            )
+            return
+
+        targets = select_rerun_targets(module_dir, records)
+        if not targets["test_yamls"] and not targets["setup_yamls"]:
+            msg = "定向重跑：无失败/破损目标（本轮全部通过或未执行）"
+            if targets["excluded_broken"]:
+                msg += f"，其中 {len(targets['excluded_broken'])} 个 body 未执行不重生成"
+            await _update_task(task_id, status="completed", progress=100, message=msg,
+                               result={"success": True, "message": msg, "reply": msg,
+                                       "excel_path": excel_path, "output_dir": module_dir,
+                                       "target_counts": {"test": 0, "setup": 0},
+                                       "excluded_broken": targets["excluded_broken"]})
+            return
+
+        # 逐选中文件失败摘要 → ctx_overrides（静态 + 文件级事实；无示例）
+        digests = build_failure_digest(module_dir, records, targets)
+        ctx_overrides = {p: static_ctx + "\n\n" + digests[p] for p in digests}
+        allow_paths = set(targets["test_yamls"]) | set(targets["setup_yamls"])
+
+        await _update_task(task_id, status="running", progress=15,
+                           message=f"定向重跑 YAML（test {len(targets['test_yamls'])} + "
+                                   f"setup {len(targets['setup_yamls'])}）...")
+
+        # 心跳：YAML 生成耗时长，避免前端轮询超时
+        import time as _time
+        _heartbeat_stop = False
+
+        async def _heartbeat():
+            nonlocal _heartbeat_stop
+            _t0 = _time.time()
+            while not _heartbeat_stop:
+                await asyncio.sleep(10)
+                if _heartbeat_stop:
+                    break
+                elapsed = int(_time.time() - _t0)
+                await _update_task(
+                    task_id, progress=55,
+                    message=f"定向重跑 YAML 数据文件中...（{elapsed}s）",
+                )
+
+        hb_task = asyncio.create_task(_heartbeat())
+        try:
+            yaml_result = await asyncio.to_thread(
+                _phase_b_components._generate_all_yamls,
+                excel_path, api_defs_json, static_ctx,
+                allow_paths=allow_paths, ctx_overrides=ctx_overrides,
+            )
+        finally:
+            _heartbeat_stop = True
+            hb_task.cancel()
+            try:
+                await hb_task
+            except asyncio.CancelledError:
+                pass
+
+        msg = f"Phase C 定向重跑完成（仅 YAML）"
+        if yaml_result["total"] > 0:
+            msg += (f" | YAML: {yaml_result['success']}/{yaml_result['total']} 个"
+                    f"（目标 test {len(targets['test_yamls'])} + "
+                    f"setup {len(targets['setup_yamls'])}）")
+            if yaml_result.get("repaired"):
+                msg += f"（含自查修复 {yaml_result['repaired']} 个）"
+            if yaml_result.get("failed"):
+                msg += (f"，仍失败 {yaml_result['failed']} 个"
+                        f"（详见 _generation_errors.json 与 logs/thinking_trace.log）")
+
+        result = {
+            "success": True,
+            "message": msg,
+            "reply": msg,
+            "yaml_success": yaml_result["success"],
+            "yaml_total": yaml_result["total"],
+            "yaml_repaired": yaml_result.get("repaired", 0),
+            "yaml_failed": yaml_result.get("failed", 0),
+            "yaml_rounds": yaml_result.get("rounds", 0),
+            "errors_file": yaml_result.get("errors_file"),
+            "excel_path": excel_path,
+            "output_dir": module_dir,
+            "target_counts": {"test": len(targets["test_yamls"]),
+                              "setup": len(targets["setup_yamls"])},
+            "excluded_broken": targets["excluded_broken"],
+        }
+
+        await _update_task(task_id, status="completed", progress=100,
+                           message="定向重跑 YAML 数据文件生成完成", result=result)
+
+    except Exception as e:
+        logger.error("❌ Phase C 定向重跑失败: %s", e)
+        await _update_task(task_id, status="failed", error=str(e))
+    finally:
+        if session_id:
+            from web.state import _workflow_sessions, _workflow_sessions_lock
+            async with _workflow_sessions_lock:
+                _workflow_sessions.pop(session_id, None)
+
+
+# ========================================================================
 # Phase B: 多轮工作流恢复执行
 # ========================================================================
+
+def _resolve_failed_case_info(result: dict, trace_tail: str = "") -> tuple:
+    """判定 Phase B 的失败提示与失败编号（纯逻辑，便于单测）。
+
+    节点正常路径总会透传 failed_case_details，三者语义不同：
+      - 非空列表 → 真实失败：编号取 failed_case_ids，详情由 reply 逐行渲染；
+      - 空列表 [] → 0 失败：不提示（2026-09-02 误报修复：空列表 ≠ 缺失，
+        此前 `if not ...` 把 [] 当缺失 → 误读整份 thinking_trace.log 命中历史 FAILED）；
+      - None（节点未透传，异常路径）→ 兜底读本次运行日志段 trace_tail，
+        仅当含 generate_excel_plan_FAILED 才提示，并提取 TC-/PRE- 编号。
+    """
+    details = result.get("failed_case_details")
+    if details:
+        return "", list(result.get("failed_case_ids") or [])
+    if details is not None:
+        # 空列表 = 0 失败，无提示
+        return "", []
+    if "generate_excel_plan_FAILED" in (trace_tail or ""):
+        # 提取失败用例编号（含 TC- 与 PRE-，此前只匹配 TC- 漏 PRE-）
+        import re
+        return ("（部分用例校验失败，详见 logs/thinking_trace.log）",
+                list(set(re.findall(r"\| ((?:TC|PRE)-\d+) \|", trace_tail))))
+    return "", []
+
+
+def _build_phase_b_reply(result: dict, case_count: int, fail_warn: str = "") -> str:
+    """Phase B 完成后回复文案。
+
+    requires_review（无 plan / 人工审查）→ 明确提示需人工审查，
+    禁止误导性"已生成：共 0 条用例"。
+    """
+    if result.get("requires_review"):
+        errors = result.get("error_info") or []
+        detail = "；".join(errors) if errors else "生成环节未产出完整测试计划"
+        return f"⚠️ 测试计划需人工审查：{detail}"
+    base = f"Excel 测试计划已生成：共 {case_count} 条用例"
+    details = result.get("failed_case_details")
+    if details:
+        rows = "\n".join(
+            f"  ⚠️ {d.get('id', '?')} {d.get('title', '')}: {'; '.join(d.get('errors') or [])}"
+            for d in details)
+        return f"{base}\n{len(details)} 行未通过校验，需人工审查：\n{rows}"
+    return base + fail_warn
+
 
 async def _resume_workflow_bg(task_id: str, session_id: str, state: dict):
     """Phase B 后台恢复执行：从节点2开始，完成产品文档检索→关联模块→接口→测试点→Excel。
@@ -527,6 +911,15 @@ async def _resume_workflow_bg(task_id: str, session_id: str, state: dict):
                     message=f"{msg}（{elapsed}s）",
                 )
 
+        # 兜底日志截点：invoke 前记录 thinking_trace.log 偏移，兜底只读本次运行追加的
+        # 尾部，避免历史 FAILED 标记污染本次回复（2026-09-02 误报回归点）
+        _trace_path = _os.path.join(config.LOG_DIR, "thinking_trace.log")
+        _trace_start = 0
+        try:
+            _trace_start = _os.path.getsize(_trace_path)
+        except OSError:
+            pass
+
         hb_task = _asyncio.create_task(_heartbeat())
         try:
             result = await asyncio.to_thread(_phase_b_graph.invoke, state)
@@ -552,20 +945,17 @@ async def _resume_workflow_bg(task_id: str, session_id: str, state: dict):
         plan = result.get("excel_plan")
         case_count = len(plan.test_cases) if plan and hasattr(plan, "test_cases") else 0
 
-        # 从 thinking_trace.log 检查是否有校验失败的行
-        fail_warn = ""
-        failed_tc_ids = []
-        try:
-            with open(_os.path.join(config.LOG_DIR, "thinking_trace.log"), "r", encoding="utf-8") as _lf:
-                content = _lf.read()
-                if "generate_excel_plan_FAILED" in content:
-                    fail_warn = "（部分用例校验失败，详见 logs/thinking_trace.log）"
-                    # 提取失败用例编号
-                    import re
-                    failed_tc_ids = list(set(re.findall(
-                        r"\| (TC-\d+) \|", content)))
-        except Exception:
-            logger.warning("无法读取思考日志，跳过失败用例提取", exc_info=True)
+        # 校验失败行：优先用 nodes 透传的失败详情（含编号+标题+原因），
+        # 仅当节点未透传（异常路径）才兜底读本次运行追加的日志段（防历史 FAILED 污染）
+        tail = ""
+        if result.get("failed_case_details") is None:
+            try:
+                with open(_trace_path, "r", encoding="utf-8") as _lf:
+                    _lf.seek(_trace_start)
+                    tail = _lf.read()
+            except Exception:
+                logger.warning("无法读取思考日志，跳过失败用例提取", exc_info=True)
+        fail_warn, failed_tc_ids = _resolve_failed_case_info(result, tail)
 
         thinking_parts = [f"Excel 计划 {case_count} 条用例"]
         if failed_tc_ids:
@@ -575,7 +965,7 @@ async def _resume_workflow_bg(task_id: str, session_id: str, state: dict):
         resp = {
             "success": True,
             "thinking": thinking_parts,
-            "reply": f"Excel 测试计划已生成：共 {case_count} 条用例{fail_warn}",
+            "reply": _build_phase_b_reply(result, case_count, fail_warn),
         }
         if result.get("excel_path"):
             resp["excel_path"] = result["excel_path"]

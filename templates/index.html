@@ -22,8 +22,8 @@
   <div class="card"><h3>📤 上传文档</h3>
   <div class="upload-grid">
     <label class="upload-card" ondragover="event.preventDefault();this.classList.add('dragover')" ondragleave="this.classList.remove('dragover')" ondrop="handleDrop(event,'product')">
-      <div class="icon">📄</div><div class="title">产品文档</div><div class="hint">PDF / DOCX，自动提取模块和术语</div>
-      <input type="file" accept=".pdf,.docx" onchange="uploadFile(this,'product')">
+      <div class="icon">📄</div><div class="title">产品文档</div><div class="hint">PDF / DOCX / Excel，自动提取模块和术语</div>
+      <input type="file" accept=".pdf,.docx,.xlsx" onchange="uploadFile(this,'product')">
     </label>
     <label class="upload-card" ondragover="event.preventDefault();this.classList.add('dragover')" ondragleave="this.classList.remove('dragover')" ondrop="handleDrop(event,'api')">
       <div class="icon">📡</div><div class="title">接口文档</div><div class="hint">Markdown，LLM 拆分后确认入库</div>
@@ -116,6 +116,7 @@
       <div class="chat-input-row">
         <input type="text" id="chat-input" placeholder="输入测试需求...">
         <button class="btn" onclick="sendWorkflowChat()">发送</button>
+        <button class="btn btn-sm btn-outline" onclick="startPhaseC()">🔄 单独重跑 Phase C 数据</button>
       </div>
     </div>
     <div class="result-panel hidden" id="result-panel"></div>

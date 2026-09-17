@@ -16,6 +16,8 @@ specification_yaml(get_testcase_yaml(...))，5 个真实 fixture 全崩，
 import os
 import sys
 
+import pytest
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from agent_components.graph.nodes import ChatTestAgentGraph
@@ -65,6 +67,46 @@ class TestPyExportFixture:
         src = open(result["py_path"], encoding="utf-8").read()
         assert "setup_data/setup_meter_management.yaml" in src
         assert "setup_data/teardown_meter_management.yaml" in src
+
+
+class TestLegacyModeUnchanged:
+    """反向锁（2026-09-15）：非「逐前置」的 plan 必须走原分支，产物形状逐字不变。
+
+    `_generate_py_file` 是 Phase C 的格式权威，共用它的还有 SmartParking 等产品
+    （那列对它们是 class/danyuan，或压根没这列）。前置三级拆分只准在
+    Sheet1 `fixture等级 = 逐前置` 时生效 —— 这条就是那个开关的守门测试。
+    """
+
+    @staticmethod
+    def _src(monkeypatch, tmp_path):
+        agent, excel_path = TestPyExportFixture()._make_agent(monkeypatch, tmp_path)
+        return open(agent._generate_py_file(excel_path)["py_path"], encoding="utf-8").read()
+
+    def test_class_level_fixture_shape_is_untouched(self, monkeypatch, tmp_path):
+        src = self._src(monkeypatch, tmp_path)
+        assert '@pytest.mark.usefixtures("setup_meter_management")' in src
+        assert src.count("@pytest.fixture(scope=\"class\")") == 1
+        # 逐前置模式的两样东西一个都不许出现
+        assert "_fixture_with_display_name" not in src
+        assert "__allure_display_name__" not in src
+        assert "pre_rt" not in src
+
+    def test_rows_without_the_column_keep_the_old_branch(self, monkeypatch, tmp_path):
+        """老 plan 没有 `fixture_level` 列 → 读成 None → 走原分支（不是报错、不是新模式）。"""
+        agent, excel_path = TestPyExportFixture()._make_agent(monkeypatch, tmp_path)
+        src = open(agent._generate_py_file(excel_path)["py_path"], encoding="utf-8").read()
+        assert 'setup_data/setup_meter_management.yaml' in src
+        assert src.count("run_blocks(") == 4          # 2 个方法 + fixture 里 setup/teardown 各 1
+
+    def test_per_pre_without_sheet2_rows_fails_loud(self, monkeypatch, tmp_path):
+        """「逐前置」却拿不到 Sheet2 → 必须报错，不能猜一个文件名继续生成。"""
+        agent, excel_path = TestPyExportFixture()._make_agent(monkeypatch, tmp_path)
+        rows = agent._read_excel_rows(excel_path)
+        for r in rows:
+            r["fixture_level"] = "逐前置"
+        monkeypatch.setattr(agent, "_read_excel_rows", lambda path: rows)
+        with pytest.raises(ValueError, match="Sheet2"):
+            agent._generate_py_file(excel_path)
 
 
 if __name__ == "__main__":

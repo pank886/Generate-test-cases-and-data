@@ -1,7 +1,7 @@
 """LangGraph 工作流状态定义"""
 from typing import Optional, TypedDict, List
 
-from prompts.response_model import ProperResponse  # ExcelPlan 已注释（v1 休眠，运行时 excel_plan 恒为 ExcelPlanV2）
+from prompts.response_model import ProperResponse, ExcelPlanV2
 
 
 class State(TypedDict):
@@ -11,11 +11,13 @@ class State(TypedDict):
     original_input: str
     context: str
     response_obj: "ProperResponse"
-    # excel_plan: Optional["ExcelPlan"]  # 已注释：v1 休眠；运行时该键恒为 ExcelPlanV2（nodes 写入）
+    excel_plan: Optional["ExcelPlanV2"]  # thinking 生成的测试计划（ExcelPlanV2），经 generate_excel_plan 校验/落盘
     excel_path: Optional[str]
     output_dir: Optional[str]  # 本次生成的输出目录
     requires_review: Optional[bool]  # generate_excel_plan 重试耗尽时标记需人工审查
     error_info: Optional[list]      # 审查相关的错误信息列表
+    failed_case_ids: Optional[List[str]]    # 校验失败用例编号（generate_excel_plan 产出，供前端展示）
+    failed_case_details: Optional[List[dict]]  # 校验失败用例详情 [{id, title, errors}]，供 reply 展示标题/原因
 
     # --- Phase B 多跳检索 + 测试点分析 ---
     product_docs: Optional[List[dict]]       # Hop 1: 产品文档检索结果
@@ -32,3 +34,4 @@ class State(TypedDict):
     # --- Phase B 生成/处理解耦：数据源标注（2026-08 新增，纯增量） ---
     plan_source: Optional[str]              # excel_plan 来源: "thinking" / "analyze"
     module_tree_json: Optional[str]         # 生成节点已取的模块树（避免重复查询）
+    api_full_for_snapshot: Optional[List[dict]]  # thinking 构造的接口完整快照（api_defs.json 数据源，避免处理节点重复构造）

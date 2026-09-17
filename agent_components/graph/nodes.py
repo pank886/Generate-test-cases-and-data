@@ -42,10 +42,14 @@ from agent_components.generators import GenerationMixin
 logger = get_logger(__name__)
 
 # 方法特性配置表（声明式，集中管理 method 与 thinking 的兼容性）
+# 2026-09-09：json_mode/json_schema 放行 thinking —— 09-08 实证 8192 输出硬顶跟 thinking=off 走；
+# 修复轮/Phase2 等大 JSON 输出用 thinking=on + response_format=json_object 零空 content、可输出
+# 28k+ token。json_mode 调用方未显式传 thinking=True 的（意图识别/入库提取/翻译）仍维持 off。
+# function_calling 保持 False：函数调用模式与深度思考可能冲突，暂无启用诉求。
 METHOD_FEATURES = {
     "function_calling": {"supports_thinking": False},
-    "json_mode": {"supports_thinking": False},
-    "json_schema": {"supports_thinking": False},
+    "json_mode": {"supports_thinking": True},
+    "json_schema": {"supports_thinking": True},
     "free_text": {"supports_thinking": True},
 }
 
@@ -85,17 +89,18 @@ class ChatTestAgentGraph(RetrievalMixin, GenerationMixin):
     # ==================== 图内节点方法 ====================
 
     def _generate_excel_plan_thinking(self, state: State, gen_warning: str = ""):
-        """【新】thinking+json_mode 一步生成 Excel 计划。
+        """两段式生成 Excel 计划（2026-09-02 恢复两段式，拆解 thinking+json 双开）。
 
-        合并原 analyze_test_points_raw + generate_excel_plan 两步：
-        thinking 分析 → json_object 直接输出 ExcelPlanV2。
-        失败时由 graph builder 降级到旧两步流程。
+        Phase 1（thinking enabled、无 JSON 约束）输出自由文本分析 →
+        Phase 2（json_object + thinking disabled）结构化转换：
+        修复 deepseek-v4-flash 下 thinking+json_object 双开高概率空 content
+        （约 83%）的根因场景。Phase 1 分析回写 test_point_analysis。
 
         Args:
             gen_warning: 质量门禁重试时的系统警告文本（注入 prompt 开头，
                 首轮为空串，保持正常生成提示词不变）。
         """
-        from infrastructure.observability import log_phase_header
+        from infrastructure.observability import log_phase_header, log_thinking
         from prompts.response_model import ExcelPlanV2
         from agent_components.retrievers import _build_full_api_defs_text
         from database import get_session_ctx
@@ -103,8 +108,8 @@ class ChatTestAgentGraph(RetrievalMixin, GenerationMixin):
         from database.operations.analysis import AnalysisOps
         from infrastructure.annotations.api_annotations import ApiAnnotationRegistry
 
-        log_phase_header("Phase B — thinking+json 一步生成 Excel 计划")
-        logger.info("\n🧠 一步生成 Excel 测试计划（thinking + json_object）...")
+        log_phase_header("Phase B — 两段式生成 Excel 计划（思考分析 → 结构化）")
+        logger.info("\n🧠 两段式生成 Excel 测试计划（Phase 1 纯思考分析 → Phase 2 结构化 JSON）...")
 
         # ── 1. 准备数据（同 _analyze_test_points_raw）──
         confirmed_module = state.get("confirmed_module", "")
@@ -158,21 +163,24 @@ class ChatTestAgentGraph(RetrievalMixin, GenerationMixin):
         related_text = ", ".join(state.get("related_modules", [])) or "无"
         user_ctx = state.get("original_input", "")
 
-        # ── 2. 构造 prompt（2026-09-01：PromptFactory → extraction_prompts 模块级函数）──
-        from prompts.extraction_prompts import generate_excel_plan_thinking_prompt
-        prompt = generate_excel_plan_thinking_prompt()
+        # ── 2. 两段式 prompt（2026-09-02 恢复；2026-09-01 PromptFactory → 模块级函数）──
+        from prompts.extraction_prompts import (
+            generate_excel_plan_thinking_prompt,  # Phase 1：纯思考自由文本分析
+            generate_excel_plan_format_prompt,    # Phase 2：结构化转换（thinking disabled）
+        )
 
-        # ── 3. thinking + json_object 调用（空 content 有限重试，走公共方法）──
-        #    2026-08-03 P2：deepseek-v4-flash 偶发返回空 content，复用同一份输入重试
-        #    config.MAX_RETRIES 次（默认 2），仍失败抛异常 → 处理节点 requires_review。
+        # ── 3. Phase 1：thinking enabled、无 response_format（自由文本，不双开 JSON）──
+        #    双开 thinking+json_object → 约 83% 空 content（2026-09-02 实测）；拆开规避。
+        #    空 content 走公共方法复用输入重试（config.MAX_RETRIES），仍失败抛异常。
+        #    8192 输出硬顶跟 thinking=off 走（2026-09-08 实测，与 json_object/max_tokens 无关），
+        #    thinking=enabled 不受限；两段均显式 bind max_tokens 仅为惯例，非修复手段。
+        #    （详见 changelog/2026-09-08_phase2_thinking_enabled.md）
         _think_llm = self.llm.bind(
             temperature=0.4,
-            response_format={"type": "json_object"},
+            max_tokens=config.LLM_MAX_TOKENS,
             extra_body={"thinking": {"type": "enabled"}},
         )
-        _messages = prompt.format_messages(
-            json_schema=json.dumps(
-                ExcelPlanV2.model_json_schema(), ensure_ascii=False, indent=2),
+        _msgs_analysis = generate_excel_plan_thinking_prompt().format_messages(
             module_analysis=analysis_text or "（无预分析，请根据接口定义自行分析）",
             api_definitions=apis_text,
             related_docs=related_text,
@@ -180,22 +188,50 @@ class ChatTestAgentGraph(RetrievalMixin, GenerationMixin):
             db_schema=config.DB_SCHEMA,  # 数据库表结构（占位，为空禁 [db]，2026-08-04 问题 2）
             gen_warning=gen_warning,  # 质量门禁重试注入警告；首轮空串保持提示词不变
         )
-        _text = self._invoke_think(_think_llm, _messages, label="generate_plan_thinking")
-        # 2026-08-12 修复：一步生成节点自 4a61792 起漏写 thinking 日志，恢复 thinking_trace.log 记录
-        from infrastructure.observability import log_thinking
-        log_thinking("generate_plan_thinking", state.get("original_input", ""), _text,
+        analysis = self._invoke_think(
+            _think_llm, _msgs_analysis,
+            label="analyze_test_points_raw", reasoning_label="analyze_test_points_raw")
+        # Phase 1 自由文本分析入 thinking_trace.log（设计成果，非 reasoning_content）
+        log_thinking("analyze_test_points_raw", state.get("original_input", ""), analysis,
                      prompt_label="generate_excel_plan_thinking")
 
-        # ── 4. 解析 ──
-        plan = ExcelPlanV2.model_validate(json.loads(_text))
-        logger.info(f"   => 一步生成完成: {len(plan.shared_preconditions)} 前置, {len(plan.test_cases)} 用例")
+        # ── 4. Phase 2：json_object + thinking enabled（2026-09-08 改，原 disabled）──
+        #    原 disabled 是为躲「双开空 content」（09-02），但 thinking=off 请求被服务端硬顶
+        #    8192 输出 token → 大模块计划 JSON 单发必截断（92 用例超限）。2026-09-08 复测：
+        #    thinking=on + json_object 5/5 完整可用（29k~49k token 输出、零空 content、零截断），
+        #    空坑已随模型行为消失 → 改回 enabled 绕开 8192。若服务端行为再调整致空 content 复发，
+        #    启用拆批兜底（changelog/2026-09-08_phase2_thinking_enabled.md §四，暂不执行）。
+        #    reasoning_content 在非工具调用场景不进入下一轮上下文（API 忽略），
+        #    Phase 2 只传 Phase 1 content，不传 reasoning_content。
+        _json_llm = self.llm.bind(
+            temperature=0.4,
+            max_tokens=config.LLM_MAX_TOKENS,
+            response_format={"type": "json_object"},
+            extra_body={"thinking": {"type": "enabled"}},
+        )
+        _msgs_format = generate_excel_plan_format_prompt().format_messages(
+            json_schema=json.dumps(
+                ExcelPlanV2.model_json_schema(), ensure_ascii=False, indent=2),
+            analysis_text=analysis or "（无）",
+            api_definitions=apis_text,
+            db_schema=config.DB_SCHEMA,  # 数据库表结构（占位，为空禁 [db]，2026-08-04 问题 2）
+            gen_warning=gen_warning,  # 质量门禁重试注入警告；首轮空串保持提示词不变
+        )
+        _text = self._invoke_think(_json_llm, _msgs_format, label="generate_plan_thinking")
+        log_thinking("generate_plan_thinking", state.get("original_input", ""), _text,
+                     prompt_label="generate_excel_plan_format")
 
-        # ── 5. 只生成不落盘：标注数据源，交由 generate_excel_plan 处理节点 校验/修复/落盘 ──
+        # ── 5. 解析 ──
+        plan = ExcelPlanV2.model_validate(json.loads(_text))
+        logger.info(f"   => 两段式生成完成: {len(plan.shared_preconditions)} 前置, {len(plan.test_cases)} 用例")
+
+        # ── 6. 只生成不落盘：标注数据源与 Phase 1 分析，交由 generate_excel_plan 处理节点 校验/修复/落盘 ──
         return {
             "excel_plan": plan,
             "plan_source": "thinking",
             "api_full_for_snapshot": api_full_for_snapshot,
             "module_tree_json": module_tree,
+            "test_point_analysis": analysis,  # 回写 Phase 1 分析，修复下游 repair/validator 上下文恒为（无）
         }
 
     def _generate_excel_plan_node(self, state: State):
@@ -314,6 +350,23 @@ class ChatTestAgentGraph(RetrievalMixin, GenerationMixin):
                 _new_failed = _vr.failed_details
                 all_confirmed = _vr.all_confirmed
 
+                # 诊断日志：打印本次校验失败明细。质量门禁 regen/abort 会直接
+                # continue/raise，失败原因在首轮即不可见（2026-09-01 诊断盲区修复）。
+                if _vr.failed_details:
+                    _diag = [
+                        f"   ⚠️ 校验失败 {len(_vr.failed_details)} 行 / 共 {len(plan.test_cases)} 行, "
+                        f"通过 {len(_vr.all_confirmed)}"
+                    ]
+                    _diag += [f"      · {b}" for b in _vr.block_reasons]
+                    for _fidx, _fdict, _ferrs in _vr.failed_details[:10]:
+                        _diag.append(
+                            f"      - {_fdict.get('id', '?')} "
+                            f"[{str(_fdict.get('title', ''))[:30]}]: "
+                            f"{'; '.join(_ferrs)[:150]}")
+                    if len(_vr.failed_details) > 10:
+                        _diag.append(f"      ... 其余 {len(_vr.failed_details) - 10} 行略")
+                    logger.warning("\n".join(_diag))
+
                 # 质量门禁：首轮通过率 < 50% → 全量重新生成一次；
                 # 重试后仍 < 50% → 记录日志，终止生成并报错
                 n_total = len(plan.test_cases)
@@ -371,8 +424,11 @@ class ChatTestAgentGraph(RetrievalMixin, GenerationMixin):
                 _block_reasons_text = "\n".join(
                     ExcelPlanValidator.aggregate_block_reasons(failed_details))
                 repair_prompt = repair_excel_plan_prompt()
+                # 修复轮输出重出完整 ExcelPlanV2，可能超 8192 → thinking=enabled（2026-09-09：
+                # 8192 顶跟 thinking=off 走；json_mode 已放行 thinking，见 METHOD_FEATURES）
                 plan = self._invoke_structured(repair_prompt, ExcelPlanV2,
                     method="json_mode",
+                    thinking=True,
                     json_schema=json.dumps(
                         ExcelPlanV2.model_json_schema(), ensure_ascii=False, indent=2),
                     failed_test_cases=failed_tc_text,
@@ -508,9 +564,12 @@ class ChatTestAgentGraph(RetrievalMixin, GenerationMixin):
                          prompt_label="generate_excel_plan_node")
 
         if not valid_cases:
+            # requires_review=True：reply 走「需人工审查」分支，避免 case_count=0 时
+            # 产出误导性「共 0 条用例（部分用例校验失败）」的歧义回复（2026-09-02）
             return {
                 "excel_plan": None, "excel_path": "",
-                "output_dir": output_dir, "error_info": ["所有行均未通过校验"],
+                "output_dir": output_dir, "requires_review": True,
+                "error_info": ["所有行均未通过校验"],
                 "response_obj": ProperResponse(
                     proper_thinking=[], worth_to_remember=False,
                     final_response="Excel 测试计划生成失败：所有用例均未通过校验，请重试",
@@ -657,6 +716,13 @@ class ChatTestAgentGraph(RetrievalMixin, GenerationMixin):
             logger.warning("模块作用域清单写入失败: %s", module_scope_path, exc_info=True)
 
         fail_warn = f"（{len(failed_details)} 行未通过校验，需人工审查）" if failed_details else ""
+        # 失败详情透传前端：编号 + 标题 + 原因（state 注解 failed_case_ids/failed_case_details，
+        # 否则 LangGraph 静默丢弃，前端只看到数量拿不到明细）
+        failed_case_details = [
+            {"id": d[1].get("id", ""), "title": str(d[1].get("title", "")), "errors": list(d[2])}
+            for d in failed_details
+        ]
+        failed_case_ids = sorted({c["id"] for c in failed_case_details if c["id"]})
         n_modules = len(set(tc.story for tc in valid_cases))
         n_pres = len(all_shared_pres)
         logger.info(f"   📄 Excel 已保存: {excel_path} ({n_confirmed}条/{n_modules}模块, {n_pres}共享前置){fail_warn}")
@@ -676,6 +742,7 @@ class ChatTestAgentGraph(RetrievalMixin, GenerationMixin):
                          prompt_label="generate_excel_plan_node")
         return {
             "excel_plan": plan, "excel_path": excel_path, "output_dir": output_dir,
+            "failed_case_ids": failed_case_ids, "failed_case_details": failed_case_details,
             "response_obj": ProperResponse(
                 proper_thinking=[f"已提取 {len(api_full_for_snapshot)} 个接口，分析 {n_confirmed} 条用例"],
                 final_response=f"Excel 测试计划已生成：共 {n_confirmed} 条用例{fail_warn}",

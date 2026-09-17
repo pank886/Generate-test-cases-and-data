@@ -33,6 +33,7 @@ from agent_components.generators._repair_helpers import (
 )
 from agent_components.validation.yaml_validator import (
     _find_missing_yaml_refs,
+    _scan_extract_value_forms,
     _scan_missing_key_refs,
 )
 from prompts.extraction_prompts import (
@@ -245,7 +246,9 @@ class YamlMixin:
 
         return self._write_yaml_result(result, output_path)
 
-    def _generate_all_yamls(self, excel_path: str, api_defs_json: str, user_ctx: str) -> dict:
+    def _generate_all_yamls(self, excel_path: str, api_defs_json: str, user_ctx: str,
+                            allow_paths: set | None = None,
+                            ctx_overrides: dict | None = None) -> dict:
         """Phase C V2：按 feature/story/func 目录生成 YAML + setup_data。
 
         目录结构:
@@ -253,6 +256,13 @@ class YamlMixin:
             setup_data/setup_<class_slug>.yaml    ← LLM 生成（共享前置 → API 调用）
             setup_data/teardown_<class_slug>.yaml ← LLM 生成
             <func_en>/test_data.yaml              ← LLM 生成（含所有步骤）
+
+        Args:
+            allow_paths: 2026-09-09 定向重跑。目标 YAML 绝对路径集合；仅命中的文件才入任务列表
+                （makedirs + append），未选中 func/setup 目录不被重建。None = 全量（向后兼容）。
+            ctx_overrides: 逐文件 `{user_context}` 覆盖，key = YAML 绝对路径。
+                选中任务 row 打 `_ctx_override`；`_run_yaml_rounds` submit 前取
+                `row.get("_ctx_override") or user_ctx`（逐文件失败摘要注入）。
         """
         logger.info("\n🔢 正在生成 YAML 测试数据...")
 
@@ -299,6 +309,17 @@ class YamlMixin:
             if len(assertion_errors) > 10:
                 logger.warning("     ... 共 %d 条错误", len(assertion_errors))
 
+        # 2026-09-09 定向重跑：allow_paths 过滤 + 逐文件 ctx 覆盖
+        _allow_norm = {os.path.abspath(p) for p in (allow_paths or [])} if allow_paths else None
+
+        def _allowed(path: str) -> bool:
+            return _allow_norm is None or os.path.abspath(path) in _allow_norm
+
+        def _ctx_for(path: str):
+            if not ctx_overrides:
+                return None
+            return ctx_overrides.get(os.path.abspath(path))
+
         # 按 feature → story 分组
         from collections import defaultdict
         feature_story_map = defaultdict(lambda: defaultdict(list))
@@ -327,7 +348,6 @@ class YamlMixin:
                                 pre_ids.add(pid)
 
                 setup_dir = os.path.join(output_base, feature_en, "setup_data")
-                os.makedirs(setup_dir, exist_ok=True)
 
                 if pre_ids:
                     setup_lines = []
@@ -348,15 +368,22 @@ class YamlMixin:
 
                     setup_yaml = os.path.join(setup_dir, f"setup_{class_slug}.yaml")
                     teardown_yaml = os.path.join(setup_dir, f"teardown_{class_slug}.yaml")
-                    # LLM 生成可执行的 YAML 数据（各归其列表，阶段间 barrier）
-                    setup_tasks.append((
-                        {"steps": setup_text, "expected": "",
-                         "case_id": f"setup_{class_slug}",
-                         "_pre_ids": sorted(pre_ids)}, setup_yaml))
-                    teardown_tasks.append((
-                        {"steps": teardown_text, "expected": "",
-                         "case_id": f"teardown_{class_slug}",
-                         "_pre_ids": sorted(pre_ids)}, teardown_yaml))
+                    # 2026-09-09 定向重跑：setup/teardown 各自命中 allow_paths 才 makedirs + append；
+                    # row 打 _ctx_override（= ctx_overrides[abs]，逐文件失败摘要）供 _run_yaml_rounds 注入。
+                    if _allowed(setup_yaml) or _allowed(teardown_yaml):
+                        os.makedirs(setup_dir, exist_ok=True)
+                    if _allowed(setup_yaml):
+                        setup_tasks.append((
+                            {"steps": setup_text, "expected": "",
+                             "case_id": f"setup_{class_slug}",
+                             "_pre_ids": sorted(pre_ids),
+                             "_ctx_override": _ctx_for(setup_yaml)}, setup_yaml))
+                    if _allowed(teardown_yaml):
+                        teardown_tasks.append((
+                            {"steps": teardown_text, "expected": "",
+                             "case_id": f"teardown_{class_slug}",
+                             "_pre_ids": sorted(pre_ids),
+                             "_ctx_override": _ctx_for(teardown_yaml)}, teardown_yaml))
 
                 # func YAML（每个 TC 一个目录，含一个 test_data.yaml）
                 for c in cases:
@@ -368,11 +395,19 @@ class YamlMixin:
                     if not func_en.startswith("test_"):
                         func_en = "test_" + func_en
                     func_dir = os.path.join(output_base, feature_en, func_en)
-                    os.makedirs(func_dir, exist_ok=True)
 
                     # 合并所有 step 为一个 YAML（run_blocks 逐条执行）
                     yaml_path = os.path.join(func_dir, "test_data.yaml")
-                    test_tasks.append((c, yaml_path))
+                    # 2026-09-09 定向重跑：仅命中 allow_paths 的 func 才重建目录 + 入列表。
+                    # 复制 row 打 _ctx_override，避免污染 raw_rows 原对象（重跑多次调用也安全）。
+                    if not _allowed(yaml_path):
+                        continue
+                    os.makedirs(func_dir, exist_ok=True)
+                    row_c = dict(c)
+                    _co = _ctx_for(yaml_path)
+                    if _co is not None:
+                        row_c["_ctx_override"] = _co
+                    test_tasks.append((row_c, yaml_path))
 
         all_tasks = setup_tasks + test_tasks + teardown_tasks
 
@@ -435,6 +470,8 @@ class YamlMixin:
         post_issues = validator.validate_all(output_base)
         # D4 后校验（就地实现，选项 1）：扫描 test/teardown 引用 __MISSING_KEY__ 的用例 → P1
         post_issues.extend(_scan_missing_key_refs(output_base, setup_keys))
+        # V1–V5（2026-09-10）：车场绑定值 bindPayCode 形态校验 → P0
+        post_issues.extend(_scan_extract_value_forms(output_base))
         _post_issues_path = os.path.join(output_base, "_post_validation_issues.json")
         if post_issues:
             import json as _json
@@ -444,12 +481,30 @@ class YamlMixin:
             if _d4_missing:
                 logger.warning("   ⚠️ D4: %d 个用例引用 setup 缺失键（__MISSING_KEY__），"
                                "已标 P1 需人工复核（不进修复轮）", len(_d4_missing))
+            _bind_bad = [i for i in post_issues
+                         if str(i.get("check", "")).startswith("bind_pay_code_")]
+            if _bind_bad:
+                _bysetup = {}
+                for _i in _bind_bad:
+                    _bysetup.setdefault(os.path.basename(_i["yaml_path"]), []).append(
+                        _i.get("check"))
+                logger.warning("   ⚠️ V1–V5: %d 处车场绑定值 bindPayCode 形态非法（%d 个 setup），"
+                               "已判 P0 进修复轮:", len(_bind_bad), len(_bysetup))
+                for _fn in sorted(_bysetup):
+                    logger.warning("     %s: %s", _fn, ", ".join(sorted(set(_bysetup[_fn]))))
             # P0/P1 问题注入修复轮（修复轮未耗尽时）；D4 missing_extract_key 除外
             # （根因是 setup 生成失败，重生成无用）
             _fixable = [i for i in post_issues
                         if i.get("severity") in ("P0", "P1")
                         and i.get("check") != "missing_extract_key"]
-            if _fixable and result["rounds"] < config.YAML_REPAIR_ROUNDS:
+            # 后校验修复轮用**独立预算**（2026-09-10 修复死代码）：
+            # result["rounds"] 计的是「全量轮 + 各阶段修复轮」，第 1 轮就是全量轮，
+            # 故只要生成了文件它就恒 ≥1；而 YAML_REPAIR_ROUNDS 默认 1，
+            # 原条件 `result["rounds"] < config.YAML_REPAIR_ROUNDS` 恒为假 ——
+            # 后校验发现的问题从未真正回炉过，只写进 _post_validation_issues.json。
+            # 现改为独立预算，轮数上限仍受 YAML_REPAIR_ROUNDS 约束。
+            _post_repair_budget = config.YAML_REPAIR_ROUNDS
+            if _fixable and _post_repair_budget > 0:
                 # 收集受影响的任务（三阶段合并清单）
                 _affected_paths = {i["yaml_path"] for i in _fixable}
                 _affected_tasks = [
@@ -543,7 +598,10 @@ class YamlMixin:
                     max_workers=config.YAML_CONCURRENCY,
                     max_queue=config.YAML_CONCURRENCY * 2) as executor:
                 future_map = {
-                    executor.submit(gen, row, api_defs_json, user_ctx, path, rctx):
+                    executor.submit(
+                        gen, row, api_defs_json,
+                        row.get("_ctx_override") or user_ctx,   # 2026-09-09 定向：逐文件 ctx 优先
+                        path, rctx):
                         (row, path)
                     for row, path, rctx in pending
                 }

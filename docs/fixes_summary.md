@@ -801,6 +801,17 @@
 - **架构决策**：循环上限 120→900（30 分钟），覆盖 YAML 生成最长时间。后端心跳继续每 10s 更新进度。
 - **衍生规则**：前端轮询超时必须大于后端任务最长可能执行时间；长时间任务必须有后端心跳 + 前端长轮询双重保障
 
+### [65] [P2] 校验失败详情未透传前端 + URL 校验器误报 HTML 标签
+
+- **涉及模块**：`agent_components/validation/case_validator.py`, `agent_components/graph/state.py`, `agent_components/graph/nodes.py`, `web/tasks.py`
+- **问题根因**：
+  1. `_URL_RE = /[A-Za-z][A-Za-z0-9_/{}.-]*` 匹配任意"斜杠+英文"串，HTML 结束标签 `</script>` 的 `/script` 被误判为接口路径 → 未命中接口模板 → `invalid_url` 误报
+  2. 校验失败仅返回数量（`fail_warn`）无编号/标题/原因；State 无 `failed_case_ids` 注解 → LangGraph 静默丢弃（与 excel_plan 断链同因），前端只看到"3 行未通过校验"无法分辨哪条失败
+- **架构决策**：
+  - `_URL_RE` 加负向后顾 `(?<!<)` 排除 HTML 结束标签 `/xxx`；枚举值 `sharp/peak/flat/valley` 误报保留（用户决策不修）
+  - State 注解 `failed_case_ids` + `failed_case_details`，nodes.py return 透传失败详情（`{id, title, errors}`），`_build_phase_b_reply` 在聊天框 reply 展示每条详情（数量+编号+标题+原因）；log 兜底正则扩为 `(?:TC|PRE)-\d+`
+- **衍生规则**：LangGraph State 任何新增返回键必须先加注解（防静默丢弃）；校验失败明细必须透传前端（编号+原因），禁止只给数量；URL 提取需排除 HTML 标签等非接口文本形态
+
 ---
 
 ## 13. 统计数据更新
@@ -809,5 +820,64 @@
 |------|---------|------|
 | P0 | 3 | 17 |
 | P1 | 3 | 19 |
-| P2 | 1 | 9 |
+| P2 | 2 | 10 |
 | 架构改进 | 0 | 2 |
+
+---
+
+## 14. 2026-09-02 Phase B 两段式恢复（用户驱动架构变更）
+
+> 来源：用户指令「先恢复PhaseB的两段式结构，进行测试，并按文件建议优化」；
+> 方案与施工记录详见 `changelog/2026-09-02_phase_b_two_stage_restore.md`。
+> 分类：架构改进（非审查发现的 P0/P1/P2 缺陷），不计入上方缺陷统计表。
+
+### [66] [架构改进] Phase B 生成恢复两段式：thinking 纯思考 → json_object 结构化
+
+- **涉及模块**：`agent_components/graph/nodes.py`, `prompts/extraction_prompts.py`,
+  `tests/test_thinking_log.py`, `tests/test_phase_b_two_stage.py`
+- **问题根因**：2026-08-03 合并为「thinking + json_object 双开一步生成」后，
+  deepseek-v4-flash 下约 83% 返回空 content（长推理未收敛却被强令输出 JSON）。
+  且一步生成从不回写 `test_point_analysis`，下游 repair/validator 上下文恒为「（无）」。
+- **架构动作**：
+  - `_generate_excel_plan_thinking` 拆两次顺序调用：**Phase 1** = thinking enabled、无
+    response_format（`generate_excel_plan_thinking_prompt` 改为自由文本三段式分析，
+    保留全部设计规则）→ **Phase 2** = json_object + thinking disabled（新增
+    `generate_excel_plan_format_prompt` 忠实转换）；reasoning_content 经 reasoning_label
+    采集，非工具调用场景不进入 Phase 2 上下文
+  - 两段 `bind()` 显式 `max_tokens=config.LLM_MAX_TOKENS`（实测 LangChain bind 丢失构造时
+    max_tokens → thinking disabled 回落 8192 默认，大计划 JSON 截断）
+  - 返回 dict 回写 `test_point_analysis`（Phase 1 分析），修复下游上下文缺失
+- **验证**：相关单测 11 passed；全量 tests/ 703 passed / 9 failed（与 09-01 基线一致，
+  新增失败 0）；真实 API 三样本（智慧用电）：空 content 消除，修复后 38 条用例 /
+  100% 接口覆盖 / 幻觉 URL 0 / 空步骤·空预期 0 / 无效前置引用 0
+- **衍生规则**：大 JSON 输出且 thinking disabled 的调用，必须在 `bind()` 显式补
+  `max_tokens`，否则回落模型 8192 默认输出导致截断（与 settings.py L146-148 注释一致）
+
+## 15. 2026-09-02 失败提示误报修复（0 失败却回「部分用例校验失败」）
+
+> 来源：用户实测 23 条全过的运行，回复却为「Excel 测试计划已生成：共 23 条用例
+> （部分用例校验失败，详见 logs/thinking_trace.log）」。属 **0 失败误报**，非展示链路回归。
+> 方案与施工记录详见 `changelog/2026-09-02_phase_b_failed_case_false_positive.md`。
+> 分类：P2（误导性提示），归入上方缺陷统计表。
+
+### [67] [P2] Phase B 失败提示误报：空列表当缺失 + 整份日志兜底命中历史 FAILED
+
+- **涉及模块**：`web/tasks.py`, `agent_components/graph/nodes.py`,
+  `tests/test_workflow_init.py`, `tests/test_quality_gate.py`
+- **问题根因**：`_resume_workflow_bg` 用 `if not result.get("failed_case_details")` 判定
+  ——`not []` 为真，把 **0 失败的 `[]`** 误当「节点未透传详情」→ 兜底读**整份**累积的
+  `thinking_trace.log` → 命中历史运行的 `generate_excel_plan_FAILED` 标记（如 09-02 14:46
+  一步生成的 PRE-002/TC-002）→ 误置失败警告。真实失败详情渲染链路（reply 逐行）本无回归。
+- **修复**：
+  - 新增纯判定 `_resolve_failed_case_info(result, trace_tail)`，三分语义：
+    非空列表 → 编号取 `failed_case_ids`；**空列表 `[]` → 0 失败不提示**；
+    `None`（节点未透传，异常路径）→ 才兜底日志，且仅当段内含 FAILED 才提示
+  - 兜底日志只读**本次 invoke 追加的尾部**（invoke 前记录 `thinking_trace.log` 文件偏移，
+    读 `seek(offset)` 后的内容），杜绝历史 FAILED 污染当前回复
+- **连带项（用户确认一并处理）**：all-invalid 路径（`nodes.py` repair 轮耗尽仍 0 条可落盘）
+  此前漏 `requires_review` → reply 会产出误导性「共 0 条用例（部分用例校验失败）」；
+  已补 `requires_review=True` → 与 thinking 失败路径同契约，reply 走「需人工审查」
+- **验证**：`TestFailedCaseDisplay` 新增 5 个回归测试（`[]`+历史 FAILED 不误报、reply 干净、
+  缺失+段内含 FAILED 才兜底、缺失+干净段无提示、真实失败取节点编号），全组 8 passed；
+  `TestQualityGateWiring` 新增端到端用例（空 plan 驱动全无效守卫 → requires_review +
+  reply 无「共 0 条」）；连带回归 7 文件 **89 passed**

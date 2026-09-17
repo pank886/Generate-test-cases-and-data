@@ -5,7 +5,8 @@ Phase A — 提取/分析:
     batch_chunk_summary_prompt / analyze_product_scenarios_prompt /
     analyze_axure_ui_flow_prompt / analyze_api_mapping_prompt
 Phase B — Excel 计划生成/修复:
-    generate_excel_plan_thinking_prompt / repair_excel_plan_prompt
+    generate_excel_plan_thinking_prompt / generate_excel_plan_format_prompt /
+    repair_excel_plan_prompt
 Phase C — 意图识别 / YAML / 翻译 / 依赖映射:
     confirm_user_intent_prompt / SETUP_CAPTURE_RULE / YAML_ANALYSIS_GUIDE /
     generate_yaml_data_single_prompt / translate_to_en_prompt /
@@ -61,7 +62,7 @@ def api_def_extract_prompt() -> ChatPromptTemplate:
          '   - description: 接口功能描述（一句话概括）\n'
          "   - method: 大写的 GET/POST/PUT/DELETE/PATCH\n"
          "   - url: 只提取路径部分，不含域名\n"
-         "   - header: 请求头对象（名→值映射），如 {\"Content-Type\": \"application/json\"}\n"
+         "   - header: 请求头对象（名→值映射），如 {{\"Content-Type\": \"application/json\"}}\n"
          "   - body: 请求体字段数组（Body + Query 合并）\n"
          "   - return: 响应字段数组\n\n"
          "### 字段数组元素格式（body/return 每个元素恰好 6 个字段）\n"
@@ -80,7 +81,7 @@ def api_def_extract_prompt() -> ChatPromptTemplate:
          "  default(string), desc(string), value(string)\n\n"
          "⚠️ 重要约束：\n"
          '  - header 必须是对象（名→值映射），无请求头时填空对象 {{}}\n'
-         "  - body/return 必须是数组，无数据时填空数组 []，绝对不能填 {}\n"
+         "  - body/return 必须是数组，无数据时填空数组 []，绝对不能填 {{}}\n"
          "  - 字段数组每个元素必须是 6 个字段，一个不少（无值填空字符串\"\"）\n"
          "  - value 只从文档的「请求示例/返回示例」代码块中提取，示例没有该字段则 value 为\"\"，绝不把默认值/说明填进 value\n"
          "  - 文档中标注\"必须\"→required:true，\"非必须\"或未注明→required:false\n"
@@ -91,7 +92,7 @@ def api_def_extract_prompt() -> ChatPromptTemplate:
 
 
 # ====================================================================
-# Phase A: 批量 chunk 摘要（入库时生成 simple_summary）
+# Phase A: 批量 chunk 摘要（入库时生成 simple_summary
 # ====================================================================
 
 # ---- Phase A: 批次摘要 ----
@@ -193,21 +194,22 @@ def analyze_api_mapping_prompt() -> ChatPromptTemplate:
     ])
 
 
-# ---- Phase B: Excel 计划生成（thinking+json 一步生成） ----
+# ---- Phase B: Excel 计划生成（两段式 Phase 1：纯思考自由文本分析） ----
 def generate_excel_plan_thinking_prompt() -> ChatPromptTemplate:
-    """
-    【新】thinking+json_mode 一步生成 Excel 计划。
-    {json_schema} 由调用方注入 ExcelPlanV2.model_json_schema()。
+    """【新】两段式 Phase 1：纯思考自由文本分析报告。
+
+    thinking enabled、不设 response_format（无 JSON 约束）——避免
+    thinking+json_object 双开时空 content（约 83%）的根因场景。
+    输出三段式自由文本（## 测试场景分析 / ## 共享前置 / ## 测试用例，
+    PRE-xxx / TC-xxx 展开完整步骤/预期），供 Phase 2
+    generate_excel_plan_format_prompt 结构化转换。
     """
     return ChatPromptTemplate.from_messages([
         ("system",
          "你是一位资深测试架构师，专注于**接口自动化测试用例设计**。\n\n"
          "根据【模块场景分析】和【接口定义】，设计详细的测试用例。\n"
-         "严格按下方 JSON Schema 输出，禁止 Markdown，只输出纯 JSON。\n\n"
-         "### JSON Schema（必须严格遵循此结构）\n"
-         "```json\n"
-         "{json_schema}\n"
-         "```\n\n"
+         "先在脑中充分思考每个功能点的正常/异常路径，再输出完整的"
+         "**自由文本分析报告**（不要输出 JSON）。\n\n"
          "### ⚠️ 逆向用例设计要求（优先级高，但需结合业务合理性灵活应用）\n\n"
          "**整体比例原则**：\n"
          "- 全局逆向用例数（is_negative_test=true）**应尽量不低于** 正向用例数（is_negative_test=false）的 1/3，以保障异常场景覆盖充分。\n"
@@ -232,11 +234,17 @@ def generate_excel_plan_thinking_prompt() -> ChatPromptTemplate:
          "- expected 必须明确写出异常/报错/失败的具体内容，严禁写「操作成功」「返回正常」\n"
          "- is_negative_test 必须设为 true\n"
          "- steps 中必须描述触发异常的具体操作（如省略必填字段、传入错误类型值），禁止内嵌完整 JSON 请求体\n\n"
-         "### 断言关键词（预期结果中必须使用）\n"
-         "- [eq] 相等断言：验证返回值与预期完全相等\n"
-         "- [contains] 包含断言：验证返回值包含预期内容\n"
-         "- [ne] 不相等断言：确认删除/变更后旧数据不存在\n"
-         "- [db] 数据库断言：**仅当下方「数据库表结构信息」非空时才允许使用**；"
+         "### 断言规范（预期结果中必须使用，硬性要求，违反会整批校验失败）\n"
+         "- steps 每行一个操作，expected 每行对应该操作的断言，**行数必须一一对应**（steps 2 行 → expected 2 行）\n"
+         "- expected 每行以断言标签开头（如 `1.[eq]创建成功`、`2.[db]存在记录`），"
+         "禁止把多步断言合并成一行（如 `返回成功；[db] 新增记录` 应拆为两行）\n"
+         "- **断言（expected）**：每行对应一步，行数与 steps 一一对应；断言内容与操作语义对齐"
+         "（创建成功/查询命中/删除成功/异常拦截等）。\n"
+         "- **断言关键词（预期结果中必须使用）**：\n"
+         "  · [eq] 相等断言：验证返回值与预期完全相等\n"
+         "  · [contains] 包含断言：验证返回值包含预期内容\n"
+         "  · [ne] 不相等断言：确认删除/变更后旧数据不存在\n"
+         "  · [db] 数据库断言：**仅当下方「数据库表结构信息」非空时才允许使用**；"
          "表结构为空时禁止 [db] 断言（无法写正确 SQL），改用 [eq]/[contains]/[ne]\n\n"
          "### 共享前置引用规范（硬性要求，违反会整批校验失败）\n\n"
          "- 每个用例的 preconditions 字段**只能**引用 shared_preconditions 数组中实际存在的 id（形如 PRE-001）。\n"
@@ -262,8 +270,6 @@ def generate_excel_plan_thinking_prompt() -> ChatPromptTemplate:
          "  · 删除/修改/解绑等操作后，需经查询接口验证结果；跨模块用例体现接口间的调用链。\n"
          "  · **禁止在 steps 中内嵌完整 JSON 请求体**；具体参数值属 Phase C 数据层，"
          "这里只描述操作意图与关键触发条件（如省略必填字段、错误类型值）。\n"
-         "- **断言（expected）**：每行对应一步，行数与 steps 一一对应；断言内容与操作语义对齐"
-         "（创建成功/查询命中/删除成功/异常拦截等）。\n"
          "- **强令使用上下文**：充分利用下方【模块场景与接口分析】【接口定义】【关联模块】【用户需求】全部信息，"
          "禁止忽略给定分析、禁止凭空编造接口/步骤/接口关系。\n"
          "- **只使用提供的信息分析，禁止瞎编**：所有分析、步骤、前置、断言必须建立在下方提供的信息之上，"
@@ -281,11 +287,18 @@ def generate_excel_plan_thinking_prompt() -> ChatPromptTemplate:
          "**边界值**：数值最小值-1/最小值/最大值/最大值+1，时间临界时刻，空值零值负值\n"
          "**异常场景**：权限不足、数据冲突、并发、依赖不可用、网络超时\n"
          "**跨模块联动**：利用关联模块设计端到端场景\n\n"
-         "**步骤/预期严格对齐（硬性要求，违反会整批校验失败）**：\n"
-         "- steps 每行一个操作，expected 每行对应该操作的断言，**行数必须一一对应**（steps 2 行 → expected 2 行）\n"
-         "- expected 每行以断言标签开头（如 `1.[eq]创建成功`、`2.[db]存在记录`），"
-         "禁止把多步断言合并成一行（如 `返回成功；[db] 新增记录` 应拆为两行）\n\n"
-         "**用例质量要求**：无冗余无重复无遗漏，逻辑严谨；覆盖等价类划分、边界值分析、场景法、错误推测法"
+         "**用例质量要求**：无冗余无重复无遗漏，逻辑严谨；覆盖等价类划分、边界值分析、场景法、错误推测法\n\n"
+         "### 输出格式要求（三段式自由文本，不要输出 JSON）\n"
+         "把设计成果整理为三段式自由文本报告（不要输出 JSON，禁止 Markdown 代码块）：\n"
+         "- **## 测试场景分析**：测试点规划与逆向/边界/异常覆盖说明。若「模块场景与接口分析」不为空，"
+         "直接据此展开，不要重复场景分析。\n"
+         "- **## 共享前置**：每条准备操作逐条编号 **PRE-001、PRE-002…**，命名要能反映准备内容，"
+         "逐条展开完整准备步骤（每行一步，按「调用 {{method}} {{url}} 做{{业务动作}}」表达）"
+         "与预期结果（含断言标签）。\n"
+         "- **## 测试用例**：每条用例逐条编号 **TC-001、TC-002…**，每条展开完整设计：功能点(story)/标题/"
+         "依赖前置（只引用已定义的 PRE-xxx 编号，无则写无）/操作步骤（每行一步）/预期结果"
+         "（每行对应该步断言标签，含 [eq]/[contains]/[ne]/[db]）/是否反向用例。\n"
+         "三段报告都要覆盖全部子模块与功能点、以及每个接口的直接调用用例，不留遗漏。"
         ),
         ("human",
          "{gen_warning}"
@@ -308,9 +321,57 @@ def generate_excel_plan_thinking_prompt() -> ChatPromptTemplate:
          "□ 删除/修改后是否经查询接口验证？跨接口用例是否体现了接口调用链？\n"
          "□ 是否只使用提供的信息分析、未引入范围外知识/接口/数据瞎编？信息不足时是否如实说明而非凑数？\n\n"
          "如果「模块场景与接口分析」不为空，说明场景和接口映射已预分析完成，"
-         "请直接据此生成测试用例，不要重复分析场景。"
+         "请直接据此展开用例设计，不要重复分析场景。"
          "如果为空，请按接口定义自行分析。"
-         "请设计测试用例并输出 JSON。\n\n"
+         "请按上方「### 输出格式要求」的三段式（## 测试场景分析 / ## 共享前置 / ## 测试用例）"
+         "输出完整的自由文本设计报告，**不要输出 JSON**。\n\n"
+        )
+    ])
+
+
+# ---- Phase B: Excel 计划生成（两段式 Phase 2：结构化转换） ----
+def generate_excel_plan_format_prompt() -> ChatPromptTemplate:
+    """【新】两段式 Phase 2：json_object 结构化转换（thinking disabled）。
+
+    system 注入 {json_schema}（ExcelPlanV2.model_json_schema()）。
+    把 Phase 1 分析报告（{analysis_text}）中已设计的 PRE/TC 逐条忠实落成 JSON；
+    只做规则约束，不新增示例。
+    """
+    return ChatPromptTemplate.from_messages([
+        ("system",
+         "你是一位严谨的**测试用例数据转换专家**。"
+         "将下方【待转换分析报告】中的共享前置（PRE-xxx）与测试用例（TC-xxx）"
+         "**逐条、忠实**地转换为 JSON，供生成 Excel 测试计划。\n\n"
+         "严格按下方 JSON Schema 输出，禁止 Markdown，只输出纯 JSON。\n\n"
+         "### JSON Schema（必须严格遵循此结构）\n"
+         "```json\n"
+         "{json_schema}\n"
+         "```\n\n"
+         "### 字段硬约束（违反即校验失败）\n"
+         "- id/story/title/steps/expected **五字段缺一不可**，字段名是 story 不是 sub_module\n"
+         "- steps 和 expected 必须是**字符串**（\\n 分隔各条），禁止输出数组/列表\n"
+         "- steps 和 expected 的条数必须一致（\\n 分隔后 count 相等）\n"
+         "- preconditions 是报告中被该用例引用的 PRE 编号数组，无引用则为 []\n"
+         "- mutates_data/is_negative_test 为布尔值\n"
+         "- shared_preconditions 元素 = {{id, name, steps, expected}}，name 必填；"
+         "禁止输出 story/title/preconditions/mutates_data/is_negative_test/cloned_from 等用例字段\n\n"
+         "### 忠实转换要求（硬性）\n"
+         "1. 报告中已设计的 PRE-xxx 与 TC-xxx **必须全部落入 JSON**，禁止省略、合并或凭空新增用例\n"
+         "2. 每条用例的 id/title/story/preconditions/steps/expected 严格取自报告对应条目，"
+         "禁止改写用例语义、禁止自由发挥步骤与预期\n"
+         "3. 每条用例的 preconditions 只填入报告中明确引用的 PRE 编号；若悬空引用（报告未定义该 PRE），"
+         "优先在 shared_preconditions 中补齐定义，无法补齐则将该用例 preconditions 置 []\n"
+         "4. 报告中步骤/预期的断言标签（[eq]/[contains]/[ne]/[db]）原样保留到 expected 对应行\n"
+         "5. 枚举/取值字段沿用报告设计（不写死字面量，只保留字段名与取值来源），"
+         "标识/编码字段保留报告中的具体值\n"
+         "6. 下方【数据库表结构信息】为空时禁止出现 [db] 断言，改用 [eq]/[contains]/[ne]\n"
+         "7. 报告中未覆盖的任何接口不得臆造用例；报告本身信息不足时输出已设计的最小合法 JSON"),
+        ("human",
+         "{gen_warning}"
+         "### 待转换分析报告\n{analysis_text}\n\n"
+         "### 接口定义（核对接口方法/路径，禁止新增接口）\n{api_definitions}\n\n"
+         "### 数据库表结构信息（为空时禁止 [db] 断言）\n{db_schema}\n\n"
+         "请按上方 JSON Schema 与字段硬约束逐条转换，只输出 JSON。\n\n"
         )
     ])
 
@@ -376,9 +437,9 @@ def repair_excel_plan_prompt() -> ChatPromptTemplate:
     ])
 
 
-# ---- Phase C: 意图识别与模块匹配 ----
+# ---- Phase B: 意图识别与模块匹配 ----
 def confirm_user_intent_prompt() -> ChatPromptTemplate:
-    """Phase C 节点1：根据用户输入匹配候选模块名。"""
+    """Phase B 节点1：根据用户输入匹配候选模块名。"""
     return ChatPromptTemplate.from_messages([
     ("system",
      "你是一个智能模块匹配助手。根据用户的自然语言描述，从模块列表中找出最相关的模块。\n\n"
@@ -614,7 +675,7 @@ def generate_yaml_data_single_prompt() -> ChatPromptTemplate:
     """Phase C YAML 数据生成 — 单节点专用（schema 驱动，无示例）。
 
     2026-08-25 替换为 v3 结构：分节标题（# 角色 / 数据工厂 / schema / 铁律）+ 完整规则措辞。
-    A/B 对比（logs/prompt_ab）：v3 修复精简措辞引入的断言块键倒置回归（{$.retCode: {eq: 1}}），
+    A/B 对比（手动执行产物，非流程产出，已于 2026-09-17 清理）：v3 修复精简措辞引入的断言块键倒置回归（{$.retCode: {eq: 1}}），
     断言结构 0 非法块，与旧版同质量且更快；value > desc > 用例值 优先级保留在 human 段。
     """
 
@@ -697,7 +758,12 @@ def generate_yaml_data_single_prompt() -> ChatPromptTemplate:
 SETUP_CAPTURE_RULE = (
     "【共享前置 setup 块】本文件为共享前置，创建的资源标识（code 等唯一键）"
     "必须通过 input_extract 捕获（键名 camelCase 语义化，如 pre001MeterCode），"
-    "供后续用例与清理引用；即使本文件内无引用也必须捕获，禁止省略 input_extract"
+    "供后续用例与清理引用；即使本文件内无引用也必须捕获，禁止省略 input_extract。"
+    "【前置标签归属】本文件必须为上方每一个「# 前置标签:」行各产出一个 testCase 块；"
+    "该块的 case_name 必须原样包含对应的前置标签，"
+    "连同其 `_isolated_TC-<编号>` 后缀一并保留，禁止简写、改写或省略该后缀。"
+    "下游按 case_name 中的标签归属提取键：标签写错、简写或缺后缀，"
+    "会使该前置的提取键全部丢失，进而导致后续用例与其清理块无法引用。"
 )
 
 # 单节点生成引导：浓缩 analyze 的 5 条分析要点，引导模型在 thinking 里完成分析

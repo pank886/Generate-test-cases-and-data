@@ -1,9 +1,0 @@
-{
-  "ignore": [
-    "chongelog/**",
-    "docs/**",
-    "testcase/**",
-    "tests/**",
-    ".env"
-  ]
-}

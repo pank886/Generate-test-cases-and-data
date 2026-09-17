@@ -1,0 +1,890 @@
+# 智慧停车判定表映射（唯一事实源）
+#
+# 来源：D:\0-导出文件\停车类型和费用计算-规则表.xlsx
+#   表1 入场车辆类型处理规则（sheet1 R3–R26，24 条）
+#   表2 车场收费处理规则（sheet1 R34–R46，13 条；R32 注「默认临停车」）
+#
+# 设计原则：
+#   - **xlsx 是权威输入**。本文件只编码 xlsx 里「推导不出来的东西」：
+#     条件列取值 → 车场配置字段、车辆类型 → 建数据配方、动作列 → 断言。
+#   - 每条用例的**分组由条件列 flag 匹配得出**（见 park_groups.match），不手工指定。
+#   - 每条用例的**步骤由 xlsx「条件（出入场动作）」列解析得出**。
+#   - 每条用例的**断言由 xlsx「动作（*）」列映射得出**。
+#   - 因此本文件与 xlsx 可交叉校验（tests/test_rule_table_rows.py）。
+#
+# 实证来源（全部来自可运行的真实 setup，非臆造）：
+#   C:\Users\damai\PyCharmMiscProject\testcase\园区基线\智慧停车\SmartParking\setup_data\
+#   + 2026-09-11 探针实测（有作用/PhaseA/_probe_monthlycar_query_shape.py）
+
+meta:
+  name: 智慧停车判定表映射
+  version: "1.2"
+  source_xlsx: D:\0-导出文件\停车类型和费用计算-规则表.xlsx
+  module_dir: C:\Users\damai\PyCharmMiscProject\testcase\园区基线\智慧停车\ParkingRuleTable
+  feature: 判定表驱动-停车类型与费用计算
+  story: 判定表驱动规则验证
+  # 由 deferred_rule 在 xlsx 上求得的结果，留作交叉校验（tests/test_rule_table_rows.py）
+  # 2026-09-11 清空：`/mock/addCouponAndUse`（填写即创建+核销）发布 ⇒ 原先
+  # 8 条券用例的暂留理由消失，全部解禁（原值 [2,3,4,7,8,9,12,13]）。
+  # 机制保留为**空触发集**：日后如再出现依赖缺失，往 columns 里加列即可。
+  deferred_table2_rules: []
+
+# ---------------------------------------------------------------------------
+# 暂留判定**规则**（不硬编码条号，由适配器在 xlsx 上求得）。
+#
+# 2026-09-11：触发列清空 —— 原判定依赖表2 的「是否使用优惠券-金额 / -时长」两列，
+# 理由是「39 端点中无『券→行程』核销接口」。该前提已不成立：
+# `/mock/addCouponAndUse` 一次调用即完成**创建 + 核销**（新版接口文档 七章），
+# 故 8 条券用例改为正常生成，券的取值见下方 `coupon_expectation`。
+# ---------------------------------------------------------------------------
+deferred_rule:
+  table: "表2"
+  columns: []
+  trigger_prefix: "是"            # 含「是（不能抵扣全部时长）」这类带括注取值
+  reason: （当前无触发列；历史上为「无券→行程核销接口」，2026-09-11 已解除）
+
+# ---------------------------------------------------------------------------
+# 全局常量：URL 前缀、请求头、mock 面无 retCode 外壳的断言
+# ---------------------------------------------------------------------------
+constants:
+  url_prefix:
+    config: /park-access-parking-web             # 车场/设备/收费规则/黑白名单
+    mock: /park-access-parking-rule-new/mock     # mock 测试面（含 /mock 段）
+    # ⚠️ mock 段必须带 `mock`：真实 URL 形如
+    #   /park-access-parking-rule-new/mock/access/enter（逐字取自实证用例）
+  header:
+    Content-Type: application/json
+  # 配置面通用断言（逐字取自 setup_other_parking_whitelist_permit.yaml 等实证 setup）
+  # 用 contains 而非 eq：contains 是子串比较（common/assertions.py:64），
+  # 对 retCode 返回字符串还是数字都成立；eq 要求类型严格相等，脆弱。
+  validation_ok:
+    - contains: {status_code: 200}
+    - contains: {msg: success, retCode: 1}
+  # mock/access 无 retCode/msg 外壳，断言 openGate（取布尔真值）
+  # 逐字取自 test_temp_car_main_parking_generate_bill_positive/test_data.yaml
+  validation_gate:
+    - contains: {status_code: 200}
+    - eq: {$.openGate: true}
+  # mock/delAllForMock / mock/monthlyCar/add 等：{"success": true}
+  validation_mock_ok:
+    - contains: {status_code: 200}
+    - eq: {$.success: true}
+  # mock/carTypeQuery、mock/monthlyCar/query：**只有 HTTP 200 可断言**。
+  #   实证：`mock/monthlyCar/query` 响应根是**裸数组**（MANIFEST H6，`$.[0].code`），
+  #   既无 retCode/msg 外壳也无 success 字段；`mock/carTypeQuery` 响应根直接挂
+  #   `parkingType`（实证 test_main_whitelist_entry_exit_pass_positive 用
+  #   `eq: {$.parkingType: '4'}`，若无外壳则该路径不成立）。
+  #   这两步的真实校验落在**回读值被下游使用**上（提取不到就构建不出请求），
+  #   故不做外壳断言 —— 曾误用 validation_ok，29 个用例 setup 全灭。
+  validation_mock_read:
+    - contains: {status_code: 200}
+
+# ---------------------------------------------------------------------------
+# 表级条件列默认值（xlsx 里没写、但语义隐含的条件）
+#   表2 的条件列只有「是否收费 / 子场主场情况」，D–H 列全是 `\`。
+#   xlsx R32 注：表2 的验证对象是**默认临停车**（无任何车类型记录的车）。
+#   临停车要能进场就必须 tempCarIn=是 —— 故表2 行按此注入，不靠省略。
+#   放在这里而不是写死进适配器，是为了这条规则可被测试覆盖（原则①②）。
+# ---------------------------------------------------------------------------
+table_defaults:
+  "表2":
+    tempCarIn: "是"
+
+# ---------------------------------------------------------------------------
+# 1. 条件列 → 车场配置字段（carInConfig / parkingPark）
+#    「否」的一侧必须是显式 false —— 不能靠省略，否则会继承上一次配置
+# ---------------------------------------------------------------------------
+park_flags:
+  - column: 车场临停准入开关
+    key: tempCarIn
+    field: carInConfig.tempCarIn
+    type: bool
+    values: {是: true, 否: false}
+
+  - column: 车场是否支持一人多车白名单
+    key: carWhiteOtherIsCasual
+    field: carInConfig.carWhiteOtherIsCasual
+    type: bool
+    values: {是: true, 否: false}
+
+  - column: 其他车场白名单准入
+    key: otherParkWhiteAccess
+    field: carInConfig.otherParkWhiteAccess
+    type: bool
+    values: {是: true, 否: false}
+
+  - column: 其他车场包月车准入
+    key: otherParkMonthAccess
+    field: carInConfig.otherParkMonthAccess
+    type: bool
+    values: {是: true, 否: false}
+
+  - column: 是否特殊车牌放行
+    key: specialCarEnable
+    field: carInConfig.specialCarEnable
+    type: bool
+    values: {是: true, 否: false}
+
+  - column: 是否收费
+    key: needPay
+    field: parkingPark.needPay
+    type: int
+    values: {是: 1, 否: 0}
+    # 收费时同时需要：needCount=1 + bindPayCode（回读值）+ 存在收费规则
+
+# ---------------------------------------------------------------------------
+# 2. 车场配置基线（carInConfig 全字段，来源：真实 setup 逐字）
+#    真实 setup 每次都写全，不留空 —— 保持同一形态
+# ---------------------------------------------------------------------------
+park_template:
+  carInConfig:
+    carWhiteOtherIsCasual: false
+    enableMisMatch: true
+    innerOpenWhenNotMatch: true
+    nobodyPark: false
+    otherParkMonthAccess: false
+    otherParkMonthAccessParks: ""
+    otherParkWhiteAccess: false
+    otherParkWhiteAccessParks: ""
+    parkCode: ""
+    specialCarEnable: false
+    tempCarIn: false
+  parkingPark:
+    bindPayCode: ""
+    mainPark: true
+    needCount: 1
+    needPay: 0
+    occupiedSpots: 0
+    parentCode: ""
+    parkCode: ""          # 新建必须空串，服务端生成
+    parkName: ""          # → ${random_code('PK-...')}，禁止字面量
+    totalSpots: 100
+
+# ---------------------------------------------------------------------------
+# 3. 收费规则模板（表2 用）
+#    基线：单价 5 元/小时、免费时长 0、无封顶、无提前缴费限制
+# ---------------------------------------------------------------------------
+pay_rule_template:
+  configType: "3"
+  freeTime: "0"
+  mainPark: true
+  maxParkingFee: "9999"
+  minToLeaveAfterAdv: 15
+  name: ""
+  parkingLotType: "1"
+  realFree: true
+  unitPrice: "5"
+
+# 数值期望（由生成侧拟定；表2 用例的金额断言据此计算）
+billing:
+  unit_price: 5           # 元/小时
+  free_minutes: 0
+  main_hours: 2           # 主+子场用例·主场时长
+  sub_hours: 3            # 主+子场用例·子场时长
+  solo_hours: 4           # 纯主场用例·时长
+  coupon_money: 5         # 金额券面额（**说明性**；券的实际取值唯一来源是 coupon_expectation）
+
+# ---------------------------------------------------------------------------
+# 4. 车场分组（按 carInConfig 配置变体，最小集）
+#    match：条件列取值（key → 是否「是」）。未列出的 key 一律取否。
+#    14 个车场实体 = PO（1，基础设施）+ P1–P6（6）+ S1（1）+ PS1/PS2/PS3（6）
+#    `matchable: false` 的组不参与规则匹配（仅作数据宿主，避免与 P1 撞车）。
+# ---------------------------------------------------------------------------
+park_groups:
+  - id: PO
+    desc: 上游场（「其他车场白名单/包月车」用例的记录宿主）
+    matchable: false
+    parks:
+      - role: main
+        match: {}
+        need_pay: false
+    # 无规则落点：表1-11/22 的记录建在 PO，测试的是 P4（otherPark*Access=是 + 指向 PO）
+    covers: []
+
+  - id: P1
+    desc: 主场·临停关·一人多车关·免费
+    parks:
+      - role: main
+        match: {}                       # 全否
+        need_pay: false
+    covers: [表1-01, 表1-07, 表1-10, 表1-12, 表1-18, 表1-21]
+
+  - id: P2
+    desc: 主场·临停开·免费
+    parks:
+      - role: main
+        match: {tempCarIn: true}
+        need_pay: false
+    covers: [表1-06, 表1-09, 表1-17, 表1-20, 表2-01]
+
+  - id: P3
+    desc: 主场·支持一人多车白名单
+    parks:
+      - role: main
+        match: {carWhiteOtherIsCasual: true}
+        need_pay: false
+    covers: [表1-08, 表1-19]
+
+  - id: P4
+    desc: 主场·其他车场白名单准入开
+    parks:
+      - role: main
+        match: {otherParkWhiteAccess: true}
+        need_pay: false
+        # 准入白名单由哪个上游车场提供 → 渲染时把该场 parkCode 写进
+        # carInConfig.otherParkWhiteAccessParks（逗号分隔；多场时逐个追加）
+        other_parks: {otherParkWhiteAccessParks: [PO]}
+    covers: [表1-11, 表1-22]
+
+  - id: P5
+    desc: 主场·特殊车牌放行
+    parks:
+      - role: main
+        match: {specialCarEnable: true}
+        need_pay: false
+    covers: [表1-24]
+
+  - id: P6
+    desc: 主场·收费（表2 纯主场）
+    parks:
+      - role: main
+        match: {tempCarIn: true}
+        need_pay: true
+    # 表2-02/03/04/07/08/09 为暂留（优惠券依赖），但分组落点已定，一并登记
+    covers: [表2-02, 表2-03, 表2-04, 表2-05, 表2-06, 表2-07, 表2-08, 表2-09]
+
+  - id: S1
+    desc: 子场（挂 P1 主场）
+    parks:
+      - role: sub
+        parent: P1
+        match: {}
+        need_pay: false
+    covers: [表1-02, 表1-13]
+
+  - id: PS1
+    desc: 主+子·临停关
+    parks:
+      - role: main
+        match: {}
+        need_pay: false
+      - role: sub
+        match: {}
+        need_pay: false
+    covers: [表1-03, 表1-04, 表1-14, 表1-15, 表1-23]
+
+  - id: PS2
+    desc: 主+子·临停开
+    parks:
+      - role: main
+        match: {tempCarIn: true}
+        need_pay: false
+      - role: sub
+        match: {tempCarIn: true}
+        need_pay: false
+    covers: [表1-05, 表1-16]
+
+  - id: PS3
+    desc: 主+子·均收费（表2 主+子）
+    parks:
+      - role: main
+        match: {tempCarIn: true}
+        need_pay: true
+      - role: sub
+        match: {tempCarIn: true}
+        need_pay: true
+    # 表2-12/13 为暂留（优惠券依赖），分组落点已定
+    covers: [表2-10, 表2-11, 表2-12, 表2-13]
+
+# ---------------------------------------------------------------------------
+# 5a. 车辆记录配方（kind）—— 「怎么建 / 怎么回读 / 怎么删」
+#     <G> = 所属车场占位，<C> = 该车主键占位（渲染时换具体编码）
+#     作用域由 add 时的 parkCode 表达（逗号分隔多车场）
+# ---------------------------------------------------------------------------
+vehicle_kinds:
+  白名单:
+    cleanup: by_code                    # 独立记录：必须回读 code 再删（传车牌会假成功）
+    # 车场识别为白名单时 carTypeQuery 返回的 parkingType（api 文档：4白名单）
+    parking_type: "4"
+    add:
+      api: carWhiteBlack/add
+      # 逐字取自 setup_one_person_multi_car.yaml（一人多车实证）与
+      # setup_other_parking_whitelist_permit.yaml（单车实证）
+      body:
+        carNumber: "${random_plates(1)}"
+        isWhite: 1
+        multi: false
+        parkName: "${get_extract_data('<G>ParkName')}"
+        parkCode: "${get_extract_data('<G>ParkCode')}"
+        status: "3"
+      # 一人多车：同一记录带 subCarNumbers，主车牌 = carNumber，副车牌 = subCarNumbers[0]
+      multi:
+        multi: true
+        subCarNumbers: ["${random_plates(1)}"]
+        carOwnerName: 张三
+        carOwnerPhone: "13800138000"
+        # 有效期必须**覆盖** §9a 的时间线基准（base_date=2026-09-14）：mock 按
+        # 「记录有效期含访问时刻」判定类型，过期即不认账（实测 openGate=false /
+        # parkingType=null，见 MANIFEST H19 根因 B1）。工厂方法只有 now±偏移、
+        # 无 base_date 参数，注册表也认可「不支持的时间能力用固定字面量」
+        # → 用字面量，跨度取基准年 ±1。基准日变更时由
+        # tests/test_rule_table_yaml.py::TestRecordValidity 兜底报警。
+        enterStartDate: "2026-01-01"
+        enterEndDate: "2026-12-31"
+      input_extract: {<C>CarNumber: "$.json.carNumber"}
+      input_extract_multi: {<C>SubCarNumber: "$.json.subCarNumbers[0]"}
+    readback:
+      api: carWhiteBlack/getPage
+      body:
+        isWhite: 1
+        pageNum: 1
+        pageSize: 10
+        parkCode: "${get_extract_data('<G>ParkCode')}"
+        searchKey: "${get_extract_data('<C>CarNumber')}"
+      extract: {<C>WhiteCode: "$.data.list[0].code"}
+    # 多车场记录（主+子，如 表1-03）的专用回读增量。服务端把 parkCode 存成逗号复合串
+    # （`PS1M码,PS1S码`），而 getPage 的 parkCode 是**等值匹配** ⇒ 任何等值查询都命中
+    # 不了（**含它自己那个串**），`''` 与不传逐字等价。
+    # 实证（2026-09-11，`有作用/PhaseA/_probe_whitelist_readback_shape.py`）：
+    #   带复合串 total=0 / 带单码 total=0 / **不传 parkCode total=1**，code 对得上。
+    # searchKey 是**模糊**匹配（carNumber 字段被服务端忽略），故 extract 再用 filter
+    # 精确到本车，避免命中别的记录（`jsonpath_ng.ext` 支持 `[?()]`，框架已加固）。
+    # ⚠️ 对照：`mock/monthlyCar/query` 的 parkCode 是正常的（传对码→1 条），别一起删。
+    readback_multi:
+      omit_body: [parkCode]
+      extract: {<C>WhiteCode: "$.data.list[?(@.carNumber=='${get_extract_data('<C>CarNumber')}')].code"}
+    delete:
+      api: carWhiteBlack/delete
+      body: ["${get_extract_data('<C>WhiteCode')}"]
+
+  包月车:
+    cleanup: by_code
+    parking_type: "1"                    # api 文档：1包月车
+    add:
+      api: mock/monthlyCar/add
+      body:
+        carNumber: "${random_plates(1)}"
+        parkCode: "${get_extract_data('<G>ParkCode')}"
+        # 同白名单 multi：有效期必须覆盖 §9a 的时间线基准（base_date=2026-09-14），
+        # 否则包月车被当临停（实测 parkingType=null、openGate=false，MANIFEST H19 根因 B1）。
+        startTime: "2026-01-01"
+        endTime: "2026-12-31"
+        mainCount: 1
+      # 一人多车写法逐字取自 VehicleAccesstest_002/addMonthlyCars_002.yaml
+      multi:
+        mainCount: 2
+        subCarNumbers: ["${random_plates(1)}"]
+      input_extract: {<C>CarNumber: "$.json.carNumber"}
+      input_extract_multi: {<C>SubCarNumber: "$.json.subCarNumbers[0]"}
+      # mock 面无 retCode 外壳 → 用 constants.validation_mock_ok
+    readback:
+      api: mock/monthlyCar/query
+      body:
+        carNumber: "${get_extract_data('<C>CarNumber')}"
+        parkCode: "${get_extract_data('<G>ParkCode')}"
+      # ⚠️ 响应根为**裸数组**（2026-09-11 实测），不是 {retCode,msg,data}
+      extract: {<C>MonthCode: "$.[0].code"}
+    delete:
+      api: mock/monthlyCar/delete
+      # ⚠️ 必须传真实 code；传车牌返 success 但不删（假成功，实测）
+      body: {codes: ["${get_extract_data('<C>MonthCode')}"]}
+
+  特殊车牌:
+    cleanup: with_park                   # 随车场配置写入，随车场删除，无独立记录
+    # 用户口径（2026-09-11）：「按临停，出场不收费」——
+    # 放行只改变准入门槛，在场类型仍按临停（2）；费用侧由 fee_expectation 断言为 0。
+    parking_type: "2"
+    add:
+      api: parkingPark/saveOrUpdate
+      # 实测字段（api_defs：parkingPark/saveOrUpdate 的**顶层**数组，
+      # specialCarEnable=true 时必填）—— 不在 parkingPark 对象内
+      body_field: specialAccessConfigList
+      # 形状实证 test_enable_special_plate_release_positive/test_data.yaml：
+      # {carNumber, enable: <bool>, parkCode, parkName}（enable 是布尔，不是 1）
+      # parkCode/parkName 留空串 = 与同一 payload 里 parkingPark.parkCode 的
+      # 新建占位一致（服务端生成后回写）；该写法未单独验证（H10）
+      entry: {carNumber: 我A12345, enable: true, parkCode: "", parkName: ""}
+    readback: null
+    delete: null
+
+  临停车:
+    cleanup: none                        # 无记录即临停车
+    parking_type: "2"                    # api 文档：2临停车
+    add: null                              # 无任何类型记录即临停车
+    readback: null
+    delete: null
+
+# ---------------------------------------------------------------------------
+# 5b. xlsx「条件（车辆类型）」→ 车辆记录列表（**按顺序匹配，先匹配先得**）
+#     产出 {kind, scope, car, sub_of}：
+#       kind  : vehicle_kinds 的键
+#       scope : main | sub | both | other   （other = 建在 PO 上游场）
+#       car   : car_a | car_b               （car_b 必须带 sub_of: car_a）
+#       sub_of: 非空表示该车牌是 car_a 那条记录的**副车牌**，通过 subCarNumbers
+#               随同一次 add 请求写入，不单独建记录（一人多车实证）。
+#     实证依据：
+#       2026-09-11 读 setup_one_person_multi_car.yaml + VehicleAccesstest_002/
+#       addMonthlyCars_002.yaml：一人多车 = 一条记录 + subCarNumbers 数组，
+#       input_extract 同时取 $.json.carNumber(A) 与 $.json.subCarNumbers[0](B)。
+#       车场侧是否放行副车牌由 carInConfig.carWhiteOtherIsCasual 决定，
+#       **不是**靠「有没有记录」——故此处不再按 flag 门控产不产 car_b。
+# ---------------------------------------------------------------------------
+vehicle_recipes:
+  # 混合行必须排最前（否则被「白名单」规则先吃掉）
+  # 注意 xlsx 原文是「主场白名单、子场包月」——此处没有「车」字，
+  # 故匹配词用「包月」而非「包月车」（其余行的「包月车」同样含「包月」）。
+  - id: 混合_主场白名单_子场包月
+    all_of: [白名单, 包月]
+    records:
+      - {kind: 白名单, scope: main, car: car_a}
+      - {kind: 包月车, scope: sub, car: car_a}
+
+  - id: 一人多车
+    all_of: [一人多车]
+    kind_from: [白名单, 包月车]
+    records:
+      - {scope: main, car: car_a}
+      - {scope: main, car: car_b, sub_of: car_a}
+
+  - id: 其他车场
+    all_of: [其他车场]
+    kind_from: [白名单, 包月车]
+    records:
+      - {scope: other, car: car_a}
+
+  - id: 双场_子场主场
+    all_of: ["（子场、主场）"]
+    kind_from: [白名单, 包月车]
+    records:
+      - {scope: both, car: car_a}
+
+  - id: 仅主场
+    all_of: ["（仅主场）"]
+    kind_from: [白名单, 包月车]
+    records:
+      - {scope: main, car: car_a}
+
+  - id: 一般
+    any_of: [白名单, 包月车, 特殊车牌]
+    kind_from: [白名单, 包月车, 特殊车牌]
+    records:
+      - {scope: from_struct, car: car_a}
+
+  # 全部落空 → 临停车（无记录）。例：车辆类型列为空的行
+  - id: 临停车
+    any_of: []
+    records: []
+
+# ---------------------------------------------------------------------------
+# 6. 出入场动作 token → 触发接口 + 断言字段
+#    来源：表1 `条件（出入场动作）`(col9) / 表2 同名列(col6)，按 '-' 切分
+#    实际取值域（2026-09-11 从 xlsx 导出）：
+#      入主 / 出主 / 入子 / 出子
+#      A入主 / B入主 / A出主 / B出主      ← A/B = 一人多车的两辆车
+#      主场内，变更为临停车
+#      出主（主场未产生费用）              ← 括注是限定语，不是步骤
+# ---------------------------------------------------------------------------
+action_parse:
+  step_sep: "-"
+  # A/B 前缀 → 车辆槽位（一人多车用例建两条记录，其余用例只有 A）
+  car_prefixes: {A: car_a, B: car_b}
+  # 括注限定语（不产生步骤，作为该步骤的标注保留）
+  qualifiers: ["（主场未产生费用）"]
+  # 「不适用」哨兵：原表用 `\` 表示该格不适用，需丢弃而非当作未知 token
+  not_applicable: ["\\"]
+
+action_tokens:
+  - token: 入主
+    aliases: [入主]                        # 匹配时先剥离 A/B 前缀
+    api: mock/access/enter
+    device: "<G>MainInDeviceCode"
+    assert_field: openGate
+  - token: 出主
+    aliases: [出主]
+    api: mock/access/exit
+    device: "<G>MainOutDeviceCode"
+    assert_field: openGate
+  - token: 入子
+    aliases: [入子]
+    api: mock/access/enter
+    device: "<G>SubInDeviceCode"
+    assert_field: openGate
+  - token: 出子
+    aliases: [出子]
+    api: mock/access/exit
+    device: "<G>SubOutDeviceCode"
+    assert_field: openGate
+  - token: 变更临停
+    aliases: [变更为临停车, 主场内，变更为临停车]
+    api: delete-vehicle                    # 特殊：删除该车类型记录 → 降级为临停
+    device: null
+    assert_field: null
+
+# ---------------------------------------------------------------------------
+# 7. 动作列 → 断言规格
+#    表1 R2 有 5 个动作列（col10–col14），表2 R33 有 2 个（col8–col9）——共 7 个。
+#    `column` = xlsx 表头去掉「动作（…）」外壳后的文本。
+# ---------------------------------------------------------------------------
+assert_columns:
+  - column: 允许入场-主场
+    table: "表1"
+    kind: gate
+    scope: main_in
+    api: mock/access/enter
+    field: openGate
+  - column: 允许出场-主场
+    table: "表1"
+    kind: gate
+    scope: main_out
+    api: mock/access/exit
+    field: openGate
+  - column: 允许入场-子场
+    table: "表1"
+    kind: gate
+    scope: sub_in
+    api: mock/access/enter
+    field: openGate
+  - column: 允许出场-子场
+    table: "表1"
+    kind: gate
+    scope: sub_out
+    api: mock/access/exit
+    field: openGate
+  - column: 按临停计费
+    table: "表1"
+    kind: parking_type
+    api: mock/carTypeQuery
+    field: parkingType
+    body: {carNumber: "${...}", parkCode: "${...}", startTime: "${...}"}
+    # 取值 → 待断言项 [{car, scope, expect}]：
+    #   expect: kind = 该车自身类型（见 vehicle_kinds.parking_type）/ temp = 临停(2)
+    #   scope 省略 = 挂在该车**本次入场所在**的那片场（主/子按动作 token 定）
+    # 语义依据（xlsx 第 14 列逐字）：表1-06/07/17/18 动作含「变更为临停车」却同样
+    # 写 `否` → 该列评的是**入场时**的类型，不是变更后的，故断言点紧跟入场。
+    value_map:
+      "是": [{car: car_a, expect: temp}]
+      "否": [{car: car_a, expect: kind}]
+      "主场否、子场是":
+        - {car: car_a, scope: main, expect: kind}
+        - {car: car_a, scope: sub, expect: temp}
+      "A、B否": [{car: car_a, expect: kind}, {car: car_b, expect: kind}]
+      "A、B是": [{car: car_a, expect: temp}, {car: car_b, expect: temp}]
+      "A否、B是": [{car: car_a, expect: kind}, {car: car_b, expect: temp}]
+      "A是、B否": [{car: car_a, expect: temp}, {car: car_b, expect: kind}]
+  - column: 是否缴费
+    table: "表2"
+    kind: paid
+    api: mock/bill/latest
+    field: paid
+    # `value_map` 不是期望值来源：期望值 = **是否真的执行了缴费动作**
+    #   （内核 `_pay_action_key`，取值以条件列「是否提前缴费」优先 —— 与 `pay_actions` 同源）。
+    # 理由：表2-06/07/08/09 本列写「否」而条件列「是否提前缴费」写「是」，两列打架；
+    #   缴了费 `paid` 必为 true（用户 2026-09-15 口径，见内核 `_paid_step`）。
+    # 保留本表仅作**判定表取值域**的记录。
+    value_map: {是: true, 否: false}
+  - column: 缴费金额
+    table: "表2"
+    kind: fee
+    api: mock/bill/unpaid
+    field: fee
+    # 取值域是**文字**而非数字：`否` = 不产生费用（不额外断言）；
+    # `应缴金额` 系列 = 断言待支付金额等于 fee_expectation 推得的值
+    value_map: {"否": null, "应缴金额": "expect",
+                "应缴金额（主+子）": "expect", "应缴金额（子场费用）": "expect"}
+
+# ---------------------------------------------------------------------------
+# 8. 断言值文本 → 期望（xlsx 动作列的取值域）
+#    gate*(允许入场/出场-主场/子场)：布尔，直接进 `eq: {$.openGate: <bool>}`
+#    A/B 形态：一人多车用例同一格覆盖两辆车的同名动作，取值按位置对应
+#      「A、B是」→ A 车该动作 true、B 车该动作 true
+# ---------------------------------------------------------------------------
+assert_value_map:
+  "是": true
+  "否": false
+  "A、B是": [true, true]
+  "A是、B否": [true, false]
+  "A、B否": [false, false]
+  "A否、B是": [false, true]
+  "不适用": null
+  "\\": null
+
+# ---------------------------------------------------------------------------
+# 8a. 表2 断言（数值/布尔）——全部逐字对实证：
+#     `mock/bill/latest`  → - eq: {$.payableAmount: <n>} / - eq: {$.paid: <bool>}
+#       实证 test_non_charge_parking_exit_no_fee_positive/test_data.yaml
+#     `mock/bill/unpaid`  → - eq: {fee: <n>}
+#       实证 VehicleAccesstest_002/carBPrepayExit_002.yaml（eq 用**数字**，不是字符串）
+# ---------------------------------------------------------------------------
+assert_endpoints:
+  bill_latest: mock/bill/latest
+  bill_unpaid: mock/bill/unpaid
+  car_type_query: mock/carTypeQuery
+
+# ---------------------------------------------------------------------------
+# 8a. 缴费动作（判定表：条件「是否提前缴费」/ 动作「是否缴费」）
+#     流程一律 = **先查询缴费金额**（bill/unpaid，回读 `unpaidFee`）→ 缴费 → 出场。
+#     `prepay`（条件「是否提前缴费」=是）优先于 `when_leave`（动作「是否缴费」=是）；
+#     两者都不是 → 不缴费（表2-01/表2-06 之外的"不缴费"情形）。
+#     body 里的占位符由内核展开：
+#       <C>CarNumber → `${get_extract_data('<车牌键>')}`
+#       <D>DeviceCode→ `${get_extract_data('<出场设备键>')}`
+#       <F>UnpaidFee → `${get_extract_data('unpaidFee')}`（上一步 bill/unpaid 回读）
+#       <T>Time      → 本次出场的时间字面量
+#     实测（`有作用/PhaseA/_probe_pay_semantics.py`）：两接口均可用，返 `{success:true}`，
+#     之后出场转 `openGate:true`、`bill/latest.paid` 转 `true`。
+# ---------------------------------------------------------------------------
+pay_actions:
+  prepay:                              # 提前缴费：mock/pay/simulate
+    api: mock/pay/simulate
+    name: 提前缴费模拟
+    body: {carNumber: "${get_extract_data('<C>CarNumber')}",
+           fee: "${get_extract_data('<F>UnpaidFee')}",
+           payTime: "<T>Time",
+           deviceCode: "${get_extract_data('<D>DeviceCode')}"}
+  when_leave:                          # 出场缴费：mock/payWhenLeave/simulate
+    api: mock/payWhenLeave/simulate
+    name: 出场缴费模拟
+    body: {carNumber: "${get_extract_data('<C>CarNumber')}",
+           fee: "${get_extract_data('<F>UnpaidFee')}",
+           payTime: "<T>Time",
+           deviceCode: "${get_extract_data('<D>DeviceCode')}"}
+
+# ---------------------------------------------------------------------------
+# 8b. 券核销（判定表：条件「是否使用优惠券-金额」/「是否使用优惠券-时长」）
+#     端点为 **核销类**：`/mock/addCouponAndUse` —— 填写即「创建 + 核销」一步到位，
+#     无需先调发行接口 `/parkingCouponIssue/add`（用户 2026-09-11 口径）。
+#     文档：`D:\0-导出文件\0907-测试接口api(2).md` 七章「优惠券添加及使用」。
+#     响应 `{success, msg}`，无 retCode 外壳 → 断言用 `_ok_mock()`。
+#     ⚠️ 旧版文档该条 Path 被截断成 `/mock`；工具侧订正为 `mock/addCouponAndUse`。
+#     占位符（与 pay_actions 同风格，由内核展开）：
+#       <K>CouponType → 金额 / 时长（取 coupon_expectation[].type）
+#       <D>Data       → 面额（元）或时长（分钟），取 coupon_expectation[].data，**写成字符串**
+#       <C>CarNumber  → `${get_extract_data('<车牌键>')}`
+#       <T>Time       → 本券的 handleTime（= 该次出场的时间字面量，须落在在场时间内）
+# ---------------------------------------------------------------------------
+coupon_actions:
+  api: mock/addCouponAndUse
+  name: 优惠券添加及使用
+  body: {couponType: <K>CouponType,
+         carNumber: "${get_extract_data('<C>CarNumber')}",
+         data: "<D>Data",
+         handleTime: "<T>Time"}
+
+# ---------------------------------------------------------------------------
+# 8c. 逐例券配置（**券参数的唯一来源**）：case_id → [{type, data}, …]
+#     * 列表：**金额券在前、时长券在后**（与 xlsx 第 4 列先于第 5 列一致）；
+#       双券（表2-04/09）即两条 → 内核发两次核销请求。
+#     * 数值由判定表第 9 列公式反推（单价 5 元/h，见 billing；行程时长见 timeline）：
+#         表2-02 金额  5    → 20-5            = 15
+#         表2-03 时长 240   → (240-240)/60×5  =  0   ← 场景①「正好可抵消」
+#         表2-04 金额5+时长60 → (240-60)/60×5-5 = 10
+#         表2-07 金额  5    → 20-5            = 15
+#         表2-08 时长 300   → (240-300) 归零   =  0   ← 场景②「超出停车时间」
+#         表2-09 金额5+时长60 → 15-5          = 10
+#         表2-12 金额  5    → 25-5            = 20
+#         表2-13 时长 240   → 优先抵主场：主120抵满+子120/180 → 子剩60min×5 = 5
+#                             ← 场景③「主+子：少于总时长、多于任意单场」
+#     ⚠️ 双券的**时长券 60min** 为保留「两种券都真实生效」而取的数：若取 240 会把应缴
+#        抵成 0 再减 5 → 负值无意义。此数未获用户逐字确认，改动只影响本表两行。
+#     ⚠️ 「优先抵扣主场时间」是否真在 mock 侧生效**未经实证**（表2-13 的 5 元依赖它）。
+# ---------------------------------------------------------------------------
+coupon_expectation:
+  表2-02: [{type: 金额, data: 5}]
+  表2-03: [{type: 时长, data: 240}]
+  表2-04: [{type: 金额, data: 5}, {type: 时长, data: 60}]
+  表2-07: [{type: 金额, data: 5}]
+  表2-08: [{type: 时长, data: 300}]
+  表2-09: [{type: 金额, data: 5}, {type: 时长, data: 60}]
+  表2-12: [{type: 金额, data: 5}]
+  表2-13: [{type: 时长, data: 240}]
+
+# ---------------------------------------------------------------------------
+# 9. 每用例的金额期望（**金额断言的唯一来源**）
+#    `不产生费用` → bill/latest + eq: {$.payableAmount: 0}
+#    数字         → bill/unpaid + eq: {fee: <n>}
+#    金额 = 单价 × 时长（见 billing 与 timeline），主+子分场累加。
+#    ⚠️ 表2 的数值由推导得出、未经实证（H10），按判障协议用实跑校准。
+# ---------------------------------------------------------------------------
+fee_expectation:
+  表2-01: 不产生费用
+  # —— 券用例（2026-09-11 解禁）：数值 = 判定表第 9 列公式，券参数见 coupon_expectation
+  表2-02: 15          # 应缴金额-优惠金额 = 20-5（金额券 5）
+  表2-03: 0           # (240-240)/60×5 = 0（时长券 240，正好可抵消）
+  表2-04: 10          # (240-60)/60×5-5 = 10（金额券 5 + 时长券 60）
+  表2-05: 20          # 纯主场 4h × 5
+  表2-06: 20          # 纯主场 4h × 5
+  表2-07: 15          # 20-5（金额券 5，提前缴费）
+  表2-08: 0           # (240-300)→抵扣归零（时长券 300，超出停车时间）
+  表2-09: 10          # 15-5（金额券 5 + 时长券 60，提前缴费）
+  表2-10: 25          # 主 2h×5=10 + 子 3h×5=15
+  表2-11: 15          # 主 0 + 子 3h×5=15
+  表2-12: 20          # 25-5（主+子，金额券 5）
+  表2-13: 5           # 优先抵主场：主120抵满 + 子120/180 → 子剩60min×5（时长券 240）
+  # 表1-24 特殊车牌：用户口径「出场不收费」→ 出场后待支付为 0
+  表1-24: 0
+
+# ---------------------------------------------------------------------------
+# 9a. 时间构造（表2 金额断言的根据）
+#     `mock/access/enter|exit` 各带 `time`，**两者之差 = 实际停车时长**。
+#     为什么用显式字面量而不是 `get_offset_time` 助手：
+#       助手在**每步执行时**求值，入场与出场步之间差几秒 → 「4 小时差」实际是
+#       4h+δ；遇向上取整的计费会多算一个计费单位。字面量差值精确。
+#     `data_factory/methods.yaml` 明确认可「注册表不支持的时间能力用合理固定字面量」。
+#     框架时间格式码 hms = "2026-07-02 14:30:00"（从现存用例实证）。
+# ---------------------------------------------------------------------------
+time_format:
+  code: hms
+  base_date: "2026-09-14"
+  base_hms: "10:00:00"
+
+# 逐例时间线：**按位置对应** —— 第 i 个时刻 = 该用例第 i 个动作。
+#   动作顺序 = 判定表 c9「条件（出入场动作）」的顺序（`case.actions` 即由它解析），
+#   所以位置本身就是归属，不需要 token / 车辆做键。
+#   个数必须等于动作数（内核 `_times_for` 不等即报错，不补齐不截断）；
+#   日期必须等于 time_format.base_date（理由见 `_times_for` docstring，MANIFEST H19-B1）。
+#   差值即停车时长，表2 的金额期望由它推出。
+# **表1 也要给真实在场时长**（不得入场==出场）：零时长会让「出场」这一步失去判别力。
+#   2026-09-15 之前 17 条表1 用例全是入场==出场（用户提出后补齐）。
+#   表1 的数值不参与金额断言，取的是表2 已验证过的两条时长剖面，不新造数值。
+# 表2 用例的时长口径（与 fee_expectation 自洽）：
+#   表2-05/06 纯主场 4h        → 10:00 入 → 14:00 出           = 4h × 5 = 20
+#   表2-10 主 2h + 子 3h       → 10:00 入主 → 12:00 入子 → 15:00 出子/出主 = 2h + 3h = 25
+#   表2-11 主 0h + 子 3h       → 10:00 入主/入子 → 13:00 出子/出主       = 3h = 15
+#   表1-24 特殊车牌「出场不收费」→ 同样 4h：零时长下 fee=0 是恒真的空断言，
+#          必须给出真实在场时长，0 才有判别力
+timeline:
+  # --- 入主 → 出主：主场 4h（同 表2-05）---
+  表1-01: ['2026-09-14 10:00:00', '2026-09-14 14:00:00']
+  表1-11: ['2026-09-14 10:00:00', '2026-09-14 14:00:00']
+  表1-12: ['2026-09-14 10:00:00', '2026-09-14 14:00:00']
+  表1-22: ['2026-09-14 10:00:00', '2026-09-14 14:00:00']
+  表1-24: ['2026-09-14 10:00:00', '2026-09-14 14:00:00']
+
+  # --- 入子 → 出子：子场单程，同样 4h ---
+  表1-02: ['2026-09-14 10:00:00', '2026-09-14 14:00:00']
+  表1-13: ['2026-09-14 10:00:00', '2026-09-14 14:00:00']
+
+  # --- 入主 → 入子 → 出子 → 出主：主 2h + 子 3h（同 表2-10）---
+  表1-03: ['2026-09-14 10:00:00', '2026-09-14 12:00:00',
+           '2026-09-14 15:00:00', '2026-09-14 15:00:00']
+  表1-05: ['2026-09-14 10:00:00', '2026-09-14 12:00:00',
+           '2026-09-14 15:00:00', '2026-09-14 15:00:00']
+  表1-14: ['2026-09-14 10:00:00', '2026-09-14 12:00:00',
+           '2026-09-14 15:00:00', '2026-09-14 15:00:00']
+  表1-16: ['2026-09-14 10:00:00', '2026-09-14 12:00:00',
+           '2026-09-14 15:00:00', '2026-09-14 15:00:00']
+  表1-23: ['2026-09-14 10:00:00', '2026-09-14 12:00:00',
+           '2026-09-14 15:00:00', '2026-09-14 15:00:00']
+
+  # --- 入主 → 入子(被拒) → 出主：子场临停关闭，车实际只在主场停 4h。
+  #     12:00 是「中途去子场被拒」的**尝试**时刻，不是在场起点；入场仍是 10:00。
+  表1-04: ['2026-09-14 10:00:00', '2026-09-14 12:00:00', '2026-09-14 14:00:00']
+  表1-15: ['2026-09-14 10:00:00', '2026-09-14 12:00:00', '2026-09-14 14:00:00']
+
+  # --- 入主 → 变更临停 → 出主：主停 4h，12:00 给「中途」，让「中途变更」成立。
+  #     这步只删记录、不产生请求时刻，但仍占一个位置（逐位对齐 c9 的动作序列）。
+  表1-06: ['2026-09-14 10:00:00', '2026-09-14 12:00:00', '2026-09-14 14:00:00']
+  表1-07: ['2026-09-14 10:00:00', '2026-09-14 12:00:00', '2026-09-14 14:00:00']
+  表1-17: ['2026-09-14 10:00:00', '2026-09-14 12:00:00', '2026-09-14 14:00:00']
+  表1-18: ['2026-09-14 10:00:00', '2026-09-14 12:00:00', '2026-09-14 14:00:00']
+
+  # --- 一人多车 6 例：判定表 c9 写死了**动作顺序**
+  #   表1-08/09/19/20 → `A入主-B入主-A出主-B出主`
+  #   表1-10/21       → `A入主-B入主`（B 不准入，没有出场）
+  # A/B 各停 4h、B 晚 A 1h 入场 ⇒ B 的出场也晚 1h。两车**共用同一个 token**
+  # （都是「入主」/「出主」），所以位置对应在这里是必需的：按键取时刻会把
+  # 两车压成同一秒，「后入场」（用户口径「包月一人多车，后入场标识为临停」）
+  # 在产物里就不存在了 —— 2026-09-15 之前的产物正是如此。
+  表1-08: ['2026-09-14 10:00:00', '2026-09-14 11:00:00',
+           '2026-09-14 14:00:00', '2026-09-14 15:00:00']
+  表1-09: ['2026-09-14 10:00:00', '2026-09-14 11:00:00',
+           '2026-09-14 14:00:00', '2026-09-14 15:00:00']
+  表1-10: ['2026-09-14 10:00:00', '2026-09-14 11:00:00']
+  表1-19: ['2026-09-14 10:00:00', '2026-09-14 11:00:00',
+           '2026-09-14 14:00:00', '2026-09-14 15:00:00']
+  表1-20: ['2026-09-14 10:00:00', '2026-09-14 11:00:00',
+           '2026-09-14 14:00:00', '2026-09-14 15:00:00']
+  表1-21: ['2026-09-14 10:00:00', '2026-09-14 11:00:00']
+
+  # --- 券用例·主场 8 条：同 表2-05 的 4h（券抵扣后的金额见 fee_expectation）---
+  表2-02: ['2026-09-14 10:00:00', '2026-09-14 14:00:00']
+  表2-03: ['2026-09-14 10:00:00', '2026-09-14 14:00:00']
+  表2-04: ['2026-09-14 10:00:00', '2026-09-14 14:00:00']
+  表2-05: ['2026-09-14 10:00:00', '2026-09-14 14:00:00']
+  表2-06: ['2026-09-14 10:00:00', '2026-09-14 14:00:00']
+  表2-07: ['2026-09-14 10:00:00', '2026-09-14 14:00:00']
+  表2-08: ['2026-09-14 10:00:00', '2026-09-14 14:00:00']
+  表2-09: ['2026-09-14 10:00:00', '2026-09-14 14:00:00']
+
+  # --- 表2 主+子：主 2h + 子 3h（表2-13 的 240min 券落在
+  # 「>子场180 且 >主场120 且 <总300」区间内，故「不能抵扣全部时长」成立）---
+  表2-10: ['2026-09-14 10:00:00', '2026-09-14 12:00:00',
+           '2026-09-14 15:00:00', '2026-09-14 15:00:00']
+  表2-12: ['2026-09-14 10:00:00', '2026-09-14 12:00:00',
+           '2026-09-14 15:00:00', '2026-09-14 15:00:00']
+  表2-13: ['2026-09-14 10:00:00', '2026-09-14 12:00:00',
+           '2026-09-14 15:00:00', '2026-09-14 15:00:00']
+  # 表2-11：主 0h + 子 3h（「主场未产生费用」）
+  表2-11: ['2026-09-14 10:00:00', '2026-09-14 10:00:00',
+           '2026-09-14 13:00:00', '2026-09-14 13:00:00']
+
+  # 表2-01（免费车场·不缴费）：判定表 F34 原文曾是 `\`（不适用）⇒ 该例当时**没有动作**，
+  # 也就不能有时间线（「有动作 ⟺ 有时间线」，内核强制）。用户 2026-09-15 已把 F34 补为
+  # `入主-出主`（源表 mtime 2026-09-15 15:25:38），动作齐了，时间线随之落地：4h，同 表2-05；
+  # 免费车场无费用，只有 `paid:false` 与 `payableAmount:0` 两条断言，且都落在出场之后。
+  表2-01: ['2026-09-14 10:00:00', '2026-09-14 14:00:00']
+
+# ---------------------------------------------------------------------------
+# 10. 命名（Phase C 的 feature_en / story_en / title_en）
+#     Phase C 的 `_translate_to_en` 会先读 <excel目录>/translation_cache.json；
+#     缓存命中即**不调 LLM**。这里给出的英文名会被写成该缓存 → 命名完全确定。
+#     feature_en 决定目录名与 `test_<feature_en>.py`；
+#     title_en 决定 `test_<title_en>/test_data.yaml` 与函数名。
+# ---------------------------------------------------------------------------
+naming:
+  # xlsx Sheet1 的 @allure.feature / @allure.story 列取值
+  feature_cn: 判定表驱动-停车类型与费用计算
+  story_cn: 判定表驱动规则验证
+  epic_cn: 智慧停车
+  feature_en: ParkingRuleTable
+  story_en: ParkingRuleTable
+  # 每条用例的 @allure.title（中文）与 title_en（英文，用作目录/函数名）
+  titles:
+    表1-01: {cn: 白名单车辆·主场入场出场, en: t1_01_white_list_main_in_out}
+    表1-02: {cn: 白名单车辆·子场入场出场, en: t1_02_white_list_sub_in_out}
+    表1-03: {cn: 白名单车辆·主+子场全程通行, en: t1_03_white_list_main_sub_full_pass}
+    表1-04: {cn: 白名单仅主场·临停准入关闭·子场不准入, en: t1_04_white_list_main_only_temp_closed_sub_denied}
+    表1-05: {cn: 白名单仅主场·临停准入开启·子场按临停计费, en: t1_05_white_list_main_only_temp_open_sub_as_temp}
+    表1-06: {cn: 白名单·主场·临停准入开启·中途转临停, en: t1_06_white_list_main_temp_open_switch_to_temp}
+    表1-07: {cn: 白名单·主场·临停准入关闭·中途转临停, en: t1_07_white_list_main_temp_closed_switch_to_temp}
+    表1-08: {cn: 白名单一人多车·支持一人多车·两车同场, en: t1_08_white_list_multi_supported_two_cars}
+    表1-09: {cn: 白名单一人多车·临停准入开启·不支持一人多车·后车转临停, en: t1_09_white_list_multi_temp_open_unsupported_b_as_temp}
+    表1-10: {cn: 白名单一人多车·临停准入关闭·不支持·第二车不准入, en: t1_10_white_list_multi_temp_closed_second_denied}
+    表1-11: {cn: 白名单·其他车场·白名单准入开启, en: t1_11_white_list_other_park_access_open}
+    表1-12: {cn: 包月车·主场入场出场, en: t1_12_monthly_car_main_in_out}
+    表1-13: {cn: 包月车·子场入场出场, en: t1_13_monthly_car_sub_in_out}
+    表1-14: {cn: 包月车·主+子场全程通行, en: t1_14_monthly_car_main_sub_full_pass}
+    表1-15: {cn: 包月车仅主场·临停准入关闭·子场不准入, en: t1_15_monthly_car_main_only_temp_closed_sub_denied}
+    表1-16: {cn: 包月车仅主场·临停准入开启·子场按临停计费, en: t1_16_monthly_car_main_only_temp_open_sub_as_temp}
+    表1-17: {cn: 包月车·主场·临停准入开启·中途转临停, en: t1_17_monthly_car_main_temp_open_switch_to_temp}
+    表1-18: {cn: 包月车·主场·临停准入关闭·中途转临停, en: t1_18_monthly_car_main_temp_closed_switch_to_temp}
+    表1-19: {cn: 包月车一人多车·支持一人多车·两车同场, en: t1_19_monthly_car_multi_supported_two_cars}
+    表1-20: {cn: 包月车一人多车·临停准入开启·不支持一人多车·后车转临停, en: t1_20_monthly_car_multi_temp_open_unsupported_b_as_temp}
+    表1-21: {cn: 包月车一人多车·临停准入关闭·不支持·第二车不准入, en: t1_21_monthly_car_multi_temp_closed_second_denied}
+    表1-22: {cn: 包月车·其他车场·其他车场白名单准入开启, en: t1_22_monthly_car_other_park_access_open}
+    表1-23: {cn: 主场白名单、子场包月·混合类型全程通行, en: t1_23_mixed_main_white_sub_monthly}
+    表1-24: {cn: 特殊车牌·主场放行, en: t1_24_special_plate_main_release}
+    表2-01: {cn: 不收费车场·不缴费, en: t2_01_free_park_no_payment}
+    # 以下 8 条原为暂留（优惠券依赖），2026-09-11 `/mock/addCouponAndUse` 发布后解禁
+    表2-02: {cn: 收费·主场·使用金额优惠券, en: t2_02_paid_main_amount_coupon}
+    表2-03: {cn: 收费·主场·使用时长优惠券, en: t2_03_paid_main_duration_coupon}
+    表2-04: {cn: 收费·主场·金额券+时长券, en: t2_04_paid_main_amount_and_duration_coupon}
+    表2-05: {cn: 收费·主场·无优惠券, en: t2_05_paid_main_no_coupon}
+    表2-06: {cn: 收费·主场·无券·提前缴费, en: t2_06_paid_main_no_coupon_prepay}
+    表2-07: {cn: 收费·主场·金额券·提前缴费, en: t2_07_paid_main_amount_coupon_prepay}
+    表2-08: {cn: 收费·主场·时长券·提前缴费, en: t2_08_paid_main_duration_coupon_prepay}
+    表2-09: {cn: 收费·主场·金额券+时长券·提前缴费, en: t2_09_paid_main_amount_and_duration_coupon_prepay}
+    表2-10: {cn: 收费·主+子场·合并计费, en: t2_10_paid_main_sub_combined}
+    表2-11: {cn: 收费·主+子场·主场未产生费用, en: t2_11_paid_main_sub_main_no_fee}
+    表2-12: {cn: 收费·主+子场·金额券, en: t2_12_paid_main_sub_amount_coupon}
+    表2-13: {cn: 收费·主+子场·时长券·不能抵扣全部时长, en: t2_13_paid_main_sub_duration_coupon}

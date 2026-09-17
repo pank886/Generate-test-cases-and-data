@@ -16,6 +16,26 @@ logger = get_logger(__name__)
 class PyExportMixin:
     """按 feature/story 生成 .py 测试文件 + 断言关键词解析"""
 
+    # Sheet1「fixture等级」列的取值 = 「前置按编号逐个挂」（见 `_per_pre_fixtures`）。
+    # 生产侧（判定表支线，2026-09-17 归档）的字面量在
+    # `有作用/PhaseB/rule_tables/yaml_kernel.py` 的 `FIXTURE_LEVEL_PER_PRE` —— 取值一致。
+    # 原先的跨模块回归锁 test_rule_table_fixture_split.py::TestNaming::test_py_export_agrees
+    # 随支线归档消失；本侧常量值未变。
+    _PER_PRE_LEVEL = "逐前置"
+
+    # 「逐前置」模式才写入 .py 顶部的显示名助手。
+    # Allure 只认**原始函数**上的 `__allure_display_name__`：pytest.fixture 包装后
+    # 拿到的是 FixtureFunctionDefinition，在它上面赋值/传 name= 都不改显示名（实测）。
+    _DISPLAY_NAME_HELPER = (
+        "\n\n"
+        "def _fixture_with_display_name(name_zh):\n"
+        "    \"\"\"给前置 fixture 起中文显示名（须在 pytest.fixture 包装**之前**挂属性）。\"\"\"\n"
+        "    def deco(fn):\n"
+        "        fn.__allure_display_name__ = name_zh\n"
+        "        return pytest.fixture(scope=\"class\")(fn)\n"
+        "    return deco\n"
+    )
+
     # ==================== C6-1: 断言关键词解析 ====================
 
     class AssertionParseError(ValueError):
@@ -81,6 +101,94 @@ class PyExportMixin:
         rest = expected_text[m.end():].strip()
         return keyword, rest
 
+    @staticmethod
+    def _pre_id_slug(pre_id: str) -> str:
+        """前置编号 → 文件名/fixture 名里的 slug（`PRE-RT-G-P1` → `pre_rt_g_p1`）。
+
+        与生产侧（判定表支线，2026-09-17 归档）`有作用/PhaseB/rule_tables/yaml_kernel.py`
+        的 `pre_id_slug` **同一条规则**：那边用它在
+        `setup_data/` 下写 `setup_<slug>__<编号>.yaml`，这边用它拼 fixture 名与
+        `run_blocks` 的路径 —— 要改就两边一起改，否则运行时找不到文件。
+        """
+        return str(pre_id).lower().replace("-", "_")
+
+    def _per_pre_fixtures(self, class_slug: str, testcase_rel: str,
+                          cases: list[dict], pre_ids: set,
+                          pres: list[dict]) -> tuple[str, dict]:
+        """「逐前置」模式：每个前置编号一个 class 级 fixture（顺序 = Sheet2）。
+
+        为什么要按编号拆：Allure 的 fixture 容器 children = **所有引用它的用例**
+        （`_test_fixtures` 走 `fixturenames` 传递闭包，无开关可关），所以
+        「每条用例只显示自己的前置」只能靠每条用例引用不同的 fixture。
+
+        依赖走 **fixture 参数** —— pytest 据此保证「清场 → 建场 → 车辆记录」的顺序，
+        等价于原来靠块顺序保证的父子/他场关系；收尾 teardown 只挂在**依赖图的根**上
+        （它最先建立、最后收尾），这样全文件只有一处 teardown 调用 ——
+        导出侧靠这一点整段注释掉收尾，见判定表支线（2026-09-17 归档）
+        `有作用/PhaseB/rule_tables/phase_c_export.py` 的 `_comment_out_teardown`。
+
+        Returns:
+            (fixture_code, {用例编号: [fixture 名…]})，后者挂到方法上。
+        """
+        by_id = {p["id"]: p for p in pres}
+
+        def deps(pid: str) -> list[str]:
+            raw = str(by_id[pid].get("depends_on") or "")
+            return [d.strip() for d in raw.split(",") if d.strip()]
+
+        # 依赖闭包：**只被依赖、没有用例直接引用**的编号（如 PO 组 —— 只有 P4 依赖它）
+        # 也必须是真 fixture，否则 P4 的 fixture 参数指向不存在的名字 —— 用到它时
+        # pytest 报 fixture not found（ERROR，不是断言失败；`--collect-only` 不报，跑起来才炸）。
+        wanted, frontier = set(pre_ids), list(pre_ids)
+        while frontier:
+            pid = frontier.pop()
+            if pid not in by_id:
+                raise ValueError(
+                    f"逐前置模式：引用的前置编号在 Sheet2 里没有定义 ['{pid}']"
+                    f"（每个编号都得有一行，生成侧才知道它跑哪个 YAML、依赖谁）")
+            for d in deps(pid):
+                if d not in wanted:
+                    wanted.add(d)
+                    frontier.append(d)
+
+        ordered = [p["id"] for p in pres if p["id"] in wanted]
+        if not ordered:
+            raise ValueError("逐前置模式：没有收集到任何前置编号")
+
+        def fx(pid: str) -> str:
+            return f"setup_{class_slug}__{self._pre_id_slug(pid)}"
+
+        root = next((pid for pid in ordered if not deps(pid)), ordered[0])
+
+        blocks = []
+        for pid in ordered:
+            lines = [
+                "",
+                f"@_fixture_with_display_name({by_id[pid]['name']!r})",
+                f"def {fx(pid)}({', '.join(fx(d) for d in deps(pid))}):",
+                "    read = ReadYamlData()",
+                "    base = RequestsBase()",
+                "    base.run_blocks(",
+                f"        '{testcase_rel}/setup_data/{fx(pid)}.yaml')",
+                "    yield",
+            ]
+            if pid == root:
+                lines += [
+                    "    base.run_blocks(",
+                    f"        '{testcase_rel}/setup_data/teardown_{class_slug}.yaml')",
+                ]
+            blocks.append("\n".join(lines) + "\n")
+
+        reqs = {}
+        for r in cases:
+            cid = r.get("case_id")
+            if not cid:
+                continue
+            ids = [i.strip() for i in str(r.get("preconditions") or "").split(",")
+                   if i.strip()]
+            reqs[cid] = [fx(i) for i in ids]
+        return "\n".join(blocks), reqs
+
     def _generate_py_file(self, excel_path: str, project_name: str = None) -> dict:
         """Phase C V2: 按 feature 生成 .py 文件，fixture + parametrize 结构。
 
@@ -127,6 +235,7 @@ class PyExportMixin:
         total_modules = 0
         total_cases = 0
         py_files = []
+        needs_display_helper = False
 
         for feature_cn, stories in features.items():
             feature_en = feature_en_map.get(feature_cn, self._sanitize_en(self._pinyin_fallback(feature_cn)))
@@ -165,8 +274,14 @@ class PyExportMixin:
                                 pre_ids.add(pid)
 
                 # 生成 fixture
-                fixture_code = ""
-                if pre_ids:
+                per_pre = any((r.get("fixture_level") or "") == self._PER_PRE_LEVEL
+                              for r in cases)
+                method_reqs = {}
+                if per_pre:
+                    fixture_code, method_reqs = self._per_pre_fixtures(
+                        class_slug, testcase_rel, cases, pre_ids, shared_pres)
+                    needs_display_helper = True
+                elif pre_ids:
                     fixture_code = (
                         f'\n@pytest.fixture(scope="class")\n'
                         f'def setup_{class_slug}():\n'
@@ -198,16 +313,27 @@ class PyExportMixin:
                         func_en = "test_" + func_en
                     total_cases += 1
 
+                    # 逐前置模式：该用例自己那批前置挂到**方法**上（类上不挂）
+                    req = method_reqs.get(c.get("case_id")) or []
+                    method_marks = (
+                        f'    @pytest.mark.usefixtures({", ".join(repr(n) for n in req)})\n'
+                        if req else '')
+
                     func_lines.append(
                         f'    @allure.title(\'{title_cn}\')\n'
                         f'    @pytest.mark.order({i})\n'
+                        f'{method_marks}'
                         f'    def {func_en}(self):\n'
                         f'        RequestsBase().run_blocks(\n'
                         f'            \'{testcase_rel}/{func_en}/test_data.yaml\')\n'
                     )
 
                 # 组装 class
-                usefixtures = f'\n@pytest.mark.usefixtures("setup_{class_slug}")' if pre_ids else ''
+                if per_pre:
+                    usefixtures = ''
+                else:
+                    usefixtures = (f'\n@pytest.mark.usefixtures("setup_{class_slug}")'
+                                   if pre_ids else '')
                 class_code = (
                     f'{fixture_code}\n'
                     f'@allure.story(\'{story_cn}\')\n'
@@ -220,7 +346,9 @@ class PyExportMixin:
 
             # 写 .py 文件
             file_name = f"test_{feature_en}.py"
-            full_content = import_header + "\n" + "\n".join(class_blocks)
+            # 非「逐前置」模式不写显示名助手 → 内容与本改动之前逐字相同
+            helper = self._DISPLAY_NAME_HELPER if needs_display_helper else ""
+            full_content = import_header + helper + "\n" + "\n".join(class_blocks)
             py_path = os.path.join(feature_dir, file_name)
             tmp_path = py_path + ".tmp"
             try:

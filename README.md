@@ -13,8 +13,8 @@
 ```
 Phase A — Ingest（文档摄取与向量化）
 ─────────────────────────────────────────────────────
-产品文档 (Word/PDF/MD)
-  ├── 文本提取 + 图片保存（.docx）
+产品文档 (Word/PDF/Excel)
+  ├── 文本提取 + 图片保存（.docx）；Excel 全工作表行式文本化（.xlsx）
   ├── LLM 提取模块归属（DocModuleExtract）
   ├── LLM 提取业务术语表（GlossaryExtract）
   ├── 人工审核弹窗 → 确认/修改关联关系
@@ -200,26 +200,34 @@ python web_app.py
 
 访问 `http://localhost:8000`。终端输入 `q` 回车可停止服务。
 
-> CLI 交互模式（`main.py`）已废弃，统一使用 Web 界面。
-
 ---
 
 ## 使用指南
 
 ### 1. 上传文档
 
-支持四种类型：
+支持五种类型：
 - 📄 **PDF** — API 文档、产品说明
 - 📝 **Markdown** — 接口文档（上传后弹窗选择「代码提取 / LLM 提取」）
 - 📃 **Word (.docx)** — 产品需求文档（含图片自动提取）
+- 📊 **Excel (.xlsx)** — 产品字段清单 / 需求矩阵（全工作表文本化后入库）
 - 🎨 **Axure (.zip)** — HTML 原型演示包（自动解析页面树 + 交互流）
 
 上传后自动弹出模块审核弹窗，可修改模块名称和关联模块。
+
+「已入库文档」列表按类型（产品/接口/Axure）分页 + 惰性加载：进入页面仅取每类第一页，
+滚动到底自动翻页（或点「加载更多」）；类型筛选与文件名搜索（回车确认）由服务端执行，
+搜索/删除/上传后自动重取对应类型第一页。分页状态下每类可跨页全选：
+勾选 section 表头「全选」即选中当前筛选下的全部文档，「批量删除」一次服务端删除全部已选。
 
 ### 2. 管理模块
 
 在「模块管理」面板创建/重命名/删除/合并模块目录。
 重命名会自动级联更新所有绑定关系；非叶子节点禁止删除。
+
+选择模块后，右栏「可关联文件」按类型 Tab 展示未关联文档，同样分页 + 惰性加载（首次仅建 Tab
+取计数，切换类型才加载该类型页）；类型内「全选本页」作用于当前已加载页，勾选后「批量关联选中」。
+Axure 原型的页面块随条目展开展示。
 
 ### 3. 模块场景预分析（可选）
 
@@ -255,7 +263,6 @@ python web_app.py
 ```
 Generate-test-cases-and-data/
 ├── web_app.py                    # Web 入口（Uvicorn，输入 q 停止）
-├── main.py                       # CLI 入口（已废弃，提示使用 Web）
 ├── ingest_v2.py                  # Phase A 摄取兼容入口（re-export ingest/ 包 + CLI）
 ├── requirements.txt
 │
@@ -370,9 +377,6 @@ Generate-test-cases-and-data/
 │   ├── test_ollama_raw.py / test_orphan_detection.py / test_yaml_db_export.py
 │   ├── test_regression_*.py          # 回归（axure/extraction/generators/import_smoke/
 │   │                                 #   operations/post_validator/yapi_json_import）
-│   ├── tools/                        # 一次性检验辅助工具（批次校验/修复/诊断，不参与系统运行）
-│   │   ├── migrate_chroma_to_sqlite.py  # ChromaDB → SQLite 迁移（不追踪）
-│   │   └── *.py                      # yaml_* / fix_* / diag_* / analyze_* 辅助脚本
 │   └── backups/                      # 生成数据快照（不追踪）
 │
 ├── data/                         # 运行时数据（gitignored）
@@ -380,7 +384,9 @@ Generate-test-cases-and-data/
 │   └── source_apis.txt
 ├── uploads/                      # 上传文件存储（pdf/docx/product/axure/md，gitignored）
 ├── vector_store/chroma_db/       # ChromaDB 向量库（统一 doc_search，gitignored）
-├── logs/                         # 运行日志 + thinking_trace.log + 诊断脚本
+├── logs/                         # 系统日志：app.log / thinking_trace.log / workflow/（≤15 组轮转）
+├── 待整改/                       # 手动执行产物：需整改，按流程阶段 PhaseA/B/C 分 —— 不计入统计
+├── 有作用/                       # 可复用：手动执行产物 + 归档参考实现，按流程阶段 PhaseA/B/C 分 —— 不计入统计
 ├── docs/                         # 架构审查 / 规则库（skill 体系产物）
 ├── changelog/                    # 变更记录（含 Phase A/B/C 流程文档）
 └── .claude/skills/               # 架构防御体系（rule-compiler / risk-detective / code-executor）
@@ -490,7 +496,6 @@ generate_excel_plan 纯处理节点
 2. **补偿 worker**：LLM 摘要失败 / Chroma 重建等异步任务写入 `compensation_tasks` 表，独立线程轮询重试（默认 3 次）。
 3. **文件删除延迟重试**：ChromaDB 删除失败后延迟（默认 300s）异步重试。
 4. **数据真实性门禁（规则 M8）**：接口定义快照 `api_defs.json` 缺失/为空时，Phase C 显式阻断，禁止空定义盲写 YAML。
-5. **历史迁移**：从旧 Chroma 双集合迁移可运行 `python tests/tools/migrate_chroma_to_sqlite.py`。
 
 ---
 
@@ -507,11 +512,21 @@ generate_excel_plan 纯处理节点
 
 ## 最新变更
 
+**2026-09-17**
+
+- **`rule_tables/`（判定表支线）归档并删除** — 先核实主流程零使用（`agent_components/`/`web/`/`infrastructure/` 无 `import rule_tables`；`web/tasks.py` 的 `_generate_py_file` 走系统自身 `py_export`，不经过 `rule_tables/phase_c_export.py`），源码归档至 `有作用/PhaseB/rule_tables/`（含方法判词 README：值得移植的前置三级拆分、人工导入入口、动作→断言映射、反序清理、基准时间等），原目录与 5 个单元测试删除，`py_export.py` 的 docstring 指针改指归档位置。测试收集 1094 → 921
+- **工作目录清理与迁根** — `logs/有作用/`、`logs/待整改/` 整体上移到**仓库根**，`logs/` 只留系统产出（app.log / thinking_trace.log / workflow/）；`tests/tools/` 整个撤除，其中可复用工具（接口探测 / 环境采集 / 执行重跑 / 一致性比对）迁入 `有作用/PhaseA|PhaseC/`，一次性补丁与实验脚本删除；README 一致性原则第 5 条与目录树 `tools/` 节点同步移除
+- **电表支线产物与超期日志删除** — `logs/有作用/PhaseC/prompt_ab/` 四个 tag 下 `SmartPower/**.yaml` 136 个及剩余产物、跑批日志删净（A/B 结论本身记在 `changelog/2026-08-25_validation_assertion_block_operator_key_gap.md`，不受影响）；`待整改/PhaseC/` 下 `pytest_v5.log`（11.7 MB）、`smartpower26_run.log`（0.73 MB）一并删除
+- **废弃 CLI 入口 `main.py` 删除** — 只剩 17 行桩（打一行日志，`build_workflow` 是死导入），且其提示的 `python web/app.py` 本身有误（该文件无 `__main__`，正确入口是 `python web_app.py`）；全仓无代码引用，README 的废弃说明与目录树条目一并移除
+
+**2026-09-04**
+
+- **上传页/管理页主列表 分页 + 惰性加载**（`2026-09-03_upload_manage_page_pagination_lazy_plan.md`）— 「已入库文档」「可关联文件」两主列表按类型分页（每页 50），容器滚动惰性翻页 + 「加载更多」兜底；类型筛选/文件名搜索改为服务端查询参数；上传页 section 表头「全选」= 跨页全选（当前筛选下全部），「批量删除」经服务端批量接口一次删除（新增 `POST /api/files/batch-delete-files`）；后端 `GET /api/files/uploaded-files` 与 `GET /api/docs/unassociated` 增 `type/q/page/page_size`，向后兼容（不传分页参数仍返回全量）
+
 **2026-09-01**
 
 - **目录重构（infrastructure/ 归位 + 子包提取）** — 纯基础设施下沉 `infrastructure/`（config/settings/observability + `annotations/` + `llm/` + `vector_store/`）；Phase B 工作流提取为 `agent_components/graph/` 子包（nodes/graph_builder/state/graph_logging）；校验器归拢 `agent_components/validation/`（case_validator=ExcelPlanValidator / yaml_validator=YamlPostValidator）；`prompt_builder.py` 合并进 `graph/nodes.py` 私有方法
 - **prompts 收尾** — `prompts/definitions.py` 的 PromptFactory 并入 `extraction_prompts.py`（文件内 Phase 分层）；旧分段式生成方法（generate_excel_plan_node / analyze_test_points_raw）注释废弃
-- **一次性工具迁入 tests/** — `scripts/migrate_chroma_to_sqlite.py` → `tests/tools/`，`backups/` → `tests/backups/`（均不追踪）
 - **apikey.py 防误提交** — 加入 `.gitignore`（本地 API Key 入口，绝不入库）
 
 **2026-08-07**

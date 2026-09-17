@@ -7,6 +7,27 @@ let editorPath = '', editorDirty = false, resultFiles = [];
 let _currentFileList = [], _currentFileFilter = 'all';
 var _pendingApiConfirm = null;  // 待确认的 API 提取结果
 
+// —— 2026-09-04 主列表分页/惰性状态 ——
+const FILE_PAGE_SIZE = 50;
+var _fileVectorReady = false;
+var _fileQueryNow = '';  // 已生效的服务端搜索词（Enter 触发后）
+var _fileCounts = { product: 0, api: 0, axure: 0 };
+var _filePages = {
+  product: { page: 0, total: 0, hasMore: false, items: [], loading: false, selAll: false, dirty: true, error: '' },
+  api:     { page: 0, total: 0, hasMore: false, items: [], loading: false, selAll: false, dirty: true, error: '' },
+  axure:   { page: 0, total: 0, hasMore: false, items: [], loading: false, selAll: false, dirty: true, error: '' },
+};
+var _fileByName = {};
+var _fileSentinelObs = null;
+var _unassocCounts = { product: 0, api: 0, axure: 0 };
+var _unassocActive = null;
+var _unassocPages = {
+  product: { page: 0, total: 0, hasMore: false, items: [], loading: false, dirty: true, error: '' },
+  api:     { page: 0, total: 0, hasMore: false, items: [], loading: false, dirty: true, error: '' },
+  axure:   { page: 0, total: 0, hasMore: false, items: [], loading: false, dirty: true, error: '' },
+};
+var _unassocSentinelObs = null;
+
 // ===== 工具 =====
 function toast(m) {
   const t = document.getElementById('toast');
@@ -340,111 +361,260 @@ function showUploadResult(result) {
   showModal(`<h3>✅ 处理完成</h3>${html}<div class="btn-row"><button class="btn js-close-modal">确定</button></div>`);
 }
 
-// ===== 文件列表 =====
-async function refreshFileList() {
-  try {
-    const r = await fetch('/api/files/uploaded-files');
-    if (!r.ok) { console.error('文件列表加载失败:', r.status); return; }
-    const d = await r.json();
-    if (!d.files) { console.error('文件列表响应异常:', d); return; }
-    renderFileList(d.files);
-    setNavStatus(d.vector_ready);
-  } catch (e) {
-    console.error('文件列表加载异常:', e);
-    document.getElementById('file-sections').innerHTML = '<div class="empty-hint" style="color:var(--danger)">⚠️ 文件列表加载失败，请刷新重试</div>';
+// ===== 文件列表（分页 + 惰性；2026-09-04）=====
+function _fileTypesFor(filter) {
+  if (filter === 'product' || filter === 'api' || filter === 'axure') return [filter];
+  return ['product', 'api', 'axure'];
+}
+function _fileIcon(t) { return t === 'api' ? '📡' : t === 'axure' ? '🎨' : '📄'; }
+function _fileLabel(t) { return t === 'api' ? '接口文档' : t === 'axure' ? 'Axure 原型' : '产品文档'; }
+function _curFileQuery() {
+  const el = document.getElementById('file-filter-input');
+  return el ? el.value.trim() : '';
+}
+function _resetFileType(t) {
+  const st = _filePages[t];
+  if (!st) return;
+  st.page = 0; st.total = 0; st.hasMore = false;
+  st.items = []; st.selAll = false; st.selAllQ = '';
+  st.error = ''; st.dirty = true; st.loading = false;
+}
+
+// 刷新 = 把当前筛选下的各类型缓存置脏并重取第 1 页（🔄 刷新 / 上传·删除成功后 / 切入本页）
+function refreshFileList() {
+  const types = _fileTypesFor(_currentFileFilter || 'all');
+  for (const t of types) {
+    const st = _filePages[t];
+    if (!st || st.loading) continue;
+    st.dirty = true;
+    loadFileTypePage(t, 1);
   }
 }
+
 function setFileFilter(f, btn) {
+  if (!f || f === _currentFileFilter) return;
   _currentFileFilter = f;
-  document.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'));
-  if (btn) btn.classList.add('active');
+  document.querySelectorAll('.filter-btn').forEach(b => b.classList.toggle('active', b.dataset.filter === f));
   renderFileSections();
+  // 目标类型从未取过数据 → 惰性取第 1 页
+  for (const t of _fileTypesFor(f)) {
+    const st = _filePages[t];
+    if (st && st.dirty && !st.loading) loadFileTypePage(t, 1);
+  }
 }
+
 function filterFileList() {
-  // 仅当用户手动清空搜索框或按回车时才重新渲染
-  renderFileSections();
+  // 搜索（回车触发）：q 变化 → 各类型重置并重取第 1 页；q 未变仅重绘
+  const q = _curFileQuery();
+  if (q !== _fileQueryNow) {
+    _fileQueryNow = q;
+    const types = _fileTypesFor(_currentFileFilter || 'all');
+    for (const t of types) _resetFileType(t);
+    renderFileSections();
+    for (const t of types) { const st = _filePages[t]; if (!st.loading) loadFileTypePage(t, 1); }
+  } else {
+    renderFileSections();
+  }
 }
+
+// 服务端直出完整快照（templates 嵌入 INITIAL_FILES）→ 按类型做客户端首页切片作占位；
+// 随后 refreshFileList 以服务端分页为准覆盖。首屏快速、不阻塞。
 function renderFileList(files) {
   _currentFileList = files || [];
-  _currentFileFilter = 'all';
-  document.querySelectorAll('.filter-btn').forEach(b => b.classList.toggle('active', b.dataset.filter === 'all'));
+  const groups = { product: [], api: [], axure: [] };
+  _currentFileList.forEach(f => {
+    const t = (f.type === 'api' || f.type === 'axure') ? f.type : 'product';
+    groups[t].push(f);
+  });
+  for (const t of ['product', 'api', 'axure']) {
+    const arr = groups[t];
+    const st = _filePages[t];
+    st.total = arr.length; st.page = arr.length ? 1 : 0;
+    st.hasMore = arr.length > FILE_PAGE_SIZE;
+    st.items = arr.slice(0, FILE_PAGE_SIZE);
+    st.selAll = false; st.selAllQ = '';
+    st.error = ''; st.loading = false; st.dirty = false;
+  }
   renderFileSections();
 }
+
+// 取某类型第 page 页并追加到该类型 items（首页替换、后续页追加 = 天然按页缓存）
+async function loadFileTypePage(type, page) {
+  const st = _filePages[type];
+  if (!st || st.loading) return;
+  st.loading = true; st.error = '';
+  renderFileSections();
+  const params = new URLSearchParams();
+  params.set('page', String(page));
+  params.set('page_size', String(FILE_PAGE_SIZE));
+  if (type !== 'all') params.set('type', type);
+  const q = _curFileQuery();
+  if (q) params.set('q', q);
+  try {
+    const r = await fetch('/api/files/uploaded-files?' + params.toString());
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const d = await r.json();
+    if (!d.files) throw new Error('响应缺少 files');
+    if (d.counts) _fileCounts = d.counts;
+    st.total = d.total;
+    st.page = page;
+    st.hasMore = !!d.has_more;
+    if (page <= 1) st.items = [];
+    st.items = st.items.concat(d.files || []);
+    st.dirty = false; st.error = '';
+    if (typeof d.vector_ready === 'boolean' && typeof setNavStatus === 'function') setNavStatus(d.vector_ready);
+  } catch (e) {
+    console.error('文件列表加载异常:', e);
+    st.error = '加载失败';
+  }
+  st.loading = false;
+  renderFileSections();
+}
+
 function renderFileSections() {
-  let files = _currentFileList;
-  const search = document.getElementById('file-filter-input').value.trim().toLowerCase();
-  if (search) files = files.filter(f => f.name.toLowerCase().includes(search));
-  const groups = { product: [], api: [], axure: [] };
-  files.forEach(f => { const t = f.type || ''; if (groups[t]) groups[t].push(f); else groups.product.push(f); });
-  const showAll = _currentFileFilter === 'all';
-  let sections = [
-    { key: 'product', icon: '📄', label: '产品文档', files: showAll || _currentFileFilter === 'product' ? groups.product : [] },
-    { key: 'api', icon: '📡', label: '接口文档', files: showAll || _currentFileFilter === 'api' ? groups.api : [] },
-    { key: 'axure', icon: '🎨', label: 'Axure 原型', files: showAll || _currentFileFilter === 'axure' ? groups.axure : [] },
-  ];
-  if (!showAll) sections = sections.filter(s => s.files.length || _currentFileFilter === s.key);
   const el = document.getElementById('file-sections');
-  if (!files.length && !search) {
-    el.innerHTML = '<div class="empty-hint">暂无文件，请上传文档</div>'; return;
-  }
-  el.innerHTML = sections.map(s => renderFileSection(s)).join('');
-}
-function renderFileSection(s) {
-  const files = s.files;
-  if (!files.length) return `<div class="file-section"><div class="file-section-header"><span>${s.icon} ${s.label}</span><span class="count">0 个文件</span></div></div>`;
-  const rows = files.map(f => `<tr>
-    <td style="width:32px"><input type="checkbox" class="file-check" data-filename="${esc(f.name)}" data-section="${s.key}" onchange="updateSelectAllState('${s.key}')"></td>
-    <td><span class="name-row"><span>${esc(f.name)}</span></span></td><td>${f.size || '—'}</td><td>${f.chunks || 0}</td><td>${f.time || ''}</td>
-    <td style="white-space:nowrap"><button class="btn btn-sm btn-outline js-view-file" data-filename="${esc(f.name)}">查看</button> <button class="btn btn-sm btn-danger-outline js-delete-file" data-filename="${esc(f.name)}">删除</button></td>
-  </tr>`).join('');
-  return `<div class="file-section">
-    <div class="file-section-header" onclick="this.querySelector('.arrow').classList.toggle('open');this.nextElementSibling.classList.toggle('hidden')">
-      <span class="arrow open">▶</span><span>${s.icon} ${s.label}</span><span class="count">${files.length} 个文件</span>
-    </div>
-    <div class="file-section-body">
-      <table class="file-table"><thead><tr>
-        <th style="width:32px"><input type="checkbox" class="file-check-all" data-section="${s.key}" onchange="toggleSelectAll('${s.key}',this.checked)"></th>
-        <th>文件名</th><th>大小</th><th>文本块</th><th>时间</th><th>操作</th>
-      </tr></thead><tbody>${rows}</tbody></table>
-    </div></div>`;
-}
-
-function toggleSelectAll(sectionKey, checked) {
-  document.querySelectorAll('.file-check[data-section="' + sectionKey + '"]').forEach(function(cb) {
-    cb.checked = checked;
+  if (!el) return;
+  const types = _fileTypesFor(_currentFileFilter || 'all');
+  const q = _curFileQuery();
+  const hasAny = types.some(t => {
+    const st = _filePages[t];
+    return st && (st.items.length || (st.total > 0) || st.dirty || st.loading || st.error);
   });
+  if (!hasAny) {
+    el.innerHTML = q
+      ? '<div class="empty-hint">未找到与「' + escText(q) + '」匹配的文件</div>'
+      : '<div class="empty-hint">暂无文件，请上传文档</div>';
+    return;
+  }
+  // 汇总当前可见已加载文件（供查看按钮定位）
+  const flat = [];
+  for (const t of types) { const it = _filePages[t] ? _filePages[t].items : []; for (let i = 0; i < it.length; i++) flat.push(it[i]); }
+  _currentFileList = flat;
+  el.innerHTML = types.map(t => _fileSectionHtml(t, _filePages[t])).join('');
+  // 惰性翻页：底部哨兵可见即取下一页
+  if (typeof IntersectionObserver !== 'undefined') {
+    if (!_fileSentinelObs) {
+      _fileSentinelObs = new IntersectionObserver(function (entries) {
+        entries.forEach(function (en) {
+          if (!en.isIntersecting) return;
+          const t = en.target.getAttribute('data-type');
+          const st = _filePages[t];
+          if (st && st.hasMore && !st.loading) loadFileTypePage(t, st.page + 1);
+        });
+      }, { rootMargin: '240px' });
+    }
+    const sels = el.querySelectorAll('.file-more-sentinel');
+    for (let i = 0; i < sels.length; i++) _fileSentinelObs.observe(sels[i]);
+  }
 }
 
+function _fileSectionHtml(t, st) {
+  const icon = _fileIcon(t), label = _fileLabel(t);
+  const countTxt = (st.dirty && !st.items.length) ? '…' : (st.total + ' 个文件');
+  const hasRows = st.items.length > 0;
+  const head = '<div class="file-section" data-type="' + t + '">'
+    + '<div class="file-section-header" onclick="var b=this.nextElementSibling;var o=this.querySelector(\'.arrow\');b.classList.toggle(\'hidden\');o.classList.toggle(\'open\',!b.classList.contains(\'hidden\'))">'
+    + '<span class="arrow open">▶</span><span>' + icon + ' ' + label + '</span>'
+    + '<span class="count">' + countTxt + '</span></div>';
+  if (!hasRows) {
+    let bodyTxt;
+    if (st.error) bodyTxt = '<div class="empty-hint" style="color:var(--danger)">⚠️ 加载失败，<a href="javascript:void(0)" onclick="loadFileTypePage(\'' + t + '\',1);return false">重试</a></div>';
+    else if (st.dirty || st.loading) bodyTxt = '<div class="empty-hint">加载中…</div>';
+    else bodyTxt = '<div class="empty-hint">暂无' + label + '</div>';
+    return head + '<div class="file-section-body">' + bodyTxt + '</div></div>';
+  }
+  const masterChk = st.selAll ? ' checked' : '';
+  const masterTitle = st.selAll ? '已全选 ' + st.total + ' 条（跨页）· 再点取消' : '选择本筛选下全部 ' + st.total + ' 条';
+  const rows = st.items.map(function (f) {
+    const rowChk = st.selAll ? ' checked disabled' : '';
+    return '<tr>'
+      + '<td style="width:32px"><input type="checkbox" class="file-check" data-filename="' + esc(f.name) + '" data-section="' + t + '"' + rowChk + ' onchange="updateSelectAllState(\'' + t + '\')"></td>'
+      + '<td><span class="name-row"><span>' + esc(f.name) + '</span></span></td><td>' + (f.size || '—') + '</td><td>' + (f.chunks || 0) + '</td><td>' + (f.time || '') + '</td>'
+      + '<td style="white-space:nowrap"><button class="btn btn-sm btn-outline js-view-file" data-filename="' + esc(f.name) + '">查看</button> <button class="btn btn-sm btn-danger-outline js-delete-file" data-filename="' + esc(f.name) + '">删除</button></td>'
+      + '</tr>';
+  }).join('');
+  let more = '';
+  if (st.hasMore) {
+    more = '<div class="file-more" style="text-align:center;padding:6px 0">';
+    if (st.loading) {
+      more += '<span class="file-more-sentinel" data-type="' + t + '" style="color:var(--text-dim)">加载中…</span>';
+    } else {
+      more += '<button class="btn btn-sm btn-outline" onclick="loadFileTypePage(\'' + t + '\',' + (st.page + 1) + ')">加载更多（已 ' + st.items.length + ' / ' + st.total + '）</button>'
+        + '<span class="file-more-sentinel" data-type="' + t + '" style="display:block;height:1px"></span>';
+    }
+    more += '</div>';
+  } else if (st.items.length >= st.total && !st.dirty) {
+    more = '<div class="file-more" style="text-align:center;padding:6px 0;color:var(--text-dim);font-size:12px">已全部加载（' + st.total + '）</div>';
+  }
+  return head
+    + '<div class="file-section-body">'
+    + '<table class="file-table"><thead><tr>'
+    + '<th style="width:32px"><input type="checkbox" class="file-check-all" data-section="' + t + '"' + masterChk + ' title="' + masterTitle + '" onchange="toggleSelectAll(\'' + t + '\',this.checked)"></th>'
+    + '<th>文件名</th><th>大小</th><th>文本块</th><th>时间</th><th>操作</th>'
+    + '</tr></thead><tbody>' + rows + '</tbody></table>'
+    + more + '</div></div>';
+}
+
+// 逐行勾选：仅非 selAll 时可改（selAll 下行已 disabled）。勾满且无更多页 → 视为跨页全选。
 function updateSelectAllState(sectionKey) {
-  var all = document.querySelectorAll('.file-check[data-section="' + sectionKey + '"]');
-  var checked = document.querySelectorAll('.file-check[data-section="' + sectionKey + '"]:checked');
-  var master = document.querySelector('.file-check-all[data-section="' + sectionKey + '"]');
-  if (master) master.checked = all.length > 0 && checked.length === all.length;
-}
-
-function getSelectedFiles() {
-  var names = [];
-  document.querySelectorAll('.file-check:checked').forEach(function(cb) {
-    names.push(cb.dataset.filename);
-  });
-  return names;
-}
-
-async function batchDeleteFiles() {
-  var selected = getSelectedFiles();
-  if (!selected.length) { toast('请先勾选要删除的文件'); return; }
-  if (!confirm('确定删除 ' + selected.length + ' 个文件？\n\n此操作不可撤销，将同时清理 ChromaDB 和 SQLite 中的关联数据。')) return;
-  var failed = 0;
-  for (var i = 0; i < selected.length; i++) {
-    try {
-      var fd = new FormData(); fd.append('filename', selected[i]);
-      var r = await fetch('/api/files/delete-file', { method: 'POST', body: fd });
-      var d = await r.json();
-      if (!d.success) { failed++; console.error('Delete failed:', selected[i], d.message); }
-    } catch (e) { failed++; console.error('Delete error:', selected[i], e); }
+  const st = _filePages[sectionKey];
+  if (!st) return;
+  const all = document.querySelectorAll('.file-check[data-section="' + sectionKey + '"]:not(:disabled)');
+  const checked = document.querySelectorAll('.file-check[data-section="' + sectionKey + '"]:checked:not(:disabled)');
+  if (!st.hasMore && all.length && checked.length === all.length) {
+    st.selAll = true; st.selAllQ = _fileQueryNow; renderFileSections(); return;
   }
-  toast(failed ? '✅ 删除 ' + (selected.length - failed) + ' / ' + selected.length + ' 个（' + failed + ' 个失败）' : '✅ 已删除 ' + selected.length + ' 个文件');
-  refreshFileList();
+  const master = document.querySelector('.file-check-all[data-section="' + sectionKey + '"]');
+  if (master) master.checked = false;
+}
+
+// 全选 = 跨页全选（置位 selAll；行 disabled 仅提示由 title 呈现）
+function toggleSelectAll(sectionKey, checked) {
+  const st = _filePages[sectionKey];
+  if (!st) return;
+  st.selAll = !!checked;
+  st.selAllQ = checked ? _fileQueryNow : '';
+  renderFileSections();
+}
+
+// 批量删除：跨页全选类型走 {filter}，逐行勾选走 {names}（2026-09-04 决策 3）
+async function batchDeleteFiles() {
+  const types = _fileTypesFor(_currentFileFilter || 'all');
+  const names = [];
+  const selAllTypes = [];
+  let totalSel = 0;
+  for (const t of types) {
+    const st = _filePages[t];
+    if (!st) continue;
+    if (st.selAll) { selAllTypes.push(t); totalSel += st.total; continue; }
+    const cbs = document.querySelectorAll('.file-check[data-section="' + t + '"]:checked');
+    for (let i = 0; i < cbs.length; i++) names.push(cbs[i].dataset.filename);
+    totalSel += cbs.length;
+  }
+  if (!totalSel) { toast('请先勾选要删除的文件'); return; }
+  if (!confirm('确定删除选中的 ' + totalSel + ' 个文件？\n\n此操作不可撤销，将同时清理 SQLite、ChromaDB 与物理文件中的关联数据。')) return;
+  let del = 0, fail = 0;
+  async function _call(body) {
+    const r = await fetch('/api/files/batch-delete-files', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const d = await r.json();
+    del += (d.deleted || 0); fail += (d.failed || 0);
+  }
+  try {
+    for (const t of selAllTypes) {
+      const body = { filter: {} };
+      if (t) body.filter.type = t;
+      const fq = (_filePages[t] && _filePages[t].selAllQ) || '';
+      if (fq) body.filter.q = fq;
+      await _call(body);
+    }
+    if (names.length) await _call({ names: Array.from(new Set(names)) });
+  } catch (e) { console.error('批量删除异常:', e); fail += 1; }
+  toast(fail ? '✅ 已删除 ' + del + ' 个（' + fail + ' 个失败）' : '✅ 已删除 ' + del + ' 个文件');
+  // 删除后：当前筛选下各类型重置并重取第 1 页
+  for (const t of types) _resetFileType(t);
+  renderFileSections();
+  for (const t of types) { const st = _filePages[t]; if (!st.loading) loadFileTypePage(t, 1); }
 }
 function viewFile(name) {
   const f = _currentFileList.find(x => x.name === name);
@@ -593,64 +763,153 @@ async function loadBoundDocs(modName) {
   } catch (e) { document.getElementById('bound-docs').innerHTML = '<div class="empty-hint">加载失败</div>'; }
 }
 async function loadUnassociatedDocs() {
+  /* 可关联文件（分页 + 惰性，2026-09-04）：先仅取各类型计数建 Tab，默认激活第一个
+     非空类型并惰性取第 1 页；切 Tab 首次才取该类型数据（每类型页集合缓存）。 */
+  const el = document.getElementById('unassociated-by-type');
   try {
-    const r = await fetch('/api/docs/unassociated'); const d = await r.json();
-    const docs = d.docs || [];
-    const el = document.getElementById('unassociated-by-type');
-    if (!docs.length) { el.innerHTML = '<div class="empty-hint">所有文档均已关联</div>'; return; }
-    const grouped = {};
-    docs.forEach(d => { const t = d.doc_type || 'product'; if (!grouped[t]) grouped[t] = []; grouped[t].push(d); });
-    const icons = { product: '📄', api: '📡', axure: '🎨' };
-    const labels = { product: "产品文档", api: "接口定义", axure: "Axure 原型" };
-    let tabsHtml = '<div class="doc-type-tabs">';
-    Object.keys(grouped).forEach((dt, i) => {
-      tabsHtml += '<button class="' + (i === 0 ? 'active' : '') + '" onclick="document.querySelectorAll(\'.unassoc-group\').forEach(g=>g.classList.add(\'hidden\'));document.getElementById(\'unassoc-\'+this.dataset.dt).classList.remove(\'hidden\');document.querySelectorAll(\'.doc-type-tabs button\').forEach(b=>b.classList.remove(\'active\'));this.classList.add(\'active\')" data-dt="' + dt + '">' + (icons[dt] || '📄') + ' ' + (labels[dt] || dt) + ' (' + grouped[dt].length + ')</button>';
-    });
-    tabsHtml += '</div>';
-    let bodyHtml = Object.keys(grouped).map((dt, i) => {
-      const items = grouped[dt].map(d => {
-        const icon = icons[dt] || '📄';
-        // axure：可关联文件条目 = 页面块（标题=页面名/块名 + 内容=必填字段）
-        let pagesHtml = '';
-        if (dt === 'axure' && d.pages && d.pages.length) {
-          pagesHtml = '<div class="axure-pages">' + d.pages.map(p => {
-            const chips = (p.required_fields || []).map(f => '<span class="axure-chip">' + esc(f) + '</span>').join('');
-            return '<div class="axure-page-row"><span class="axure-page-name">' + esc(p.title) + '</span>'
-              + (chips ? '<span class="axure-page-req">' + chips + '</span>'
-                 : '<span class="axure-page-empty">无必填字段</span>')
-              + '</div>';
-          }).join('') + '</div>';
-        }
-        return '<div class="doc-assoc-item' + (pagesHtml ? ' has-pages' : '') + '">'
-          + '<span style="flex-shrink:0;margin-right:8px;display:flex"><input type="checkbox" class="js-unassoc-check" data-doc-id="' + esc(d.doc_id) + '" data-doc-type="' + esc(dt) + '" onchange="updateUnassocCount()"></span>'
-          + '<span class="name">' + icon + ' ' + esc(d.file_name || d.doc_id || '') + '</span>'
-          + pagesHtml
-          + '<span class="actions"><button class="btn btn-sm btn-outline js-doc-bind" data-doc-id="' + esc(d.doc_id) + '" data-doc-type="' + esc(dt) + '">关联</button></span></div>';
-      }).join('');
-      return '<div class="unassoc-group' + (i === 0 ? '' : ' hidden') + '" id="unassoc-' + dt + '">' + items + '</div>';
-    }).join('');
-    const selectBar = '<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin:8px 0;font-size:12px">'
-      + '<label style="display:flex;align-items:center;gap:4px;flex-shrink:0"><input type="checkbox" id="unassoc-check-all" onclick="toggleAllUnassoc()"> 全选本页</label>'
-      + '<span style="color:var(--text-dim);flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">关联到当前模块：<b>' + esc(selectedModuleName || '（未选择）') + '</b></span>'
-      + '<span id="unassoc-selected-count" style="flex-shrink:0;color:var(--text-dim)">已选 0</span>'
-      + '<button class="btn btn-sm btn-success" onclick="bindSelectedDocs()" style="flex-shrink:0">⚡ 批量关联选中</button></div>';
-    el.innerHTML = tabsHtml + selectBar + bodyHtml;
-    updateUnassocCount();
-  } catch (e) { document.getElementById('unassociated-by-type').innerHTML = '<div class="empty-hint">加载失败</div>'; }
+    const r = await fetch('/api/docs/unassociated?page_size=0');
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const d = await r.json();
+    _unassocCounts = d.counts || { product: 0, api: 0, axure: 0 };
+    const present = ['product', 'api', 'axure'].filter(t => _unassocCounts[t] > 0);
+    if (!present.length) { _unassocActive = null; el.innerHTML = '<div class="empty-hint">所有文档均已关联</div>'; return; }
+    if (!_unassocActive || present.indexOf(_unassocActive) < 0) _unassocActive = present[0];
+    const st = _unassocPages[_unassocActive];
+    st.dirty = true; st.error = '';   // 重取第 1 页以反映最新未关联集合
+    _paintUnassoc();
+    if (!st.loading) loadUnassocTypePage(_unassocActive, 1);
+  } catch (e) {
+    console.error('未关联文档加载失败:', e);
+    el.innerHTML = '<div class="empty-hint" style="color:var(--danger)">加载失败，请重试</div>';
+  }
+}
+
+function _unassocIcons() { return { product: '📄', api: '📡', axure: '🎨' }; }
+function _unassocLabels() { return { product: '产品文档', api: '接口定义', axure: 'Axure 原型' }; }
+
+function _paintUnassoc() {
+  const el = document.getElementById('unassociated-by-type');
+  if (!el) return;
+  const icons = _unassocIcons(), labels = _unassocLabels();
+  const present = ['product', 'api', 'axure'].filter(t => _unassocCounts[t] > 0);
+  if (!present.length) { _unassocActive = null; el.innerHTML = '<div class="empty-hint">所有文档均已关联</div>'; return; }
+  if (!_unassocActive || present.indexOf(_unassocActive) < 0) _unassocActive = present[0];
+  const tabsHtml = '<div class="doc-type-tabs">' + present.map(function (dt) {
+    return '<button class="' + (_unassocActive === dt ? 'active' : '') + '" data-dt="' + dt + '" onclick="switchUnassocTab(\'' + dt + '\')">' + (icons[dt] || '📄') + ' ' + (labels[dt] || dt) + ' (' + _unassocCounts[dt] + ')</button>';
+  }).join('') + '</div>';
+  const selectBar = '<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin:8px 0;font-size:12px">'
+    + '<label style="display:flex;align-items:center;gap:4px;flex-shrink:0"><input type="checkbox" id="unassoc-check-all" onclick="toggleAllUnassoc()"> 全选本页</label>'
+    + '<span style="color:var(--text-dim);flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">关联到当前模块：<b>' + esc(selectedModuleName || '（未选择）') + '</b></span>'
+    + '<span id="unassoc-selected-count" style="flex-shrink:0;color:var(--text-dim)">已选 0</span>'
+    + '<button class="btn btn-sm btn-success" onclick="bindSelectedDocs()" style="flex-shrink:0">⚡ 批量关联选中</button></div>';
+  const dt = _unassocActive;
+  el.innerHTML = tabsHtml + selectBar + '<div class="unassoc-group" id="unassoc-active">' + _unassocItemsHtml(dt, _unassocPages[dt]) + '</div>';
+  updateUnassocCount();
+  // 惰性翻页：底部哨兵可见即取下一页
+  if (typeof IntersectionObserver !== 'undefined') {
+    if (!_unassocSentinelObs) {
+      _unassocSentinelObs = new IntersectionObserver(function (entries) {
+        entries.forEach(function (en) {
+          if (!en.isIntersecting) return;
+          const t = en.target.getAttribute('data-type');
+          const s = _unassocPages[t];
+          if (s && s.hasMore && !s.loading) loadUnassocTypePage(t, s.page + 1);
+        });
+      }, { rootMargin: '240px' });
+    }
+    const sn = el.querySelectorAll('.unassoc-more-sentinel');
+    for (let i = 0; i < sn.length; i++) _unassocSentinelObs.observe(sn[i]);
+  }
+}
+
+function _unassocItemsHtml(dt, st) {
+  if (!st) return '<div class="empty-hint">加载中…</div>';
+  if (st.error && !st.items.length) {
+    return '<div class="empty-hint" style="color:var(--danger)">⚠️ 加载失败，<a href="javascript:void(0)" onclick="loadUnassocTypePage(\'' + dt + '\',1);return false">重试</a></div>';
+  }
+  if (!st.items.length) {
+    if (st.dirty || st.loading) return '<div class="empty-hint">加载中…</div>';
+    return '<div class="empty-hint">该类型下暂无未关联文档</div>';
+  }
+  const icons = _unassocIcons();
+  let html = st.items.map(function (d) {
+    const icon = icons[dt] || '📄';
+    // axure：可关联文件条目 = 页面块（标题=页面名/块名 + 内容=必填字段，随当页行返回）
+    let pagesHtml = '';
+    if (dt === 'axure' && d.pages && d.pages.length) {
+      pagesHtml = '<div class="axure-pages">' + d.pages.map(function (p) {
+        const chips = (p.required_fields || []).map(function (f) { return '<span class="axure-chip">' + esc(f) + '</span>'; }).join('');
+        return '<div class="axure-page-row"><span class="axure-page-name">' + esc(p.title) + '</span>'
+          + (chips ? '<span class="axure-page-req">' + chips + '</span>'
+             : '<span class="axure-page-empty">无必填字段</span>')
+          + '</div>';
+      }).join('') + '</div>';
+    }
+    return '<div class="doc-assoc-item' + (pagesHtml ? ' has-pages' : '') + '">'
+      + '<span style="flex-shrink:0;margin-right:8px;display:flex"><input type="checkbox" class="js-unassoc-check" data-doc-id="' + esc(d.doc_id) + '" data-doc-type="' + esc(dt) + '" onchange="updateUnassocCount()"></span>'
+      + '<span class="name">' + icon + ' ' + esc(d.file_name || d.doc_id || '') + '</span>'
+      + pagesHtml
+      + '<span class="actions"><button class="btn btn-sm btn-outline js-doc-bind" data-doc-id="' + esc(d.doc_id) + '" data-doc-type="' + esc(dt) + '">关联</button></span></div>';
+  }).join('');
+  let more = '';
+  if (st.hasMore) {
+    more = '<div class="unassoc-more-bar" style="text-align:center;padding:6px 0">';
+    if (st.loading) {
+      more += '<span class="unassoc-more-sentinel" data-type="' + dt + '" style="color:var(--text-dim)">加载中…</span>';
+    } else {
+      more += '<button class="btn btn-sm btn-outline" onclick="loadUnassocTypePage(\'' + dt + '\',' + (st.page + 1) + ')">加载更多（已 ' + st.items.length + ' / ' + st.total + '）</button>'
+        + '<span class="unassoc-more-sentinel" data-type="' + dt + '" style="display:block;height:1px"></span>';
+    }
+    more += '</div>';
+  } else if (st.items.length >= st.total && !st.dirty) {
+    more = '<div class="unassoc-more-bar" style="text-align:center;padding:6px 0;color:var(--text-dim);font-size:12px">已全部加载（' + st.total + '）</div>';
+  }
+  return html + more;
+}
+
+async function loadUnassocTypePage(type, page) {
+  const st = _unassocPages[type];
+  if (!st || st.loading) return;
+  st.loading = true; st.error = '';
+  if (_unassocActive === type) _paintUnassoc();
+  const params = new URLSearchParams();
+  params.set('type', type);
+  params.set('page', String(page));
+  params.set('page_size', String(FILE_PAGE_SIZE));
+  try {
+    const r = await fetch('/api/docs/unassociated?' + params.toString());
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const d = await r.json();
+    if (d.counts) _unassocCounts = d.counts;
+    st.total = d.total; st.page = page; st.hasMore = !!d.has_more;
+    if (page <= 1) st.items = [];
+    st.items = st.items.concat(d.docs || []);
+    st.dirty = false; st.error = '';
+  } catch (e) { console.error('未关联文档加载失败:', e); st.error = '加载失败'; }
+  st.loading = false;
+  if (_unassocActive === type) _paintUnassoc();
+}
+
+function switchUnassocTab(dt) {
+  if (!dt || dt === _unassocActive) return;
+  _unassocActive = dt;
+  _paintUnassoc();
+  const st = _unassocPages[dt];
+  if (st && st.dirty) loadUnassocTypePage(dt, 1);
 }
 
 function updateUnassocCount() {
-  const n = document.querySelectorAll('.js-unassoc-check:checked').length;
+  // 选中作用域 = 当前已加载页行（全选本页）
+  const groupEl = document.getElementById('unassoc-active');
+  const n = groupEl ? groupEl.querySelectorAll('.js-unassoc-check:checked').length : 0;
   const el = document.getElementById('unassoc-selected-count');
   if (el) el.textContent = '已选 ' + n;
 }
 
 function toggleAllUnassoc() {
-  /* 全选/全不选当前激活分类页面的勾选。 */
+  /* 全选/全不选当前激活分类页面的勾选（已加载行）。 */
   const on = document.getElementById('unassoc-check-all').checked;
-  const activeTab = document.querySelector('.doc-type-tabs button.active');
-  const dt = activeTab ? activeTab.dataset.dt : '';
-  const groupEl = document.getElementById('unassoc-' + dt);
+  const groupEl = document.getElementById('unassoc-active');
   if (groupEl) groupEl.querySelectorAll('.js-unassoc-check').forEach(cb => cb.checked = on);
   updateUnassocCount();
 }
@@ -1189,7 +1448,14 @@ async function sendWorkflowChat() {
       await pollTask(d.task_id,
         (p, m) => { msgDiv.querySelector('.body').textContent = '⏳ ' + m + ' (' + p + '%)'; },
         result => {
-          if (result && !result.error) {
+          if (result && result.requires_review) {
+            // 生成需人工审查（无 Excel 产物）→ 明确提示，不误导"已生成"
+            let html = '<div class="chat-msg"><div class="who ai" style="color:#e37400">⚠️ 需人工审查</div><div class="body">' + escText(result.reply || '') + '</div></div>';
+            if (result.error_info && result.error_info.length) {
+              html += '<div class="chat-msg"><div class="body" style="color:#888;font-size:12px">' + result.error_info.map(escText).join('<br>') + '</div></div>';
+            }
+            msgDiv.outerHTML = html;
+          } else if (result && !result.error) {
             let html = '<div class="chat-msg"><div class="who ai">🤖 AI</div><div class="body">' + esc(result.reply || JSON.stringify(result)) + '</div></div>';
             if (result.excel_path) {
               html += '<div class="result-panel"><h4>📊 测试计划</h4><p>Excel: ' + escText(result.excel_path) + '</p>'
@@ -1210,6 +1476,35 @@ async function sendWorkflowChat() {
   } catch (e) { showChatError(e.message); } finally { _chatRunning = false; }
 }
 
+// Phase C 独立工作流入口：列出可单独重跑 YAML 数据的模块（含 context 文件）
+async function startPhaseC() {
+  if (_chatRunning) return;
+  _chatRunning = true;
+  const box = document.getElementById('chat-box');
+  box.innerHTML += '<div class="chat-msg"><div class="who user">👤 用户</div><div class="body">🔄 请求单独重跑 Phase C 数据生成</div></div>';
+  box.scrollTop = box.scrollHeight;
+  try {
+    const r = await fetch('/phase-c/start', { method: 'POST' }); const d = await r.json();
+    if (d.status === 'waiting') {
+      // 复用 Phase B 候选按钮渲染；选择走 /workflow/confirm（后端按 flow=phase_c 分支）
+      _workflowSessionId = d.session_id;
+      let html = '<div class="chat-msg"><div class="who ai">🤖 AI</div><div class="body">' + esc(d.question) + '</div></div>';
+      if (d.candidates && d.candidates.length) {
+        html += '<div class="chat-msg"><div class="body" style="display:flex;flex-wrap:wrap;gap:6px">';
+        d.candidates.forEach((c, i) => {
+          html += '<button class="btn btn-outline btn-sm" data-action="confirmWorkflowModule" data-session="' + esc(d.session_id) + '" data-module="' + esc(c) + '">' + (i + 1) + '. ' + esc(c) + '</button>';
+        });
+        html += '</div></div>';
+      }
+      box.innerHTML += html;
+    } else {
+      const q = d.question || '未找到可重跑的模块';
+      box.innerHTML += '<div class="chat-msg"><div class="who ai">🤖 AI</div><div class="body">' + escText(q) + '</div></div>';
+      _workflowSessionId = null;
+    }
+  } catch (e) { showChatError(e.message); _workflowSessionId = null; } finally { _chatRunning = false; }
+}
+
 async function confirmWorkflowModule(sessionId, moduleName) {
   _workflowSessionId = sessionId;
   const box = document.getElementById('chat-box');
@@ -1228,7 +1523,14 @@ async function confirmWorkflowModule(sessionId, moduleName) {
       await pollTask(d.task_id,
         (p, m) => { msgDiv.querySelector('.body').textContent = '⏳ ' + m + ' (' + p + '%)'; },
         result => {
-          if (result && !result.error) {
+          if (result && result.requires_review) {
+            // 生成需人工审查（无 Excel 产物）→ 明确提示，不误导"已生成"
+            let html = '<div class="chat-msg"><div class="who ai" style="color:#e37400">⚠️ 需人工审查</div><div class="body">' + escText(result.reply || '') + '</div></div>';
+            if (result.error_info && result.error_info.length) {
+              html += '<div class="chat-msg"><div class="body" style="color:#888;font-size:12px">' + result.error_info.map(escText).join('<br>') + '</div></div>';
+            }
+            msgDiv.outerHTML = html;
+          } else if (result && !result.error) {
             let html = '<div class="chat-msg"><div class="who ai">🤖 AI</div><div class="body">' + esc(result.reply || JSON.stringify(result)) + '</div></div>';
             if (result.excel_path) {
               html += '<div class="result-panel"><h4>📊 测试计划</h4><p>Excel: ' + escText(result.excel_path) + '</p>'

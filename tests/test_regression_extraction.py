@@ -90,6 +90,81 @@ class TestSplitTextByHeaders:
 
 
 # ============================================================
+# Bug: 无标记分层 md 误按模块层切批（09-08，0907-测试接口api）
+# ============================================================
+
+class TestDetectApiLevelLayeredNoMarker:
+    """无 YApi/clean 标记、接口藏在 ## 模块下层的 ### 文档，应按接口层(###)切。
+
+    回归背景：_detect_api_level 无标记分支原固定返回 2，把 0907 切成模块级 5 批，
+    大模块单批 JSON 超 8192 输出 token → LengthFinishReasonError（靠重试兜底，超限即败）。
+    """
+
+    LAYERED = (
+        "# 测试接口 API 文档\n\n"
+        "## 一、车场配置（ParkingParkController）\n\n"
+        "### 车场-删除\n\n"
+        "`/parkingPark/deleteByCodes`\n请求方式：post\nbody\n```\n[\"PARK001\"]\n```\n\n"
+        "### 车场维护聚合-添加/修改\n\n"
+        "`/parkingPark/saveOrUpdate`\n请求方式：post\nbody\n\n```\n{...}\n```\n\n"
+        "## 二、黑白名单车辆管理（ParkingCarWhiteBlackController）\n\n"
+        "### 黑白名单-添加\n\n`/carWhiteBlack/add`\n请求方式：post\n\n"
+        "### 黑白名单-删除\n\n`/carWhiteBlack/delete`\n请求方式：post\n"
+    )
+
+    def test_detect_returns_interface_level(self):
+        """应识别接口层为 ###（3），而非模块层 ##（2）。"""
+        from ingest.api_parser import _detect_api_level
+        assert _detect_api_level(self.LAYERED) == 3
+
+    def test_split_per_interface(self):
+        """每个 ### 独立成段，段数 = 接口数；不按 ## 模块切。"""
+        from ingest.api_parser import _split_text_by_headers
+        batches = _split_text_by_headers(self.LAYERED, max_chars=30000)
+        assert len(batches) == 4, f"期望 4 个接口段，实际 {len(batches)}"
+        assert "### 车场-删除" in batches[0]
+        assert "### 车场维护聚合-添加/修改" in batches[1]
+        assert "### 黑白名单-添加" in batches[2]
+        assert "### 黑白名单-删除" in batches[3]
+        # 相邻接口不互相污染
+        assert "/carWhiteBlack/add" in batches[2] and "/parkingPark/saveOrUpdate" not in batches[2]
+
+    def test_yapi_marker_still_level_2(self):
+        """回归：带 **Path：** 标记的 YApi 仍判 2（##），不因深层 ### 上翻。"""
+        from ingest.api_parser import _detect_api_level, _split_text_by_headers
+        yapi = (
+            "# 智慧用电\n\n"
+            "## 修改电表\n### 基本信息\n**Path：** /electricMeter/update\n**Method：** POST\n"
+            "### 请求参数\n| 名称 |\n|---|\n### 返回数据\n\n"
+            "## 删除电表\n### 基本信息\n**Path：** /electricMeter/delete\n**Method：** POST\n"
+            "### 请求参数\n### 返回数据\n"
+        )
+        assert _detect_api_level(yapi) == 2
+        assert len(_split_text_by_headers(yapi, max_chars=30000)) == 2
+
+    def test_no_marker_flat_falls_back_level_2(self):
+        """回归：无任何端点线索的平铺文档（# 标题 + ## API + ### 子节）回退 2。"""
+        from ingest.api_parser import _detect_api_level, _split_text_by_headers
+        flat = (
+            "# 模块标题\n\n"
+            "## API-1 添加用户\n### 基本信息\n### 请求参数\n### 返回数据\n\n"
+            "## API-2 删除用户\n### 基本信息\n### 请求参数\n### 返回数据\n"
+        )
+        assert _detect_api_level(flat) == 2
+        assert len(_split_text_by_headers(flat, max_chars=30000)) == 2
+
+    def test_real_0907_file_28_interfaces(self):
+        """真实触发文件（缺失则跳过）：应切出 28 个接口段。"""
+        p = r"D:\0-导出文件\0907-测试接口api(1).md"
+        if not os.path.exists(p):
+            pytest.skip(f"测试文件不存在: {p}")
+        from ingest.api_parser import _detect_api_level, _split_text_by_headers
+        text = open(p, "r", encoding="utf-8").read()
+        assert _detect_api_level(text) == 3
+        assert len(_split_text_by_headers(text, max_chars=30000)) == 28
+
+
+# ============================================================
 # Bug 3: extract_apis_from_yapi_md HTML 前言污染
 # ============================================================
 
@@ -404,3 +479,53 @@ class TestRequiredFlag:
         assert "Content-Type" in api["header"], (
             f"Content-Type 应在 header 映射中: {api['header']}"
         )
+
+
+# ============================================================
+# 修复：api_def_extract_prompt 内 JSON 字面量花括号未转义（09-08）
+# ============================================================
+
+class TestApiExtractPromptBraceEscaping:
+    """api_def_extract_prompt 单花括号 JSON 字面量被 ChatPromptTemplate 误当变量。
+
+    根因：模板文本中 `如 {"Content-Type": ...}` 与 `绝对不能填 {}` 未转义，
+    LangChain 把 `{...}` 解析为变量 '' 与 '"Content-Type"'，format(doc_text=...) 即抛
+    KeyError('"Content-Type"')——LLM 接口提取在进模型前全量失败
+    （logs/app.log 09-08 连续『输出校验失败 (KeyError)…missing variables』）。
+    修复：`{}` → `{{}}`，恢复字面量语义（不新增/不改任何示例内容）。
+    """
+
+    @staticmethod
+    def _template_builders():
+        import inspect
+        from langchain_core.prompts import ChatPromptTemplate
+        import prompts.extraction_prompts as m
+        for name, fn in vars(m).items():
+            if not inspect.isfunction(fn):
+                continue
+            try:
+                obj = fn()
+            except Exception:
+                continue
+            if isinstance(obj, ChatPromptTemplate):
+                yield name, obj
+
+    def test_api_def_extract_prompt_formats(self):
+        """转义后 format(doc_text=...) 不再抛 KeyError，变量只剩 doc_text。"""
+        from prompts.extraction_prompts import api_def_extract_prompt
+        t = api_def_extract_prompt()
+        assert t.input_variables == ["doc_text"], t.input_variables
+        rendered = t.format(doc_text="## 添加用户\nGET /user/add")
+        assert "{doc_text}" not in rendered       # 已插值
+        assert "Content-Type" in rendered         # 字面量原样保留
+        assert "绝对不能填 {}" in rendered          # 字面量原样保留
+
+    def test_all_extract_templates_variables_are_identifiers(self):
+        """全模板守卫：input_variables 不得含引号/空名（单花括号误解析整类回归）。"""
+        import re
+        bad = []
+        for name, t in self._template_builders():
+            for v in t.input_variables:
+                if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", v):
+                    bad.append((name, v))
+        assert not bad, f"含被误解析为变量的 JSON 字面量花括号: {bad}"

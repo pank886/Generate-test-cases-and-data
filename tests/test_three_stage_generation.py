@@ -484,3 +484,57 @@ class TestNormalizeBaseUrls:
             ["/electricMeter/getParentList"]
         assert self._call(["/electricMeter/getParentList"], "[]") == \
             ["/electricMeter/getParentList"]
+
+
+# ============================================================
+# 6. setup 命名约定（2026-09-10 智慧停车 Round 1 归因）
+# ============================================================
+
+class TestSetupCaptureRuleNamingConvention:
+    """`SETUP_CAPTURE_RULE` 必须写明 case_name 的前置标签命名约定。
+
+    背景（2026-09-10 智慧停车 Round 1 实测）：隔离消解器把多用例引用的 PRE 逐例克隆成
+    `PRE-xxx_isolated_TC-yyy`（`nodes.py:803`），`_parse_setup_extract_keys` 靠 case_name 里的
+    `isolated_TC<编号>` 把 setup 块归到克隆 id。若 prompt 未写明该命名约定，LLM 会把克隆块
+    命名成基础标签 → 克隆 id 永远拿不到提取键 → 该 story 的 teardown 被
+    `_filter_teardown_missing_pres` 整任务剔除（80 组键中 52 组变 __MISSING_KEY__ 即此因）。
+    故本规则是「克隆键可得」的必要条件，用护栏钉住，防止后续被删改。
+    """
+
+    def test_rule_mentions_case_name_and_isolated_suffix(self):
+        from prompts.extraction_prompts import SETUP_CAPTURE_RULE
+        assert "case_name" in SETUP_CAPTURE_RULE, "未规定 case_name 命名"
+        assert "_isolated_TC-" in SETUP_CAPTURE_RULE, "未点明必须保留 _isolated_TC- 后缀"
+
+    def test_rule_forbids_abbreviating_the_label(self):
+        from prompts.extraction_prompts import SETUP_CAPTURE_RULE
+        assert "原样" in SETUP_CAPTURE_RULE
+        assert "禁止" in SETUP_CAPTURE_RULE
+
+    def test_rule_still_requires_input_extract(self):
+        """既有约束不得因新增命名规则而丢失。"""
+        from prompts.extraction_prompts import SETUP_CAPTURE_RULE
+        assert "input_extract" in SETUP_CAPTURE_RULE
+
+    def test_rule_contains_no_value_examples(self):
+        """用户约束：prompt 不得新增取值示例（本轮新增段落须为纯规则）。"""
+        from prompts.extraction_prompts import SETUP_CAPTURE_RULE
+        added = SETUP_CAPTURE_RULE[SETUP_CAPTURE_RULE.index("【前置标签归属】"):]
+        for leak in ("zhyq", "PARK001", "PRE-004", "TC-008", "100061"):
+            assert leak not in added, f"新增段落泄漏了具体取值：{leak}"
+
+    def test_round_trip_isolated_label_survives(self, tmp_path):
+        """端到端复核：case_name 带后缀 → 克隆 id 拿到键；不带 → 落到基础标签。"""
+        setup_dir = tmp_path / "SmartParking" / "setup_data"
+        setup_dir.mkdir(parents=True)
+        (setup_dir / "setup_parking_detail.yaml").write_text("""\
+- baseInfo: {api_name: 车场保存, method: post, url: /parkingPark/saveOrUpdate}
+  testCase:
+  - case_name: test_PRE004_ParkSave_001
+    input_extract: {pre004ParkName: '$.json.parkingPark.parkName'}
+""", encoding="utf-8")
+        result = _parse_setup_extract_keys(
+            str(tmp_path), ["PRE-004", "PRE-004_isolated_TC-008"])
+        # 不写后缀 → 只喂到基础标签，克隆 id 拿占位键（正是 Round 1 的失败形态）
+        assert result["PRE-004"]["keys"] == {"pre004ParkName": "$.json.parkingPark.parkName"}
+        assert "__MISSING_KEY__" in str(result["PRE-004_isolated_TC-008"]["keys"])

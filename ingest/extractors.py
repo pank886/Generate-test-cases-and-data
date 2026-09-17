@@ -23,8 +23,51 @@ def _extract_text(file_path: str) -> str:
             return f.read()
     elif ext == ".docx":
         return _extract_docx(file_path)
+    elif ext == ".xlsx":
+        return _extract_xlsx(file_path)
     else:
         raise ValueError(f"不支持的文件类型: {ext}")
+
+
+def _extract_xlsx(file_path: str) -> str:
+    """Excel 工作簿全 sheet 行式文本化。
+
+    - 逐 sheet：先输出「[工作表: 名]」头，再把每行非空单元格以 ' | ' 连接、跨行保留
+    - 跳过全空行 / 全空 sheet
+    - read_only=True 流式读取；data_only=True 取公式缓存值
+    - finally wb.close()：防 Windows 文件句柄泄漏（同 fixes_summary P2 _read_excel_rows）
+    - 合并单元格在 openpyxl 中仅左上角取值、其余 None，天然不重复
+    """
+    from openpyxl import load_workbook
+    wb = load_workbook(file_path, read_only=True, data_only=True)
+    parts = []
+    try:
+        for ws in wb.worksheets:
+            rows = []
+            for row in ws.iter_rows(values_only=True):
+                cells = [_cell_to_text(v) for v in row]
+                cells = [c for c in cells if c]
+                if cells:
+                    rows.append(" | ".join(cells))
+            if rows:
+                parts.append(f"[工作表: {ws.title}]\n" + "\n".join(rows))
+    finally:
+        wb.close()
+    return "\n\n".join(parts)
+
+
+def _cell_to_text(value) -> str:
+    """单元格值转文本：None→""；datetime/date/time 格式化；其余 str()。"""
+    import datetime as _dt
+    if value is None:
+        return ""
+    if isinstance(value, _dt.datetime):
+        return value.strftime("%Y-%m-%d %H:%M:%S")
+    if isinstance(value, _dt.date):
+        return value.isoformat()
+    if isinstance(value, _dt.time):
+        return value.strftime("%H:%M:%S")
+    return str(value).strip()
 
 
 def _extract_docx(file_path: str) -> str:

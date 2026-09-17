@@ -288,11 +288,55 @@ def _example_block(part: str, title: str) -> str:
 # 切分 API 段
 # ============================================================
 
+_ENDPOINT_SIGN_RE = re.compile(
+    r"\*\*(Path|Method)[：:]\*\*"         # YApi 标记：**Path：**
+    r"|\*\*接口(路径|名称)\*\*[：:]"       # clean 标记：**接口路径**：
+    r"|`\s*/\S+"                          # 反引号路径行：`/xxx/yyy`
+    r"|请求方式|请求方法"                  # 中文请求标签
+)
+
+
+def _count_endpoint_sections(text: str, lvl: int) -> int:
+    """统计 lvl 级标题切出的段落中，含「接口端点签名」的段落数。
+
+    段落 = 从某 lvl 级标题到下一个同级标题（或文末）。lvl 为接口层时几乎每段命中，
+    为模块/分组层时命中段数明显更少——据此区分「接口层」与「模块层」。
+    """
+    pat = re.compile(r"(?m)^#{" + str(lvl) + r"}\s+")
+    starts = [m.start() for m in pat.finditer(text)]
+    if not starts:
+        return 0
+    hits = 0
+    for i, s in enumerate(starts):
+        e = starts[i + 1] if i + 1 < len(starts) else len(text)
+        if _ENDPOINT_SIGN_RE.search(text[s:e]):
+            hits += 1
+    return hits
+
+
 def _detect_api_level(text: str) -> int:
-    """识别文档 API 标题层级：YApi → 2（##），纯 Markdown → 1（#）。"""
+    """识别文档 API 标题层级。
+
+    带明确提取标记的方言保持历史判定：
+      - YApi  **Path：**/**Method：**     → 2（##）
+      - clean **接口路径**/**接口名称**   → 1（#）
+    无标记的宽松 Markdown（反引号路径 + 「请求方式」标签、接口藏在 ## 模块下层的 ###，
+    如 0907-测试接口api）→ 统计 1~4 级各标题层含端点签名的段落数取最大者，避免把模块层
+    （##）当接口层切成大批次——单批 JSON 可能超 8192 输出 token（LengthFinishReasonError）。
+    全零（无端点线索）→ 回退 2（历史默认）。
+    """
     has_yapi = "**Path：" in text or "**Method：" in text
     has_clean = "**接口路径" in text or "**接口名称" in text
-    return 1 if (has_clean and not has_yapi) else 2
+    if has_yapi:
+        return 2
+    if has_clean:
+        return 1
+    best, best_hits = 2, 0
+    for lvl in (1, 2, 3, 4):
+        hits = _count_endpoint_sections(text, lvl)
+        if hits > best_hits:
+            best, best_hits = lvl, hits
+    return best
 
 
 def _split_text_by_headers(text: str, max_chars: int) -> list:

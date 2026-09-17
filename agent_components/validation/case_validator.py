@@ -87,7 +87,12 @@ _ASSERT_BAD_SPACE = re.compile(r"\[\s+(eq|contains|ne|db)\s*\]|\[\s*(eq|contains
 _ASSERT_DOUBLE = re.compile(r"\[\[|\]\]")
 
 # 步骤文本中的候选接口路径：仅匹配 ASCII 路径（排除中文步骤文本误报），如 /xxx上传 不会被当作 URL
-_URL_RE = re.compile(r"/[A-Za-z][A-Za-z0-9_/{}.-]*")
+# 负向后顾 (?<![A-Za-z0-9_<]) 要求前导 / 处于词边界：
+#   - 排除 HTML 结束标签（</script> 中 /script 前是 <）；
+#   - 排除「字段名 a/b 连写」（parkCode/placeCode、denominationHour/denominationMinite 的 / 前是
+#     ASCII 字母），不再切出伪路径 /placeCode、/denominationMinite（2026-09-09）。
+# 枚举值 sharp/peak/flat/valley 前若是空格仍会命中（用户决策保留现状）。
+_URL_RE = re.compile(r"(?<![A-Za-z0-9_<])/[A-Za-z][A-Za-z0-9_/{}.-]*")
 
 
 def extract_url_paths(text: str) -> list:

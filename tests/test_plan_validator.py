@@ -57,6 +57,22 @@ class TestExtractUrlPaths:
     def test_path_param_literal_kept(self):
         assert extract_url_paths("1.调用 /meter/{code}/query") == ["/meter/{code}/query"]
 
+    def test_excludes_html_end_tag_script(self):
+        # 2026-09-02：<script>alert(1)</script> 中 /script 前是 < → 负向后顾 (?<!<) 排除，
+        # 不再把 HTML 结束标签里的 /xxx 误判为接口路径
+        assert extract_url_paths('1.在名称传 "<script>alert(1)</script>"') == []
+
+    def test_excludes_field_name_slash_list(self):
+        # 2026-09-09：parkCode/placeCode、denominationHour/denominationMinite 的 / 前是 ASCII
+        # 字母 → 词边界后顾 (?<![A-Za-z0-9_<]) 排除，不再切出伪路径 /placeCode、/denominationMinite；
+        # 真实接口路径（前为空格）仍正常提取
+        assert extract_url_paths(
+            "1.调用 POST /parkingDevice/add，所属车场 parkCode/placeCode 取 MAIN-A"
+        ) == ["/parkingDevice/add"]
+        assert extract_url_paths(
+            "1.调用 POST /parkingCouponIssue/add，时长 denominationHour/denominationMinite 取 1 小时"
+        ) == ["/parkingCouponIssue/add"]
+
 
 # ============================================================
 # 2. match_api_template
@@ -111,6 +127,29 @@ class TestCheckUrls:
         bad = ExcelPlanValidator.check_urls(
             "1.调用 /electrictMeter/getPage 2.调用 /payConfig/delet 删除", REAL_URLS)
         assert "/electrictMeter/getPage" in bad and "/payConfig/delet" in bad
+
+    def test_html_script_tag_not_flagged(self):
+        # 2026-09-02 用户决策：只修 <script> HTML 标签误报；枚举值 sharp/peak/flat/valley 误报不修
+        assert ExcelPlanValidator.check_urls(
+            '1.name 传 "<script>alert(1)</script>"', REAL_URLS) == []
+
+    def test_field_name_slash_list_not_flagged(self):
+        # 2026-09-09：字段名斜杠（parkCode/placeCode、denominationHour/denominationMinite）
+        # 不再切出伪路径 → 步骤含字段名连写时，真实接口正常命中、无任何误报
+        urls = ["/parkingDevice/add", "/parkingCouponIssue/add"]
+        assert ExcelPlanValidator.check_urls(
+            "1.调用 POST /parkingDevice/add，所属车场 parkCode/placeCode 取 MAIN-A", urls) == []
+        assert ExcelPlanValidator.check_urls(
+            "1.调用 POST /parkingCouponIssue/add，时长 denominationHour/denominationMinite 取 1 小时",
+            urls) == []
+
+    def test_real_typo_still_flagged_alongside_field_slash(self):
+        # 2026-09-09：真实笔误 /parkDevice/add（库内为 /parkingDevice/add）仍应报；
+        # 同句的字段名斜杠不掺入误报清单
+        bad = ExcelPlanValidator.check_urls(
+            "1.调用 POST /parkDevice/add，所属车场 parkCode/placeCode 取 MAIN-A",
+            ["/parkingDevice/add"])
+        assert bad == ["/parkDevice/add"]
 
 
 # ============================================================

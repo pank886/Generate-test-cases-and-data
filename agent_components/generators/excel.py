@@ -204,9 +204,10 @@ class ExcelMixin:
 
     @staticmethod
     def _read_shared_preconditions(excel_path: str) -> list[dict]:
-        """读取 Excel V2 Sheet2（共享前置），返回 dict 列表。
+        """读取 Excel V2 Sheet2（前置），返回 dict 列表。
 
-        Sheet2 列: 前置编号, 前置名称, 详细步骤, 预期结果, 关联用例
+        Sheet2 列: 前置编号, 前置名称, 详细步骤, 预期结果, 关联用例, 依赖前置
+        第 6 列（依赖前置）2026-09-15 新增，旧 plan 没有该列 → 读成空串。
         """
         from openpyxl import load_workbook
         wb = load_workbook(excel_path)
@@ -224,6 +225,8 @@ class ExcelMixin:
                     "steps": row[2],         # 详细步骤
                     "expected": row[3],      # 预期结果
                     "linked_cases": row[4],  # 关联用例（逗号分隔）
+                    # 依赖前置（逗号分隔；空 = 依赖图的根，收尾 teardown 挂它身上）
+                    "depends_on": (row[5] if len(row) > 5 and row[5] else ""),
                 })
             return rows
         finally:

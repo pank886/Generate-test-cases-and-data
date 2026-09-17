@@ -104,6 +104,7 @@ def _scan_orphan_files(known_names: set, base_dir: str) -> list[dict]:
     _scan_specs = [
         ("uploads/pdf", ".pdf"), ("uploads/docx", ".docx"),
         ("uploads/product", ".pdf"), ("uploads/product", ".docx"),
+        ("uploads/product", ".xlsx"),
         ("uploads/axure", ".zip"), ("uploads/md", ".md"),
     ]
     for scan_dir, ext in _scan_specs:

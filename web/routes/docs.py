@@ -12,25 +12,66 @@ router = APIRouter(prefix="/api/docs", tags=["docs"])
 
 
 @router.get("/unassociated")
-async def get_unassociated_docs():
+async def get_unassociated_docs(type: str = "", page: int = 1,
+                                page_size: int | None = None):
     """获取所有未关联模块的文档。
 
     axure 文档额外返回 pages：[{title, required_fields}]——每个页面块
     （主块 + 隐藏面板块）一条，title=块标题（页面名/块名），
     required_fields=该块的必填字段（缺项留空），供可关联文件展示。
+
+    分页/筛选参数（2026-09-04 分页惰性改造）：
+      type: product | api | axure | ''(全部,默认)
+      page/page_size: page_size 缺省 → 全量（兼容旧调用）；page_size=0 → 仅 total/counts；
+            >0 → 按页切片。axure 的 pages 只对当页 axure 行聚合。
+    响应新增：total / counts{product,api,axure}；分页时含 page/page_size/has_more。
     """
     try:
         with get_session_ctx() as session:
             docs = DocOps.get_unassociated_docs(session)
-            result = []
+            # 各类型计数（未关联集合内，不分页；供前端 Tab/section 头）
+            counts = {t: 0 for t in ("product", "api", "axure")}
             for d in docs:
+                if d.doc_type in counts:
+                    counts[d.doc_type] += 1
+
+            typ = (type or "").strip()
+            if typ:
+                docs = [d for d in docs if d.doc_type == typ]
+            total = len(docs)
+
+            def _entry(d):
                 entry = {"doc_id": d.id, "module": "", "type": d.doc_type,
                          "doc_type": d.doc_type,
                          "chunks": d.chunk_count, "file_name": d.file_name}
+                # 页面块只对返回的 axure 行聚合（分页后每页只有少量行）
                 if d.doc_type == "axure":
                     entry["pages"] = _axure_pages_from_glossary(session, d.id)
-                result.append(entry)
-            return {"success": True, "docs": result}
+                return entry
+
+            if page_size is None:
+                # 兼容：未分页 → 全量（含全部 axure pages）
+                result = [_entry(d) for d in docs]
+                return {"success": True, "docs": result,
+                        "total": total, "counts": counts}
+
+            if page_size < 0 or page < 1:
+                return JSONResponse(status_code=400,
+                                    content={"success": False,
+                                             "message": "page/page_size 参数非法"})
+            if page_size == 0:
+                # 仅计数（建 Tab 用）
+                return {"success": True, "docs": [], "total": total,
+                        "counts": counts, "page": page, "page_size": 0,
+                        "has_more": False}
+
+            start = (page - 1) * page_size
+            slice_docs = docs[start:start + page_size]
+            result = [_entry(d) for d in slice_docs]
+            has_more = start + page_size < total
+            return {"success": True, "docs": result, "total": total,
+                    "counts": counts, "page": page, "page_size": page_size,
+                    "has_more": has_more}
     except Exception as e:
         return JSONResponse(status_code=500,
                             content={"success": False, "message": str(e)})
@@ -162,8 +203,8 @@ async def get_doc_glossary(doc_id: str):
         terms = GlossaryOps.get_terms(session, doc_id)
         # 在 session 关闭前取出所有属性，避免惰性加载
         result = [
-            {"term": t.term, "definition": t.definition, "notes": t.notes or "",
-             "kind": t.kind or "required"}
+            {"id": t.id, "term": t.term, "definition": t.definition,
+             "notes": t.notes or "", "kind": t.kind or "required"}
             for t in terms
         ]
     return {"success": True, "terms": result}

@@ -70,6 +70,8 @@ class TestQualityGateWiring:
             for i in range(confirmed)
         ]
         vr.failed_details = [(0, {"id": f"F-{i}"}, ["格式错误"]) for i in range(failed)]
+        vr.block_reasons = (
+            [f"被拦截：格式错误 —— 影响 {failed} 条用例"] if failed else [])
         return vr
 
     def test_regen_once_then_abort(self, monkeypatch):
@@ -108,6 +110,40 @@ class TestQualityGateWiring:
         assert regen_called["n"] == 1
         # 警告已注入
         assert regen_warnings[0] and "质量未达标" in regen_warnings[0]
+
+    def test_all_invalid_marks_requires_review(self, monkeypatch):
+        """全部无效（0 条可落盘）→ requires_review + error_info。
+
+        (2026-09-02) 此前该路径漏 requires_review，reply 产出误导性
+        「共 0 条用例（部分用例校验失败）」；修复后走「需人工审查」分支。
+        """
+        from agent_components.validation.case_validator import ExcelPlanValidator
+        from web.tasks import _build_phase_b_reply
+
+        agent = self._make_agent(monkeypatch)
+        # 空 plan（0/0 不触发质量门禁）→ 修复轮无用例可修 → 触发全无效守卫
+        monkeypatch.setattr(ExcelPlanValidator, "validate", Mock(
+            return_value=self._make_vr(0, 0)))
+
+        state = {
+            "excel_plan": ExcelPlanV2(shared_preconditions=[], test_cases=[]),
+            "test_point_analysis": "分析",
+            "api_definitions": [],
+            "original_input": "生成智慧用电测试用例",
+            "confirmed_module": "智慧用电",
+            "related_modules": [],
+            "output_dir": None,
+            "user_input": "生成智慧用电测试用例",
+        }
+        result = agent._generate_excel_plan_node(state)
+        assert result["excel_plan"] is None
+        assert result.get("requires_review") is True
+        assert "所有行均未通过校验" in (result.get("error_info") or [])[0]
+
+        # reply 走「需人工审查」，不再出现误导性「共 0 条用例」
+        r = _build_phase_b_reply(result, 0)
+        assert "需人工审查" in r
+        assert "共 0 条用例" not in r
 
 
 if __name__ == "__main__":

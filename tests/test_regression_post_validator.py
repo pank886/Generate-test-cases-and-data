@@ -249,3 +249,21 @@ class TestValidateAll:
         bad_path.write_text("::: not valid yaml :::", encoding="utf-8")
         issues = validator.validate_all(str(tmp_path))
         assert isinstance(issues, list)
+
+    def test_top_level_list_shape_scanned(self, tmp_path):
+        """回归（2026-09-10）：生成器写盘是顶层 list，此前被整体跳过致检查项休眠。
+
+        setup/test/teardown 产物都是顶层 list，validate_all 原只认 {data: [...]}，
+        于是 4 个检查项一个都不触发。此处锁定两种形状都要能扫。
+        """
+        validator = YamlPostValidator()
+        steps = [_make_step(
+            method="post", url="/meter/delete",
+            json_body={"body": [{"id": "001"}, {"id": "002"}]},
+        )]
+        # 直接写顶层 list（不套 {"data": ...}）—— 与生成器实际产物一致
+        yaml_path = tmp_path / "test_data.yaml"
+        with open(yaml_path, "w", encoding="utf-8") as f:
+            _yaml.dump(steps, f, allow_unicode=True)
+        issues = validator.validate_all(str(tmp_path))
+        assert any(i["check"] == "delete_body_wrapper" for i in issues)

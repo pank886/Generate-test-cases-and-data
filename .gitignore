@@ -45,6 +45,7 @@ data/
 testcase_out/
 testcase/
 vector_store/
+_last_user_msgs.txt
 
 # Phase C 生成过程产物
 _generation_errors.json
@@ -84,6 +85,9 @@ wheels/
 
 
 
-# 一次性迁移工具 + 生成数据备份（不追踪，项目结束后统一清理）
-tests/tools/migrate_chroma_to_sqlite.py
+# 生成数据备份（不追踪，项目结束后统一清理）
 tests/backups/
+
+# 手动执行产物（不计入统计，不追踪）：有作用/ = 可复用工具与归档参考实现，待整改/ = 需整改项
+#有作用/
+#待整改/

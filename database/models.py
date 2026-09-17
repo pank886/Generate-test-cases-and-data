@@ -68,7 +68,7 @@ class Module(Base):
 class Document(Base):
     """已上传的文档。
 
-    doc_type: product   — 产品文档（PDF/DOCX）
+    doc_type: product   — 产品文档（PDF/DOCX/Excel）
               api      — 接口文档（MD）
               axure    — Axure 原型（ZIP）
     """
@@ -76,7 +76,7 @@ class Document(Base):
 
     id = Column(String(200), primary_key=True)  # doc_id，与 ChromaDB 的 metadata.doc_id 一致
     file_name = Column(String(300), nullable=False)
-    file_type = Column(String(20), nullable=False)   # pdf / docx / md / zip
+    file_type = Column(String(20), nullable=False)   # pdf / docx / xlsx / md / zip
     doc_type = Column(String(20), nullable=False)     # product / api / axure
     upload_time = Column(DateTime, default=lambda: datetime.now(timezone.utc))
     status = Column(String(20), default="pending")    # pending / bound

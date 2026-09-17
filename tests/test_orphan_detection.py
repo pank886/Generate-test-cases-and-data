@@ -143,3 +143,9 @@ class TestOrphanDetection:
         _make_file(tmp_upload_dirs, "uploads/product/p2.docx")
         orphans = self._call(tmp_upload_dirs, set())
         assert len(orphans) == 2
+
+    def test_product_xlsx_scanned(self, tmp_upload_dirs):
+        """product 目录下的 .xlsx 孤儿也被检出（支持 Excel 上传后的一致性回归）。"""
+        _make_file(tmp_upload_dirs, "uploads/product/orphan.xlsx")
+        orphans = self._call(tmp_upload_dirs, set())
+        assert any("orphan.xlsx" in o["path"] for o in orphans)

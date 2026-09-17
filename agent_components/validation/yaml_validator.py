@@ -32,7 +32,12 @@ class YamlPostValidator:
     # ---- 公共入口 ----
 
     def validate_all(self, output_dir: str) -> list[dict]:
-        """遍历所有 YAML 文件，执行全部注册的检查项。"""
+        """遍历所有 YAML 文件，执行全部注册的检查项。
+
+        形状兼容（2026-09-10 修复）：生成器实际写盘为**顶层 list**，
+        而此处原只认 {data: [...]}，导致全部文件被 continue、4 个检查项休眠。
+        现两种形状都接受（与 _scan_missing_key_refs 的说明同源）。
+        """
         issues: list[dict] = []
         pattern = os.path.join(output_dir, "**", "*.yaml")
         yaml_files = glob.glob(pattern, recursive=True)
@@ -42,9 +47,15 @@ class YamlPostValidator:
                     data = yaml.safe_load(f) or {}
             except Exception:
                 continue
-            if not isinstance(data, dict) or "data" not in data:
+            if isinstance(data, dict):
+                steps = data.get("data")
+            elif isinstance(data, list):
+                steps = data
+            else:
                 continue
-            for step in data.get("data") or []:
+            if not isinstance(steps, list):
+                continue
+            for step in steps:
                 if not isinstance(step, dict):
                     continue
                 issues.extend(self._check_delete_body_wrapper(step, path))
@@ -215,6 +226,192 @@ def _find_missing_yaml_refs(output_base: str, project_root: str) -> list:
         if not os.path.exists(os.path.join(project_root, r)):
             missing.append(r)
     return missing
+
+
+# ==================== V1–V5：车场绑定值形态校验（停车模块，2026-09-10） ====================
+#
+# 背景：智慧停车 Round 3 定量 —— parkingPark/saveOrUpdate 79 次调用中 47 次失败，
+# 其中 44 次同属一条根因：bindPayCode 最终没有以「标量编码」形态送达服务端。
+#   B 类 28 次 字面量 'RULE-HOME'/'RULE-CHILD'（回退成测试计划里的规则名）  → V2
+#   D 类 10 次 空串 ''                                                    → V1
+#   E 类  4 次 extract_list 产出的列表被 str() 降级成 "['zhyqC…']"        → V5
+#   其余        键未经回读声明 / 缺整条读回链                              → V3 / V4
+#
+# 标定（拿 Round 3 真实产物 47 个 setup 跑）：命中 20/20 个失败 setup，0 误报，0 漏报。
+# 注意 V1 闸门是 mainPark 或 needPay（实测 mainPark=1/needPay=0 且 bindPayCode='' 同样被
+# 服务端拒："主场类型必须要绑定计费"）；V2 不再加闸门——mainPark=0 时绑字面量照样失败。
+#
+# V6（把 extract_list 键的索引检查泛化到全模块全字段）本轮只登记不实现。
+
+_BIND_CHAIN = {
+    "bind_url_suffix": "/parkingPark/saveOrUpdate",
+    "parent": "parkingPark",
+    "field": "bindPayCode",
+    "main_flag": "mainPark",
+    "need_pay_flag": "needPay",
+    "rule_add_suffix": "/parkingPaymentConfig/add",
+    "rule_page_suffix": "/parkingPaymentConfig/getParkingPaymentConfigPage",
+}
+
+_EXTRACT_BLOCKS = ("input_extract", "extract", "extract_list")
+_EXTRACT_LIST_BLOCK = "extract_list"
+_TRUTHY = (True, "true", "True", 1, "1")
+
+_GET_EXTRACT_QUOTED_RE = re.compile(
+    r"\$\{\s*get_extract_data\(\s*['\"]([^'\"]+)['\"]\s*(?:,\s*([^)]*?)\s*)?\)\s*\}")
+_SPLIT_EXTRACT_RE = re.compile(
+    r"\$\{\s*split_extract_data\(\s*['\"]([^'\"]+)['\"]\s*(?:,\s*([^)]*?)\s*)?\)\s*\}")
+
+
+def _bind_issue(yaml_path: str, check: str, step_idx: int, case_name: str,
+                current: str, expected: str, fix_hint: str) -> dict:
+    """V1–V5 统一问题结构（与 validate_all 同构，便于共用修复轮通道）。"""
+    return {
+        "yaml_path": yaml_path,
+        "check": check,
+        "severity": "P0",
+        "line": 0,
+        "current": f"step#{step_idx} {current}",
+        "expected": expected,
+        "fix_hint": fix_hint,
+        "case_name": case_name,
+    }
+
+
+def _scan_extract_value_forms(output_base: str) -> list:
+    """V1–V5：车场绑定值 bindPayCode 形态校验（纯代码）。
+
+    直读生成器实际写盘的**顶层 list**，不经 YamlPostValidator.validate_all ——
+    后者只认 {data: [...]} 形状，对顶层 list 全部 continue（与 _scan_missing_key_refs
+    记录的是同一个格式错位）。且 V4 要看整份 setup 的步骤序列，逐 step 检查看不到。
+
+    返回结构同 validate_all，P0 由 yaml_gen 的追加修复轮直接消费。
+    """
+    issues: list[dict] = []
+    pattern = os.path.join(output_base, "**", "setup_*.yaml")
+    for fp in sorted(glob.glob(pattern, recursive=True)):
+        try:
+            with open(fp, encoding="utf-8") as f:
+                raw = yaml.safe_load(f)
+        except Exception:
+            continue
+        steps = raw.get("data") if isinstance(raw, dict) else raw
+        if not isinstance(steps, list):
+            continue
+        issues.extend(_check_bind_forms_in_setup(steps, fp))
+    return issues
+
+
+def _check_bind_forms_in_setup(steps: list, yaml_path: str) -> list:
+    """单份 setup 的 V1–V5 判定。步骤序列与提取声明先预扫，再逐绑定步检查。"""
+    declared: dict = {}   # 提取键 -> (声明步序, 声明块名)，取首次声明
+    urls: list = []       # 步序 -> url
+    for i, step in enumerate(steps):
+        if not isinstance(step, dict):
+            urls.append("")
+            continue
+        urls.append(str((step.get("baseInfo") or {}).get("url", "")))
+        for tc in step.get("testCase") or []:
+            if not isinstance(tc, dict):
+                continue
+            for blk in _EXTRACT_BLOCKS:
+                for key in (tc.get(blk) or {}):
+                    declared.setdefault(key, (i, blk))
+
+    cfg = _BIND_CHAIN
+    issues: list[dict] = []
+    for i, step in enumerate(steps):
+        if not isinstance(step, dict) or not urls[i].endswith(cfg["bind_url_suffix"]):
+            continue
+        for tc in step.get("testCase") or []:
+            if not isinstance(tc, dict):
+                continue
+            parent = (tc.get("json") or {}).get(cfg["parent"])
+            if not isinstance(parent, dict):
+                continue
+            case_name = tc.get("case_name", "")
+            value = parent.get(cfg["field"])
+
+            # ---- V1：主场/开计费时绑定值不得缺失或为空串 ----
+            if value is None or str(value).strip() == "":
+                if (parent.get(cfg["main_flag"]) in _TRUTHY
+                        or parent.get(cfg["need_pay_flag"]) in _TRUTHY):
+                    issues.append(_bind_issue(
+                        yaml_path, "bind_pay_code_empty", i, case_name,
+                        f"{cfg['parent']}.{cfg['field']} 为空"
+                        f"（{cfg['main_flag']}={parent.get(cfg['main_flag'])!r},"
+                        f" {cfg['need_pay_flag']}={parent.get(cfg['need_pay_flag'])!r}）",
+                        f"必须是 ${{get_extract_data('键')}} / ${{split_extract_data('键', 索引)}} 形态",
+                        "主场或已开计费的车场必须绑经查询回读到的真实收费规则编码，"
+                        "不得留空。服务端会拒：主场类型必须要绑定计费"))
+                continue
+
+            # ---- V2：非空时必须是带引号的提取引用，不得字面量 ----
+            quoted = _GET_EXTRACT_QUOTED_RE.search(str(value))
+            m = quoted or _SPLIT_EXTRACT_RE.search(str(value))
+            if m is None:
+                is_bare = ("get_extract_data(" in str(value)
+                           or "split_extract_data(" in str(value))
+                kind = "裸键引用（键未加引号）" if is_bare else "字面量"
+                issues.append(_bind_issue(
+                    yaml_path, "bind_pay_code_literal", i, case_name,
+                    f"{cfg['parent']}.{cfg['field']} = {value!r}（{kind}）",
+                    f"${{get_extract_data('键')}} / ${{split_extract_data('键', 索引)}}",
+                    "绑定值必须引用由查询回读步骤提取的键，不得写规则名等字面量，"
+                    "键名必须带用例前缀且加引号" if is_bare else
+                    "绑定值必须是提取引用，不得写规则名/编码字面量（服务端会拒："
+                    "绑定的临停收费规则不存在或类型不正确）"))
+                continue
+
+            key = m.group(1)
+            arg = (m.group(2) or "").strip()
+
+            # ---- V3：键必须由更早步骤声明 ----
+            loc = declared.get(key)
+            if loc is None:
+                issues.append(_bind_issue(
+                    yaml_path, "bind_pay_code_undeclared", i, case_name,
+                    f"引用键 {key!r} 在本 setup 全文件未声明",
+                    f"键需由更早步骤的 {'/'.join(_EXTRACT_BLOCKS)} 声明",
+                    "引用了一个无人产出的键，运行时必 KeyError。需补回读步骤或改用已声明的键"))
+                continue
+            decl_i, decl_blk = loc
+            if decl_i >= i:
+                issues.append(_bind_issue(
+                    yaml_path, "bind_pay_code_undeclared", i, case_name,
+                    f"引用键 {key!r} 声明于 step#{decl_i}，不早于引用步 step#{i}",
+                    "声明步必须早于引用步",
+                    "提取键必须先声明后引用，需调整步骤顺序"))
+                continue
+
+            # ---- V4：声明步必须是分页回读步，且其之前存在规则 add 步 ----
+            # 不能用「第一个分页步」比对——一个 setup 可含多组 add/回读对
+            if not urls[decl_i].endswith(cfg["rule_page_suffix"]):
+                issues.append(_bind_issue(
+                    yaml_path, "bind_pay_code_no_readback", i, case_name,
+                    f"引用键 {key!r} 由 step#{decl_i}({decl_blk}) 声明，该步不是分页回读步",
+                    f"键需由 {cfg['rule_page_suffix']} 步骤的响应提取声明",
+                    "绑定值必须取自收费规则分页查询的回读结果，不能来自其它步骤的响应"))
+                continue
+            if not any(u.endswith(cfg["rule_add_suffix"]) for u in urls[:decl_i]):
+                issues.append(_bind_issue(
+                    yaml_path, "bind_pay_code_no_readback", i, case_name,
+                    f"引用键 {key!r} 的回读步 step#{decl_i} 之前没有规则添加步",
+                    f"回读步之前需有 {cfg['rule_add_suffix']} 步",
+                    "缺整条读回链：需先添加收费规则、再分页查询回读其编码，"
+                    "否则读回的是历史规则甚至空列表"))
+                continue
+
+            # ---- V5：extract_list 键的 get_extract_data 引用必须带索引 ----
+            # split_extract_data 默认 index=0，裸用安全，不在此列
+            if decl_blk == _EXTRACT_LIST_BLOCK and quoted and not arg:
+                issues.append(_bind_issue(
+                    yaml_path, "bind_pay_code_missing_index", i, case_name,
+                    f"引用键 {key!r} 源自 {_EXTRACT_LIST_BLOCK}，但引用无索引",
+                    f"${{get_extract_data('{key}', 1)}} 或 ${{split_extract_data('{key}', 0)}}",
+                    "extract_list 产出的是列表，裸引用会被框架替换层 str() 成 \"['…']\" "
+                    "字符串静默失真，必须带索引取标量"))
+    return issues
 
 
 def _scan_missing_key_refs(output_base: str, setup_keys: dict) -> list:

@@ -310,8 +310,15 @@ class RetrievalMixin:
         return self._compensate_api_defs_from_sqlite(doc_ids)
 
     @staticmethod
-    def _compensate_api_defs_from_sqlite(doc_ids: list[str] | None = None) -> list[dict]:
-        """ChromaDB 不可用时，从 SQLite documents.api_* 列即时补偿 API 定义。"""
+    def _load_api_defs_full(doc_ids: list[str] | None = None,
+                            limit: int | None = None) -> list[dict]:
+        """从 SQLite documents.api_* 全量直取 API 定义（主模块绑定接口的权威源）。
+
+        与 `_search_api_defs` 的语义 top-K 不同：本方法按 doc_ids 精确过滤、默认不截断，
+        返回该范围内全部接口记录 —— **主模块直接关联的接口应在 SQLite 绑定上全量获取**，
+        语义检索只留给关联/公共模块绑定接口（2026-09-08 方案C，见
+        changelog/2026-09-08_url_validation_whitelist_bound_scope.md）。
+        """
         import json as _json
         from database import get_session_ctx
         from database.models import Document as DocModel
@@ -321,22 +328,34 @@ class RetrievalMixin:
                 q = session.query(DocModel).filter_by(doc_type="api")
                 if doc_ids:
                     q = q.filter(DocModel.id.in_(doc_ids))
-                records = q.limit(config.RETRIEVAL_K).all()
-                for d in records:
+                if limit:
+                    q = q.limit(limit)
+                for d in q.all():
                     if d.api_url:
-                        api = {
+                        apis.append({
                             "name": d.api_name, "url": d.api_url,
                             "method": d.api_method, "description": d.api_description,
                             "header": _json.loads(d.api_headers or "{}"),
                             "body": _json.loads(d.api_parameters or "[]"),
                             "return": _json.loads(d.api_returns or "[]"),
                             "annotations": _json.loads(d.api_annotations or "{}"),
-                            "source": d.id, "_compensated": True,
-                        }
-                        apis.append(api)
-            logger.info(f"   SQLite 即时补偿: {len(apis)} 条 API 定义")
+                            "source": d.id,
+                        })
+            logger.info(f"   SQLite 直取 API 定义: {len(apis)} 条")
         except Exception as e:
-            logger.warning("SQLite 即时补偿也失败: %s", e)
+            logger.warning("SQLite 直取 API 定义失败: %s", e)
+        return apis
+
+    @staticmethod
+    def _compensate_api_defs_from_sqlite(doc_ids: list[str] | None = None) -> list[dict]:
+        """ChromaDB 空/异常兜底：复用 `_load_api_defs_full`，标记 `_compensated`。
+
+        行为与上限（RETRIEVAL_K）与原实现一致，仅委托给共享直取函数，避免双份查询代码。
+        """
+        apis = RetrievalMixin._load_api_defs_full(doc_ids, limit=config.RETRIEVAL_K)
+        for a in apis:
+            a["_compensated"] = True
+        logger.info(f"   SQLite 即时补偿: {len(apis)} 条 API 定义")
         return apis
 
     # ---- 节点 1：意图识别与推荐 ----
@@ -527,7 +546,12 @@ class RetrievalMixin:
             else:
                 logger.debug("模块 [%s] 不存在，跳过", _base_mod)
 
+            # 主模块：直接关联接口在 SQLite 绑定上全量直取（权威源，非语义 top-K）。
+            # 放最后追加 → 同 method+url 接口若也被关联模块绑定并语义检索到，_dedup_api_defs
+            # 后写覆盖先写，主模块直取全量版胜出（2026-09-08 方案C）。
             for mod in search_modules:
+                if mod == confirmed_module:
+                    continue  # 主模块统一走下方直取分支
                 bound_docs = BindingOps.get_bound_docs(session, mod)
                 doc_ids = [d.id for d in bound_docs if d.doc_type == "api"]
                 if not doc_ids:
@@ -536,6 +560,16 @@ class RetrievalMixin:
                 if apis:
                     api_defs.extend(apis)
                     logger.info(f"   + 接口: {mod} ({len(apis)} 个)")
+
+            if confirmed_module:
+                bound_docs = BindingOps.get_bound_docs(session, confirmed_module)
+                main_doc_ids = [d.id for d in bound_docs if d.doc_type == "api"]
+                if main_doc_ids:
+                    apis = self._load_api_defs_full(main_doc_ids)
+                    if apis:
+                        api_defs.extend(apis)
+                        logger.info(
+                            f"   + 接口: {confirmed_module} 主模块全量直取 ({len(apis)} 个)")
 
         # 接口去重（同一接口绑定到多个模块时只保留一份，后出现的覆盖先出现的；
         # method/url 缺失时按 doc_id 兜底，避免不同接口塌缩成一条）

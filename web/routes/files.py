@@ -25,6 +25,49 @@ def _win_remove(path: str, max_retries: int = 3):
                 raise
 
 
+async def _merged_uploaded_state() -> tuple[list[dict], bool]:
+    """上传页文件列表数据源：SQLite 全量 + 内存合并（uploaded_files / 批量删除共用口径）。
+
+    返回 (merged_row_list, vector_ready)。row 字段同历史 uploaded_files 响应：
+    name/type/chunks/time/doc_id/status/size。DB 行按 upload_time DESC（查询层已排），
+    内存「处理中/多出」条目（无 doc_id）附在末尾。
+    """
+    from database import get_session_ctx
+    from database.operations import DocOps
+    from web.state import _get_imported_files
+    from infrastructure.observability import get_logger
+
+    db_files = []
+    try:
+        with get_session_ctx() as session:
+            for d in DocOps.get_all_documents(session):
+                db_files.append({
+                    "name": d.file_name,
+                    "type": d.doc_type,
+                    "chunks": d.chunk_count,
+                    "time": d.upload_time.strftime("%Y-%m-%d %H:%M:%S")
+                    if d.upload_time else "",
+                    "doc_id": d.id,
+                    "status": d.status or "",
+                })
+    except Exception:
+        get_logger(__name__).warning("无法查询 SQLite 文档列表", exc_info=True)
+
+    mem = await _get_imported_files()
+    mem_by_name = {f["name"]: f for f in mem}
+    merged = []
+    seen = set()
+    for d in db_files:
+        m = mem_by_name.get(d["name"], {})
+        d["size"] = m.get("size", "—")
+        merged.append(d)
+        seen.add(d["name"])
+    for f in mem:
+        if f["name"] not in seen:
+            merged.append({**f, "doc_id": "", "status": ""})
+    return merged, bool(mem)
+
+
 router = APIRouter(prefix="/api/files", tags=["files"])
 
 
@@ -41,7 +84,7 @@ async def upload_file(file: UploadFile = File(...),
     # 防路径遍历：只取纯文件名
     filename = _os.path.basename(raw_filename)
     ext = _os.path.splitext(filename)[1].lower()
-    type_map = {".pdf": "product", ".md": "md", ".json": "md", ".docx": "product", ".zip": "axure", ".yml": "md", ".yaml": "md"}
+    type_map = {".pdf": "product", ".md": "md", ".json": "md", ".docx": "product", ".xlsx": "product", ".zip": "axure", ".yml": "md", ".yaml": "md"}
     file_type = type_map.get(ext)
     if file_type is None:
         supported = ", ".join(type_map.keys())
@@ -217,46 +260,131 @@ async def delete_file(filename: str = Form(...)):
                             content={"success": False, "message": str(e)})
 
 
-@router.get("/uploaded-files")
-async def uploaded_files():
-    """获取已导入文件列表（以 SQLite 为准，合并内存中的文件大小）。"""
-    from database import get_session_ctx
-    from database.operations import DocOps
-    from web.state import _get_imported_files
-    from infrastructure.observability import get_logger
+@router.post("/batch-delete-files")
+async def batch_delete_files(data: dict):
+    """批量删除文件：按名单或按筛选（type+q）一次删除，单条清理与 delete_file 完全同语义。
 
-    db_files = []
-    try:
-        with get_session_ctx() as session:
-            for d in DocOps.get_all_documents(session):
-                db_files.append({
-                    "name": d.file_name,
-                    "type": d.doc_type,
-                    "chunks": d.chunk_count,
-                    "time": d.upload_time.strftime("%Y-%m-%d %H:%M:%S")
-                    if d.upload_time else "",
-                    "doc_id": d.id,
-                    "status": d.status or "",
-                })
-    except Exception:
-        get_logger(__name__).warning("无法查询 SQLite 文档列表", exc_info=True)
+    支持「分页后跨页全选 → 全部删除」：前端只掌握已加载页，无法提供未翻页行名单，
+    故 filter 分支由服务端按与列表同口径（_merged_uploaded_state）解析出全部匹配名单再逐条删除。
 
-    mem = await _get_imported_files()
-    mem_by_name = {f["name"]: f for f in mem}
-    merged = []
+    body（二选一）:
+      {"names": ["a.pdf", ...]}                       // 部分勾选：逐条名单
+      {"filter": {"type": "api|product|axure|''",     // 跨页全选：按筛选删除
+                   "q": "文件名包含(可选)"}}
+    响应: {success, deleted, failed, errors: [name,...]}（幂等：无匹配 deleted=0）。
+    """
+    filter_spec = data.get("filter")
+    names = data.get("names")
+
+    if not filter_spec and not names:
+        return JSONResponse(status_code=400,
+                            content={"success": False,
+                                     "message": "缺少 names 或 filter"})
+
+    if names is not None:
+        if not isinstance(names, list):
+            return JSONResponse(status_code=400,
+                                content={"success": False,
+                                         "message": "names 需为数组"})
+        names = [str(n) for n in names if str(n).strip()]
+    else:
+        typ = (filter_spec.get("type") or "").strip()
+        query = (filter_spec.get("q") or "").strip().lower()
+        merged, _ = await _merged_uploaded_state()
+        def _keep(r: dict) -> bool:
+            if typ and r.get("type") != typ:
+                return False
+            if query and query not in (r.get("name") or "").lower():
+                return False
+            return True
+        names = [r["name"] for r in merged if _keep(r)]
+
+    deleted = 0
+    failed = 0
+    errors = []
     seen = set()
-    for d in db_files:
-        m = mem_by_name.get(d["name"], {})
-        d["size"] = m.get("size", "—")
-        merged.append(d)
-        seen.add(d["name"])
-    for f in mem:
-        if f["name"] not in seen:
-            merged.append({**f, "doc_id": "", "status": ""})
+    for nm in names:
+        if nm in seen:
+            continue
+        seen.add(nm)
+        try:
+            resp = await delete_file(filename=nm)
+            ok = resp.get("success") if isinstance(resp, dict) else False
+            if ok:
+                deleted += 1
+            else:
+                failed += 1
+                errors.append(nm)
+        except Exception:
+            failed += 1
+            errors.append(nm)
 
-    # _vector_ready 由 helper 内部的 _add_imported_file 自动维护，
-    # 这里只需判断文件列表是否为空
-    return {"files": merged, "vector_ready": bool(mem)}
+    return {"success": True, "deleted": deleted, "failed": failed,
+            "errors": errors}
+
+
+@router.get("/uploaded-files")
+async def uploaded_files(type: str = "", q: str = "", page: int = 1,
+                         page_size: int | None = None):
+    """获取已导入文件列表（以 SQLite 为准，合并内存中的文件大小）。
+
+    分页/筛选参数（2026-09-04 分页惰性改造）：
+      type: product | api | axure | ''(全部，默认)
+      q   : 文件名包含检索（不区分大小写）
+      page/page_size: 分页。page_size 缺省 → 返回符合条件全量 + 旧字段（兼容旧调用）；
+            page_size=0 → 仅返回 total/counts（不返回行）；page_size>0 → 按页切片。
+    响应新增字段（旧调用忽略即可）：
+      total : 当前 type+q 过滤后的总数
+      counts: {product,api,axure} 各类型总数（应用 q、不含 type，供 section 头/Tab）
+      page/page_size/has_more: 仅当 page_size 给出时存在
+    """
+    merged, vector_ready = await _merged_uploaded_state()
+
+    # 过滤（type + q 文件名包含，不区分大小写）
+    typ = (type or "").strip()
+    query = (q or "").strip().lower()
+    def _keep(r: dict) -> bool:
+        if typ and r.get("type") != typ:
+            return False
+        if query and query not in (r.get("name") or "").lower():
+            return False
+        return True
+
+    filtered = [r for r in merged if _keep(r)]
+
+    # 各类型总数（应用 q、不区分 type），供「全部」视图 section 头/Tab 真实计数
+    counts = {t: 0 for t in ("product", "api", "axure")}
+    for r in merged:
+        t = r.get("type")
+        if t not in counts:
+            continue
+        if query and query not in (r.get("name") or "").lower():
+            continue
+        counts[t] += 1
+
+    total = len(filtered)
+
+    if page_size is None:
+        # 兼容：未分页 → 全量 + 旧字段
+        return {"files": filtered, "total": total, "counts": counts,
+                "vector_ready": vector_ready}
+
+    if page_size < 0 or page < 1:
+        return JSONResponse(status_code=400,
+                            content={"success": False, "message": "page/page_size 参数非法"})
+
+    if page_size == 0:
+        # 仅计数（前端建 Tab / section 头用）
+        return {"files": [], "total": total, "counts": counts,
+                "page": page, "page_size": 0, "has_more": False,
+                "vector_ready": vector_ready}
+
+    start = (page - 1) * page_size
+    page_rows = filtered[start:start + page_size]
+    has_more = start + page_size < total
+    return {"files": page_rows, "total": total, "counts": counts,
+            "page": page, "page_size": page_size, "has_more": has_more,
+            "vector_ready": vector_ready}
 
 
 @router.post("/open-file")

@@ -71,6 +71,69 @@ async def get_task_status(task_id: str):
 
 
 # ----------------------------------------------------------------
+# Phase C 独立工作流端点（单独重跑 YAML 数据，2026-09-09）
+# ----------------------------------------------------------------
+
+@router.post("/phase-c/start")
+async def phase_c_start(background_tasks: BackgroundTasks = None):
+    """Phase C 独立入口：列出可单独重跑数据生成的模块（含约定 context 文件）。
+
+    与 Phase B 不同，Phase C 重跑不检索产品文档/向量库——只需要模块目录里已有的
+    test_plan.xlsx + api_defs.json + phase_c_user_context.md。返回候选模块供前端
+    渲染按钮，选择后走 /workflow/confirm（session flow="phase_c" 分支）。
+    """
+    import time
+    import uuid
+    import infrastructure.config as config
+    from web.tasks import _list_phase_c_module_dirs
+    from web.state import (
+        _workflow_sessions, _workflow_sessions_lock, _cleanup_expired_sessions,
+    )
+
+    await _cleanup_expired_sessions()
+
+    dirs = _list_phase_c_module_dirs(config.TESTCASE_BASE)
+    if not dirs:
+        return {
+            "success": True,
+            "session_id": "",
+            "status": "no_match",
+            "candidates": [],
+            "question": (
+                "未找到带 phase_c_user_context.md 的已生成模块。\n"
+                "请先在模块目录（test_plan.xlsx 旁）创建 phase_c_user_context.md，"
+                "或先运行 Phase B 生成测试计划。"
+            ),
+        }
+
+    session_id = uuid.uuid4().hex
+    candidates = [os.path.basename(d.rstrip(os.sep)) for d in dirs]
+    async with _workflow_sessions_lock:
+        _workflow_sessions[session_id] = {
+            "state": {
+                "flow": "phase_c",
+                "candidate_modules": candidates,
+                "candidate_paths": dirs,
+                "workflow_status": "WAITING",
+            },
+            "created_at": time.time(),
+        }
+
+    question = (
+        "以下模块已具备可单独重跑的 YAML 数据生成条件（test_plan.xlsx + "
+        "api_defs.json + phase_c_user_context.md），请选择要重跑的模块：\n"
+        + "\n".join(f"{i + 1}. {name}" for i, name in enumerate(candidates))
+    )
+    return {
+        "success": True,
+        "session_id": session_id,
+        "status": "waiting",
+        "question": question,
+        "candidates": candidates,
+    }
+
+
+# ----------------------------------------------------------------
 # Phase B 多轮工作流端点
 # ----------------------------------------------------------------
 
@@ -187,6 +250,39 @@ async def workflow_confirm(session_id: str = Form(...),
 
     candidates: list[str] = state.get("candidate_modules") or []
 
+    # Phase C 独立工作流：仅 YAML 数据重跑（flow="phase_c"），不进入 Phase B 图
+    if state.get("flow") == "phase_c":
+        candidate_paths: list[str] = state.get("candidate_paths") or []
+        confirmed_dir: str | None = None
+        stripped = choice.strip()
+
+        # 策略1: 纯数字 → 序号匹配
+        if stripped.isdigit():
+            idx = int(stripped) - 1
+            if 0 <= idx < len(candidate_paths):
+                confirmed_dir = candidate_paths[idx]
+
+        # 策略2: 精确匹配候选模块名（或完整路径）
+        if not confirmed_dir:
+            if stripped in candidates:
+                idx = candidates.index(stripped)
+                if 0 <= idx < len(candidate_paths):
+                    confirmed_dir = candidate_paths[idx]
+            elif stripped in candidate_paths:
+                confirmed_dir = stripped
+
+        if not confirmed_dir:
+            return JSONResponse(status_code=404,
+                                content={"success": False,
+                                         "message": f"未识别到模块 '{stripped}'，请返回重新选择"})
+
+        task_id = await _create_task()
+        from web.tasks import _phase_c_rerun_bg
+        background_tasks.add_task(_phase_c_rerun_bg, task_id, confirmed_dir, session_id)
+        return {"success": True, "task_id": task_id, "status": "running",
+                "message": f"已选择模块 [{os.path.basename(confirmed_dir.rstrip(os.sep))}]，"
+                           f"正在重跑 YAML 数据生成..."}
+
     # 解析用户选择
     confirmed_module: str | None = None
 
@@ -239,3 +335,56 @@ async def workflow_confirm(session_id: str = Form(...),
     # session 由后台任务在完成/失败后清理；异常退出时靠 TTL（1800s）自动过期不泄漏
     return {"success": True, "task_id": task_id, "status": "running",
             "message": f"已确认模块 [{confirmed_module}]，正在生成测试计划..."}
+
+
+# ----------------------------------------------------------------
+# Phase C 定向重跑端点（2026-09-09）
+# ----------------------------------------------------------------
+
+@router.post("/phase-c/selective-rerun")
+async def phase_c_selective_rerun(module_dir: str = Form(...),
+                                  junit_path: str = Form(""),
+                                  log_path: str = Form(""),
+                                  run_ts: str = Form(""),
+                                  background_tasks: BackgroundTasks = None):
+    """Phase C 定向重跑：按模块 .last_run.json 落点只重生成失败/破损相关 YAML。
+
+    输入：模块目录（test_plan.xlsx 旁）；可选 junit/log/run_ts —— 缺省自动定位框架
+    （config.PYCHARM_MISC）下最新的 report/junit.xml 与 log/test.<ts>.log。
+    依据见 web/tasks._selective_phase_c_rerun_bg。不改全量分支 /workflow/confirm。
+    """
+    import glob
+    import infrastructure.config as config
+    from web.state import _create_task
+    from web.tasks import _selective_phase_c_rerun_bg
+
+    module_dir = os.path.abspath(module_dir)
+    if not os.path.isdir(module_dir):
+        return JSONResponse(status_code=400,
+                            content={"success": False,
+                                     "error": f"模块目录不存在: {module_dir}"})
+
+    def _resolve_defaults(junit: str, log: str) -> tuple:
+        """框架侧默认落点：report/junit.xml（覆盖式）+ log/test.<ts>.log（最新）。"""
+        base = config.PYCHARM_MISC
+        if base:
+            cand = os.path.join(base, "report", "junit.xml")
+            if not junit and os.path.isfile(cand):
+                junit = cand
+            if not log:
+                hits = glob.glob(os.path.join(base, "log", "test.*.log"))
+                if hits:
+                    log = max(hits, key=lambda p: os.path.getmtime(p))
+        return (junit or None, log or None)
+
+    junit_path, log_path = _resolve_defaults(junit_path, log_path)
+
+    task_id = await _create_task()
+    background_tasks.add_task(
+        _selective_phase_c_rerun_bg, task_id, module_dir,
+        junit_path=junit_path, log_path=log_path,
+        run_ts=(run_ts or None),
+    )
+    return {"success": True, "task_id": task_id, "status": "running",
+            "message": f"已启动模块 [{os.path.basename(module_dir.rstrip(os.sep))}] 的"
+                       f"Phase C 定向重跑（依据 .last_run.json 落点）..."}
